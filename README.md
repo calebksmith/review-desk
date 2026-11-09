@@ -19,7 +19,7 @@ npm install
 npm run build
 ```
 
-Then press F5 in VS Code to open an Extension Development Host, and run **Review Desk: Open** from the Command Palette. It signs in with your GitHub account in VS Code and reviews the `origin` repo of the open folder.
+Then press F5 in VS Code to open an Extension Development Host, and run **Review Desk: Open** from the Command Palette. It signs in with your GitHub account in VS Code and reviews the open folder's GitHub repo. If several folders are open, it asks which repo to review and remembers your choice for that workspace. To review a different one, run **Review Desk: Switch repository**: pick an open folder's repo or type any `owner/name`.
 
 **Review Desk: Open with sample data** works without GitHub. To see the UI in a browser instead, run `npm run preview` and open `.preview/index.html` (add `?theme=dark` for dark).
 
@@ -29,7 +29,7 @@ To install it as a normal extension, run `npm run package` and install the `.vsi
 
 | Setting | What it does |
 | --- | --- |
-| `reviewDesk.repository` | Review this `owner/name` instead of the open folder's remote |
+| `reviewDesk.repository` | Always review this `owner/name`. **Switch repository** updates it when it's set |
 | `reviewDesk.label` | Only show PRs with this label, such as `review-desk` |
 
 ## How it's built
@@ -41,6 +41,7 @@ The extension host talks to GitHub; the webview only renders. `src/controller.ts
 | `src/extension.ts` | Commands, GitHub sign-in, the webview panel |
 | `src/github.ts` | GitHub REST and GraphQL calls |
 | `src/controller.ts` | Review state and the messages the webview sends |
+| `src/repos.ts` | Which repo to review: the setting, your last pick, or the folders that are open |
 | `src/protocol.ts` | Types shared by the host and the webview |
 | `src/sample.ts` | Sample PRs for demos and tests |
 | `webview/` | The panel's UI, styled from the VS Code theme |

@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { Controller, type Host } from './controller';
 import { GitHubSource } from './github';
 import type { FromWebview } from './protocol';
-import { parseRemote } from './remote';
+import { defaultRepository, githubRepos, parseRepositoryInput } from './repos';
 import { SampleSource } from './sample';
 import type { DataSource } from './source';
 
@@ -11,43 +11,99 @@ let panel: vscode.WebviewPanel | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand('reviewDesk.open', async () => {
-      try {
-        open(context, await githubSource(false));
-      } catch (err) {
-        vscode.window.showErrorMessage(`Review Desk: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    command('reviewDesk.open', async () => {
+      const repo = await repository(context, false);
+      if (repo) open(context, await githubSource(repo, false));
     }),
     vscode.commands.registerCommand('reviewDesk.openSample', () => open(context, new SampleSource())),
-    vscode.commands.registerCommand('reviewDesk.signOut', async () => {
-      try {
-        open(context, await githubSource(true));
-      } catch (err) {
-        vscode.window.showErrorMessage(`Review Desk: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    command('reviewDesk.switchRepository', async () => {
+      const repo = await repository(context, true);
+      if (repo) open(context, await githubSource(repo, false));
+    }),
+    command('reviewDesk.signOut', async () => {
+      const repo = await repository(context, false);
+      if (repo) open(context, await githubSource(repo, true));
     }),
   );
 }
 
 export function deactivate(): void {}
 
-async function githubSource(switchAccount: boolean): Promise<DataSource> {
-  const session = await vscode.authentication.getSession('github', SCOPES, switchAccount ? { clearSessionPreference: true, createIfNone: true } : { createIfNone: true });
-  return new GitHubSource(session.accessToken, await repository());
+/** Registers a command that shows its errors instead of failing silently. */
+function command(id: string, run: () => Promise<void>): vscode.Disposable {
+  return vscode.commands.registerCommand(id, async () => {
+    try {
+      await run();
+    } catch (err) {
+      vscode.window.showErrorMessage(`Review Desk: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
 }
 
-/** The repo from settings, or the GitHub remote of the open folder. */
-async function repository(): Promise<string> {
-  const configured = vscode.workspace.getConfiguration('reviewDesk').get<string>('repository')?.trim();
-  if (configured) return configured;
+async function githubSource(repo: string, switchAccount: boolean): Promise<DataSource> {
+  const session = await vscode.authentication.getSession('github', SCOPES, switchAccount ? { clearSessionPreference: true, createIfNone: true } : { createIfNone: true });
+  return new GitHubSource(session.accessToken, repo);
+}
+
+/**
+ * The repo to review. Open uses the setting, the last pick in this workspace, or the only GitHub repo
+ * open, and asks only when that leaves a choice. Switch always asks. Undefined if the reviewer cancels.
+ */
+async function repository(context: vscode.ExtensionContext, ask: boolean): Promise<string | undefined> {
+  const settings = vscode.workspace.getConfiguration('reviewDesk');
+  const configured = settings.get<string>('repository') ?? '';
+  const candidates = await openGitHubRepos();
+  if (!ask) {
+    const repo = defaultRepository(configured, context.workspaceState.get<string>(REMEMBERED), candidates);
+    if (repo) return repo;
+  }
+
+  const current = configured.trim() || context.workspaceState.get<string>(REMEMBERED);
+  const picked = await pickRepository(candidates, current);
+  if (!picked) return undefined;
+
+  // A repo pinned in settings stays the source of truth: update it where it was set, so the pick sticks.
+  const scope = settingScope(settings.inspect<string>('repository'));
+  if (scope !== undefined) await settings.update('repository', picked, scope);
+  else await context.workspaceState.update(REMEMBERED, picked);
+  return picked;
+}
+
+const REMEMBERED = 'repository';
+
+async function openGitHubRepos(): Promise<string[]> {
   const git = vscode.extensions.getExtension('vscode.git');
   const api = (await git?.activate())?.getAPI(1);
-  for (const repo of api?.repositories ?? []) {
-    const remote = repo.state.remotes.find((r: { name: string }) => r.name === 'origin') ?? repo.state.remotes[0];
-    const parsed = parseRemote(remote?.fetchUrl ?? remote?.pushUrl ?? '');
-    if (parsed) return parsed;
+  return githubRepos(api?.repositories ?? []);
+}
+
+async function pickRepository(candidates: string[], current: string | undefined): Promise<string | undefined> {
+  const other = 'Another repository…';
+  if (candidates.length) {
+    const items: vscode.QuickPickItem[] = [
+      ...candidates.map((label) => ({ label, description: label === current ? 'Reviewing now' : undefined })),
+      { label: '', kind: vscode.QuickPickItemKind.Separator },
+      { label: other, description: 'Type owner/name or paste a GitHub link' },
+    ];
+    const choice = await vscode.window.showQuickPick(items, { title: 'Review Desk: Choose a repository', placeHolder: 'Which repository do you want to review?' });
+    if (!choice) return undefined;
+    if (choice.label !== other) return choice.label;
   }
-  throw new Error('Open a folder with a GitHub remote, or set "reviewDesk.repository" to owner/name.');
+  const typed = await vscode.window.showInputBox({
+    title: 'Review Desk: Choose a repository',
+    prompt: candidates.length ? 'Which repository do you want to review?' : 'No folder here has a GitHub remote. Which repository do you want to review?',
+    placeHolder: 'owner/name',
+    value: current,
+    validateInput: (text) => (parseRepositoryInput(text) ? null : 'Type owner/name, like octocat/hello-world, or paste a github.com link'),
+  });
+  return typed === undefined ? undefined : parseRepositoryInput(typed) ?? undefined;
+}
+
+/** Where reviewDesk.repository is set, workspace before user settings; undefined when it isn't set anywhere. */
+function settingScope(inspected: { globalValue?: string; workspaceValue?: string } | undefined): vscode.ConfigurationTarget | undefined {
+  if (inspected?.workspaceValue?.trim()) return vscode.ConfigurationTarget.Workspace;
+  if (inspected?.globalValue?.trim()) return vscode.ConfigurationTarget.Global;
+  return undefined;
 }
 
 

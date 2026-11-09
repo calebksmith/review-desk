@@ -14,6 +14,7 @@
     "commands": [
       { "command": "reviewDesk.open", "title": "Open", "category": "Review Desk", "icon": "$(checklist)" },
       { "command": "reviewDesk.openSample", "title": "Open with sample data", "category": "Review Desk" },
+      { "command": "reviewDesk.switchRepository", "title": "Switch repository", "category": "Review Desk" },
       { "command": "reviewDesk.signOut", "title": "Use a different GitHub account", "category": "Review Desk" }
     ],
     "configuration": {
@@ -22,7 +23,7 @@
         "reviewDesk.repository": {
           "type": "string",
           "default": "",
-          "markdownDescription": "The repository to review, as `owner/name`. Leave empty to use the `origin` remote of the open folder."
+          "markdownDescription": "The repository to review, as `owner/name`. Leave empty to use the open folder's GitHub remote. When several folders are open, Review Desk asks which one and remembers your pick."
         },
         "reviewDesk.label": {
           "type": "string",
