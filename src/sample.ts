@@ -14,7 +14,7 @@ const file = (path: string, patch: string, viewed: FileDiff['viewed'] = 'unviewe
 };
 
 const pass = (name: string, app: string, summary: string | null = null): CheckRun => ({ name, app, status: 'completed', conclusion: 'success', url: 'https://github.com', summary, failedStep: null, excerpt: null });
-const say = (author: string, min: number, html: string): Comment => ({ author, createdAt: ago(min), html, url: 'https://github.com', isNew: false });
+const say = (author: string, min: number, html: string): Comment => ({ author, createdAt: ago(min), html, text: html.replace(/<[^>]+>/g, ''), url: 'https://github.com', isNew: false });
 
 interface SamplePr { summary: PrSummary; files: FileDiff[]; checkRuns: CheckRun[]; body: string; bodyHtml: string; conversation: ConversationItem[]; headRef: string }
 
@@ -34,7 +34,7 @@ function seed(): SamplePr[] {
 <p>Error logs now show the request path with the token removed. See <a href="https://github.com">the logging guide</a>.</p>`,
       conversation: [
         { kind: 'review', verdict: 'changes_requested', comment: say('calebksmith', 95, '<p>The catch block still logs the full URL, token included. Please redact it in <code>onError</code> too.</p>') },
-        { kind: 'thread', path: 'src/lib/track.ts', line: 61, resolved: true, outdated: false, comments: [
+        { kind: 'thread', id: 'T_55_1', path: 'src/lib/track.ts', line: 61, resolved: true, outdated: false, comments: [
           say('calebksmith', 94, '<p>This line logs <code>req.path</code> but not the company. Can it use the same format as the catch above?</p>'),
           say('claude', 20, '<p>Done in 9d07f3e. Both lines now log the redacted path and the company.</p>'),
         ] },
@@ -88,7 +88,7 @@ function seed(): SamplePr[] {
       body: 'Show each case study’s medal (its small badge icon and name) on its card.',
       bodyHtml: '<p>Show each case study’s medal (its small badge icon and name) on its card.</p><ul><li>Adds <code>MEDALS</code>, with a name and icon for each medal.</li><li>Cards show the icon beside the title and the medal name under it.</li></ul>',
       conversation: [
-        { kind: 'thread', path: 'src/components/WorkCard.tsx', line: 44, resolved: false, outdated: false, comments: [
+        { kind: 'thread', id: 'T_52_1', path: 'src/components/WorkCard.tsx', line: 44, resolved: false, outdated: false, comments: [
           say('calebksmith', 180, '<p>Should the medal name sit under the summary instead? It wraps next to long titles on small screens.</p>'),
         ] },
       ],
@@ -218,6 +218,11 @@ export class SampleSource implements DataSource {
   async approve(pr: PrDetail): Promise<void> { this.find(pr.number).summary.myReview = 'approved'; }
 
   async merge(pr: PrDetail, _method: MergeMethod): Promise<void> { this.find(pr.number).summary.state = 'merged'; }
+
+  async comment(pr: PrDetail, body: string): Promise<void> {
+    const html = `<p>${body.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!)}</p>`;
+    this.find(pr.number).conversation.push({ kind: 'comment', comment: { ...say('calebksmith', 0, html), text: body } });
+  }
 
   async updateBranch(pr: PrDetail): Promise<void> { this.find(pr.number).summary.mergeState = 'clean'; }
 

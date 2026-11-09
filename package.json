@@ -62,6 +62,20 @@
           "default": "",
           "markdownDescription": "Only show pull requests with this label. Leave empty to show every open pull request."
         },
+        "reviewDesk.commentActions": {
+          "type": "array",
+          "default": [],
+          "markdownDescription": "Comments you post often, as one-click buttons in a PR's Conversation tab, such as `@codex review`. Set `reviewer` to the account that answers, and its latest reply shows beside the button.",
+          "items": {
+            "type": "object",
+            "required": ["label", "comment"],
+            "properties": {
+              "label": { "type": "string", "description": "The button's name, such as \"Ask Codex to review\"." },
+              "comment": { "type": "string", "description": "What to post, such as \"@codex review\"." },
+              "reviewer": { "type": "string", "description": "The GitHub account that answers, such as chatgpt-codex-connector." }
+            }
+          }
+        },
         "reviewDesk.agent": {
           "type": "string",
           "enum": ["auto", "claudeCode", "chat", "clipboard"],

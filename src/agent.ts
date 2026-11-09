@@ -1,4 +1,4 @@
-import type { CheckRun, PrDetail } from './protocol';
+import type { CheckRun, ConversationItem, PrDetail } from './protocol';
 import { isDependabot } from './status';
 
 // The prompt "Fix with agent" hands to the reviewer's AI agent: everything it needs to diagnose a
@@ -44,4 +44,25 @@ export function fixPrompt(repo: string, pr: PrDetail, run: CheckRun): string {
     );
   }
   return lines.join('\n');
+}
+
+/** A review comment on a line of code (Codex's findings arrive this way) as a prompt to act on. */
+export function threadPrompt(repo: string, pr: PrDetail, thread: Extract<ConversationItem, { kind: 'thread' }>): string {
+  return [
+    'Address a review comment on a pull request.',
+    '',
+    `Repository: ${repo}`,
+    `Pull request: #${pr.number} "${pr.title}"${pr.url ? ` (${pr.url})` : ''}`,
+    `Branch: ${pr.headRef} → ${pr.baseRef}, head commit ${pr.headSha.slice(0, 7)}`,
+    '',
+    `File: ${thread.path}${thread.line ? `, line ${thread.line}` : ''}${thread.outdated ? ' (the comment is on an older version of the file)' : ''}`,
+    'The comment thread, oldest first:',
+    ...thread.comments.flatMap((c) => ['', `${c.author} wrote:`, ...c.text.trim().split('\n').map((l) => `> ${l}`)]),
+    '',
+    'Please:',
+    `1. Work on branch ${pr.headRef} in a separate git worktree, so my current work isn't touched.`,
+    '2. Read the code the comment points at and tell me whether the comment is right, in a few sentences.',
+    '3. If it is, propose the change. Don’t push until I agree.',
+    `4. Once I agree, commit to ${pr.headRef}, push, and draft a short reply to the thread saying what changed.`,
+  ].join('\n');
 }

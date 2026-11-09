@@ -1,5 +1,6 @@
-import type { FromWebview, HostState, MergeMethod, ToWebview } from './protocol';
-import { fixPrompt, type AgentRoute } from './agent';
+import type { CommentAction, FromWebview, HostState, MergeMethod, ToWebview } from './protocol';
+import { fixPrompt, threadPrompt, type AgentRoute } from './agent';
+import { closeOptions, type CloseOption } from './dependabot';
 import { markNew } from './conversation';
 import type { DataSource, Store } from './source';
 import { bulkMergeable, bulkSkipReason, mergeBlocker, mergeWarning, plural } from './status';
@@ -11,6 +12,8 @@ export interface Host {
   confirm(question: string, action: string): Promise<boolean>;
   /** Hands a prompt to the reviewer's AI agent, filled in but not sent, and says where it went. */
   askAgent(prompt: string): Promise<AgentRoute>;
+  /** Asks the reviewer to pick one option, like VS Code's quick pick. Undefined if they cancel. */
+  choose<T extends { label: string; detail?: string }>(title: string, options: T[]): Promise<T | undefined>;
 }
 
 /**
@@ -20,8 +23,11 @@ export interface Host {
 export class Controller {
   private state: HostState;
 
-  constructor(private readonly source: DataSource, private readonly store: Store, private readonly host: Host, private readonly label = '') {
-    this.state = { repo: source.repo, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, bulk: null, notice: null, error: null };
+  /** PRs closed from here this session; GitHub can list them as open for a few seconds after. */
+  private readonly closed = new Set<number>();
+
+  constructor(private readonly source: DataSource, private readonly store: Store, private readonly host: Host, private readonly label = '', actions: CommentAction[] = []) {
+    this.state = { repo: source.repo, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, bulk: null, notice: null, actions, error: null };
   }
 
   get snapshot(): HostState { return this.state; }
@@ -41,6 +47,9 @@ export class Controller {
         case 'openExternal': this.host.openExternal(msg.url); break;
         case 'mergeDependabot': await this.mergeDependabot(); break;
         case 'fixWithAgent': await this.fixWithAgent(msg.check); break;
+        case 'fixThread': await this.fixThread(msg.id); break;
+        case 'comment': await this.comment(msg.body); break;
+        case 'closeDependabot': await this.closeDependabot(); break;
         case 'dismissNotice': this.set({ notice: null }); break;
       }
     } catch (err) {
@@ -51,7 +60,7 @@ export class Controller {
   private async loadQueue(): Promise<void> {
     this.set({ loading: true, error: null });
     const [user, prs] = await Promise.all([this.source.viewer(), this.source.listPrs()]);
-    const queue = this.label ? prs.filter((p) => p.labels.includes(this.label)) : prs;
+    const queue = (this.label ? prs.filter((p) => p.labels.includes(this.label)) : prs).filter((p) => !this.closed.has(p.number));
     this.set({ user, queue, loading: false });
   }
 
@@ -155,6 +164,43 @@ export class Controller {
       clipboard: `Copied why ${run.name} failed as a prompt. Paste it into your agent.`,
     }[via];
     this.host.post({ type: 'toast', text });
+  }
+
+  private async fixThread(id: string): Promise<void> {
+    const pr = this.state.pr;
+    const thread = pr?.conversation.find((it) => it.kind === 'thread' && it.id === id);
+    if (!pr || thread?.kind !== 'thread') return;
+    const via = await this.host.askAgent(threadPrompt(this.source.repo, pr, thread));
+    const where = thread.path.split('/').pop();
+    this.host.post({ type: 'toast', text: via === 'clipboard' ? `Copied the comment on ${where} as a prompt. Paste it into your agent.` : `Opened ${via === 'claudeCode' ? 'Claude Code' : 'chat'} with the comment on ${where}. Read the prompt, then send it.` });
+  }
+
+  private async comment(body: string): Promise<void> {
+    const pr = this.state.pr;
+    const text = body.trim();
+    if (!pr || !text || this.state.busy) return;
+    this.set({ busy: 'comment' });
+    try {
+      await this.source.comment(pr, text);
+    } finally {
+      this.set({ busy: null });
+    }
+    const action = this.state.actions.find((a) => a.comment.trim() === text);
+    this.host.post({ type: 'toast', text: action ? `Posted “${text}”. Replies show up in Conversation when you refresh.` : 'Comment posted' });
+    await this.loadPr(pr.number);
+  }
+
+  /** Dependabot closes the PR itself when it reads the command, so this posts the command and moves on. */
+  private async closeDependabot(): Promise<void> {
+    const pr = this.state.pr;
+    if (!pr || this.state.busy) return;
+    const pick: CloseOption | undefined = await this.host.choose(`Close #${pr.number}: ${pr.title}`, closeOptions(pr));
+    if (!pick) return;
+    await this.source.comment(pr, pick.comment);
+    this.closed.add(pr.number);
+    this.set({ view: 'queue', pr: null });
+    this.host.post({ type: 'toast', text: `Asked Dependabot to close #${pr.number} (“${pick.label}”).` });
+    await this.loadQueue();
   }
 
   private async updateBranch(): Promise<void> {

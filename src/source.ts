@@ -13,6 +13,8 @@ export interface DataSource {
   merge(pr: PrDetail, method: MergeMethod): Promise<void>;
   /** Brings the base branch into the PR branch, like GitHub's Update branch button. */
   updateBranch(pr: PrDetail): Promise<void>;
+  /** Posts a comment on the PR's conversation. */
+  comment(pr: PrDetail, body: string): Promise<void>;
 }
 
 /** Small key-value store; VS Code's workspaceState in the extension, a Map in tests. */

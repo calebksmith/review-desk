@@ -15,7 +15,8 @@ const controller = new Controller(new SampleSource(), { get: <T>(k: string) => s
   openExternal: (url) => console.log('openExternal', url),
   confirm: async () => true,
   askAgent: async (prompt) => { console.log(prompt); return 'clipboard'; },
-});
+  choose: async (title, options) => { console.log(title, options); return options[0]; },
+}, '', [{ label: 'Ask Codex to review', comment: '@codex review', reviewer: 'chatgpt-codex-connector' }]);
 
 (window as unknown as { acquireVsCodeApi: () => unknown }).acquireVsCodeApi = () => ({
   postMessage: (msg: FromWebview) => { void controller.handle(msg); },

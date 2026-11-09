@@ -8,10 +8,11 @@ function setup(label = '', onConfirm: (question: string, action: string) => void
   const store = new Map<string, unknown>();
   let confirmed = true;
   const prompts: string[] = [];
-  const host: Host = { post: (m) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async (q, a) => { onConfirm(q, a); return confirmed; }, askAgent: async (p) => { prompts.push(p); return 'clipboard'; } };
+  let pick = 0;
+  const host: Host = { post: (m) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async (q, a) => { onConfirm(q, a); return confirmed; }, askAgent: async (p) => { prompts.push(p); return 'clipboard'; }, choose: async (_t, options) => options[pick] };
   const c = new Controller(new SampleSource(), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host, label);
   const last = (): HostState => (sent.filter((m) => m.type === 'state').at(-1) as { state: HostState }).state;
-  return { c, sent, store, last, prompts, refuse: () => { confirmed = false; } };
+  return { c, sent, store, last, prompts, refuse: () => { confirmed = false; }, choosePick: (i: number) => { pick = i; } };
 }
 
 describe('Controller', () => {
@@ -153,5 +154,43 @@ describe('Controller', () => {
     expect(prompts[0]).toContain('Failing check: Tests (GitHub Actions)');
     expect(prompts[0]).toContain('AssertionError');
     expect(sent.at(-1)).toEqual({ type: 'toast', text: 'Copied why Tests failed as a prompt. Paste it into your agent.' });
+  });
+
+  it('posts a comment and shows it in the conversation', async () => {
+    const { c, last, sent } = setup();
+    await c.handle({ type: 'openPr', number: 57 });
+    await c.handle({ type: 'comment', body: '  Looks good, thanks.  ' });
+    const latest = last().pr!.conversation.at(-1)!;
+    expect(latest).toMatchObject({ kind: 'comment', comment: { author: 'calebksmith', text: 'Looks good, thanks.' } });
+    expect(sent.some((m) => m.type === 'toast' && m.text === 'Comment posted')).toBe(true);
+    expect(last().busy).toBeNull();
+  });
+
+  it('ignores an empty comment', async () => {
+    const { c, last } = setup();
+    await c.handle({ type: 'openPr', number: 57 });
+    const before = last().pr!.conversation.length;
+    await c.handle({ type: 'comment', body: '   ' });
+    expect(last().pr!.conversation).toHaveLength(before);
+  });
+
+  it('sends an unresolved line comment to the agent', async () => {
+    const { c, prompts } = setup();
+    await c.handle({ type: 'openPr', number: 52 });
+    await c.handle({ type: 'fixThread', id: 'T_52_1' });
+    expect(prompts[0]).toContain('File: src/components/WorkCard.tsx, line 44');
+    expect(prompts[0]).toContain('> Should the medal name sit under the summary instead?');
+  });
+
+  it('closes a Dependabot PR with the command picked, then leaves it out of the queue', async () => {
+    const { c, last, sent, choosePick } = setup();
+    await c.handle({ type: 'openPr', number: 61 });
+    choosePick(0);
+    await c.handle({ type: 'closeDependabot' });
+    expect(last().view).toBe('queue');
+    expect(last().queue.some((p) => p.number === 61)).toBe(false);
+    expect(sent.some((m) => m.type === 'toast' && m.text === 'Asked Dependabot to close #61 (“Ignore eslint 10”).')).toBe(true);
+    await c.handle({ type: 'openPr', number: 61 });
+    expect(last().pr!.conversation.at(-1)).toMatchObject({ comment: { text: '@dependabot ignore this major version' } });
   });
 });

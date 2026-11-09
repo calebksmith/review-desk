@@ -1,6 +1,6 @@
 import DOMPurify from 'dompurify';
 import { conversationCounts, startedAt } from '../src/conversation';
-import type { CheckRun, Comment, ConversationItem, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
+import type { CheckRun, Comment, CommentAction, ConversationItem, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
 import { bulkMergeable, isDependabot, mergeBlocker, mergeReadiness, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
 
 // The webview only renders. Everything it knows comes from the host's state messages;
@@ -118,7 +118,7 @@ function bulkButton(h: HostState): string {
 function crumb(pr: PrDetail, h: HostState): string {
   let act: string;
   if (pr.state === 'merged') act = `<span role="status">${statusPill(pr)}</span>`;
-  else if (pr.myReview !== 'approved') act = `<button class="btn pri" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
+  else if (pr.myReview !== 'approved') act = `${closeButton(pr)}<button class="btn pri" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
   else {
     const blocker = mergeBlocker(pr);
     const method = view.method && pr.mergeMethods.includes(view.method) ? view.method : pr.mergeMethods[0]!;
@@ -126,12 +126,17 @@ function crumb(pr: PrDetail, h: HostState): string {
     const pick = pr.mergeMethods.length > 1 ? `<select id="method" aria-label="Merge method">${pr.mergeMethods.map((m) => `<option value="${m}" ${m === method ? 'selected' : ''}>${{ squash: 'Squash', merge: 'Merge commit', rebase: 'Rebase' }[m]}</option>`).join('')}</select>` : '';
     // With a check failing, Merge stays available but stops being the primary action and says "anyway".
     const warning = !blocker && mergeWarning(pr);
-    act = `${pick}<button class="btn ${warning ? '' : 'pri'}" data-do="merge" data-method="${method}" ${h.busy || blocker ? 'disabled' : ''} ${blocker || warning ? `title="${esc(blocker || `${warning}. You'll be asked to confirm.`)}"` : ''}>${h.busy === 'merge' ? '<span class="spin"></span>' : I.merge}${verb}${warning ? ' anyway' : ''}</button>`;
+    act = `${closeButton(pr)}${pick}<button class="btn ${warning ? '' : 'pri'}" data-do="merge" data-method="${method}" ${h.busy || blocker ? 'disabled' : ''} ${blocker || warning ? `title="${esc(blocker || `${warning}. You'll be asked to confirm.`)}"` : ''}>${h.busy === 'merge' ? '<span class="spin"></span>' : I.merge}${verb}${warning ? ' anyway' : ''}</button>`;
   }
   // One line: the title truncates before anything else gives way. It's the link to GitHub.
   return `<div class="crumb prc"><button class="home" data-do="back" aria-label="Back to the review queue">${I.inbox}<span class="hl">Review queue</span></button><span class="sep" aria-hidden="true">/</span>
     <div class="pt"><span class="num">#${pr.number}</span><button class="ttl" data-ext="${esc(pr.url)}" title="${esc(pr.title)} (open on GitHub)"><b>${esc(pr.title)}</b>${I.ext}</button><span class="diffstat"><span class="a">+${pr.additions}</span> <span class="d">−${pr.deletions}</span></span></div>
     <div class="end">${act}</div></div>${pr.state === 'merged' ? '' : readiness(pr, h)}`;
+}
+
+/** Dependabot PRs can be closed, or their update ignored, with a comment Dependabot reads. */
+function closeButton(pr: PrDetail): string {
+  return isDependabot(pr) && pr.state === 'open' ? `<button class="btn" data-do="closeDependabot" title="Close this PR, or tell Dependabot to skip this update">Close or ignore…</button>` : '';
 }
 
 /** The strip under the header: what stands between this PR and a merge. */
@@ -181,7 +186,7 @@ function stepChecks(pr: PrDetail): string {
     const g = isFail(r) ? `<span class="g bad">${I.x}</span>` : r.status !== 'completed' ? '<span class="g run"><span class="spin sm"></span></span>' : `<span class="g ok">${I.check}</span>`;
     const why = isFail(r) && (r.failedStep || r.excerpt) ? `<div class="cgb">${r.failedStep ? `<span class="fstep">Failed at <b>${esc(r.failedStep)}</b></span>` : ''}${r.excerpt ? `<pre class="log">${r.excerpt.map(esc).join('\n')}</pre>` : ''}</div>` : '';
     return `<div class="cg ${isFail(r) ? 'bad' : ''}"><div class="cgh">${g}<span class="nm">${esc(r.name)}</span><span class="tool">${esc(r.app)}</span>
-      <span class="res">${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ''}${isFail(r) ? `<button class="btn sm" data-fix="${esc(r.name)}" title="Send the failure to your AI agent to diagnose and fix">${I.spark}Fix with agent</button>` : ''}${r.url ? `<button class="btn sm" data-ext="${esc(r.url)}">${isFail(r) ? 'Open log' : 'Details'}${I.ext}</button>` : ''}</span></div>${why}</div>`;
+      <span class="res">${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ''}${isFail(r) ? `<button class="btn sm fix" data-fix=""${esc(r.name)}" title="Send the failure to your AI agent to diagnose and fix">${I.spark}Fix with agent</button>` : ''}${r.url ? `<button class="btn sm" data-ext="${esc(r.url)}">${isFail(r) ? 'Open log' : 'Details'}${I.ext}</button>` : ''}</span></div>${why}</div>`;
   }).join('');
   return `<div class="sh"><div class="tx"><h2>Checks${pill}</h2><p>${line}</p><div class="prov"><span>${esc(pr.headSha.slice(0, 7))}</span><span>${esc(pr.headRef)} → ${esc(pr.baseRef)}</span></div></div></div>
     <div class="pad">${rows || '<div class="empty">This repo runs no checks on pull requests.</div>'}</div>`;
@@ -243,7 +248,27 @@ function about(pr: PrDetail): string {
       <div class="seg" role="tablist" aria-label="About this pull request">${tab('desc', 'Description')}${tab('conv', `Conversation <span class="n">${n.comments}</span>${fresh}`)}</div>
       ${conv && n.unresolved ? `<span class="it warn">${I.alert}${plural(n.unresolved, 'unresolved thread')}</span>` : ''}
       ${canMore ? `<button class="link more" data-do="about" aria-expanded="${view.aboutOpen}">${more}</button>` : ''}</div>
-    <div class="abb ${view.aboutOpen ? 'open' : 'clamp'}" role="tabpanel">${conv ? conversation(pr.conversation) : description(pr)}</div></section>`;
+    <div class="abb ${view.aboutOpen ? 'open' : 'clamp'}" role="tabpanel">${conv ? conversation(pr.conversation) : description(pr)}</div>${conv ? compose(pr) : ''}</section>`;
+}
+
+/** The comment box, with the reviewer's one-click comments (like "@codex review") above it. */
+function compose(pr: PrDetail): string {
+  const h = host!;
+  const busy = h.busy === 'comment';
+  const acts = h.actions.map((a, i) => {
+    const reply = a.reviewer ? lastReplyFrom(pr.conversation, a.reviewer) : null;
+    return `<span class="act"><button class="btn sm ${reply ? '' : 'fix'}" data-action="${i}" ${h.busy ? 'disabled' : ''} title="Posts “${esc(a.comment)}”">${esc(a.label)}</button>${reply ? `<span class="sub">${esc(reply.author)} replied ${ago(reply.createdAt)} ago</span>` : a.reviewer ? '<span class="sub">No reply yet</span>' : ''}</span>`;
+  }).join('');
+  return `<div class="compose">${acts ? `<div class="acts">${acts}</div>` : ''}
+    <div class="box"><textarea id="cbox" rows="2" placeholder="Leave a comment" aria-label="Leave a comment" ${busy ? 'disabled' : ''}></textarea>
+    <button class="btn" data-do="comment" ${h.busy ? 'disabled' : ''}>${busy ? '<span class="spin sm"></span>' : ''}Comment</button></div></div>`;
+}
+
+/** The latest comment from an account; "chatgpt-codex-connector" matches its bot login too. */
+function lastReplyFrom(items: ConversationItem[], reviewer: string): Comment | null {
+  const who = (s: string) => s.toLowerCase().replace(/\[bot\]$/, '');
+  const mine = items.flatMap((it) => (it.kind === 'thread' ? it.comments : [it.comment])).filter((c) => who(c.author) === who(reviewer));
+  return mine.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0] ?? null;
 }
 
 function description(pr: PrDetail): string {
@@ -266,7 +291,8 @@ function convItem(it: ConversationItem): string {
   if (it.kind !== 'thread') return `<article class="ci">${comment(it.comment, it.kind === 'review' ? VERDICT[it.verdict] : '')}</article>`;
   const where = `${base(it.path)}${it.line ? `:${it.line}` : ''}`;
   const state = it.resolved ? '<span class="pill">Resolved</span>' : '<span class="pill need">Unresolved</span>';
-  return `<article class="ci thread"><div class="cih">${I.com}<button class="link mono" data-file="${esc(it.path)}" title="Show ${esc(it.path)} in the diff">${esc(where)}</button>${state}${it.outdated ? '<span class="pill">Outdated</span>' : ''}</div>
+  const fix = it.resolved ? '' : `<button class="btn sm fix end" data-thread="${esc(it.id)}" title="Send this comment to your AI agent">${I.spark}Fix with agent</button>`;
+  return `<article class="ci thread"><div class="cih">${I.com}<button class="link mono" data-file="${esc(it.path)}" title="Show ${esc(it.path)} in the diff">${esc(where)}</button>${state}${it.outdated ? '<span class="pill">Outdated</span>' : ''}${fix}</div>
     ${it.comments.map((c) => comment(c, '')).join('')}</article>`;
 }
 
@@ -305,8 +331,14 @@ function prView(h: HostState): string {
 function render(): void {
   if (!host) return;
   const err = host.error ? `<div class="err" role="alert">${esc(host.error)}<button class="btn sm" data-do="refresh">Try again</button></div>` : '';
+  // Re-rendering replaces the comment box; keep what the reviewer was typing.
+  const box = document.getElementById('cbox') as HTMLTextAreaElement | null;
+  const draft = box ? { value: box.value, focused: document.activeElement === box, at: box.selectionStart } : null;
   app.innerHTML = err + (host.view === 'pr' ? prView(host) : queue(host)) + (view.keys ? keysHelp() : '');
   fitAbout();
+  const next = document.getElementById('cbox') as HTMLTextAreaElement | null;
+  if (next && draft && host.busy !== null) next.value = draft.value;
+  else if (next && draft) { next.value = draft.value; if (draft.focused) { next.focus(); next.setSelectionRange(draft.at, draft.at); } }
 }
 
 function keysHelp(): string {
@@ -352,7 +384,7 @@ document.addEventListener('click', (e) => {
     if (/^https?:/.test(a.href)) send({ type: 'openExternal', url: a.href });
     return;
   }
-  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-step],[data-about],[data-fix],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
+  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-step],[data-about],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
   if (!t || (t as HTMLButtonElement).disabled) return;
   const d = t.dataset;
   if (d.open) send({ type: 'openPr', number: Number(d.open) });
@@ -360,6 +392,8 @@ document.addEventListener('click', (e) => {
   else if (d.step) save({ step: d.step as View['step'] });
   else if (d.about) save({ about: d.about as About });
   else if (d.fix) send({ type: 'fixWithAgent', check: d.fix });
+  else if (d.thread) send({ type: 'fixThread', id: d.thread });
+  else if (d.action) { const a: CommentAction | undefined = host?.actions[Number(d.action)]; if (a) send({ type: 'comment', body: a.comment }); }
   else if (d.file) save({ file: d.file, step: 'review', onlyNew: d.onlynew === '1' });
   else if (d.onlynew) save({ onlyNew: d.onlynew === '1' });
   else if (d.line && view.file) send({ type: 'openFile', path: view.file, line: Number(d.line) });
@@ -372,12 +406,24 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'keys') save({ keys: false });
   else if (d.do === 'about') save({ aboutOpen: !view.aboutOpen });
   else if (d.do === 'mergeDependabot') send({ type: 'mergeDependabot' });
+  else if (d.do === 'closeDependabot') send({ type: 'closeDependabot' });
+  else if (d.do === 'comment') postComment();
   else if (d.do === 'dismissNotice') send({ type: 'dismissNotice' });
   else if (d.do === 'threads') save({ step: 'review', about: 'conv', aboutOpen: true });
 });
 
+function postComment(): void {
+  const box = document.getElementById('cbox') as HTMLTextAreaElement | null;
+  const body = box?.value.trim();
+  if (!box || !body) { box?.focus(); return; }
+  send({ type: 'comment', body });
+  box.value = '';
+}
+
 /* ---------- Keyboard ---------- */
 document.addEventListener('keydown', (e) => {
+  // ⌘/Ctrl+Enter posts the comment being typed.
+  if ((e.target as HTMLElement).id === 'cbox' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); postComment(); return; }
   if (!host || e.metaKey || e.ctrlKey || e.altKey) return;
   const tag = (e.target as HTMLElement).tagName;
   if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;

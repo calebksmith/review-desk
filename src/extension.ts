@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import type { AgentRoute } from './agent';
 import { Controller, type Host } from './controller';
 import { GitHubSource } from './github';
-import type { FromWebview, PrSummary } from './protocol';
+import type { CommentAction, FromWebview, PrSummary } from './protocol';
 import { defaultRepository, githubRepos, parseRepositoryInput } from './repos';
 import { SampleSource } from './sample';
 import { needsYou, queueGroups, type QueueGroup } from './sidebar';
@@ -202,9 +202,11 @@ function open(context: vscode.ExtensionContext, number?: number): void {
     openExternal: (url) => { void vscode.env.openExternal(vscode.Uri.parse(url)); },
     confirm: async (question, action) => (await vscode.window.showWarningMessage(question, { modal: true }, action)) === action,
     askAgent,
+    choose: async (title, options) => vscode.window.showQuickPick(options, { title, placeHolder: 'Pick one' }),
   };
   const store = { get: <T>(key: string) => context.workspaceState.get<T>(key), set: (key: string, value: unknown) => context.workspaceState.update(key, value) };
-  const c = new Controller(source, store, host, label());
+  const actions = vscode.workspace.getConfiguration('reviewDesk').get<CommentAction[]>('commentActions') ?? [];
+  const c = new Controller(source, store, host, label(), actions.filter((a) => a && typeof a.label === 'string' && typeof a.comment === 'string'));
   controller = c;
   webview.onDidReceiveMessage((msg: FromWebview) => c.handle(msg), undefined, context.subscriptions);
   panel.onDidDispose(() => { panel = undefined; controller = undefined; }, undefined, context.subscriptions);

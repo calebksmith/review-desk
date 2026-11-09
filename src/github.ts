@@ -79,7 +79,7 @@ export class GitHubSource implements DataSource {
           files(first: 100) { nodes { path viewerViewedState } }
           comments(last: 50) { nodes { ${COMMENT_FIELDS} } }
           reviews(last: 50) { nodes { author { login } state submittedAt body bodyHTML url } }
-          threads: reviewThreads(first: 50) { nodes { isResolved isOutdated path line originalLine comments(first: 30) { nodes { ${COMMENT_FIELDS} } } } } }
+          threads: reviewThreads(first: 50) { nodes { id isResolved isOutdated path line originalLine comments(first: 30) { nodes { ${COMMENT_FIELDS} } } } } }
       } }`,
       { owner: this.owner, name: this.name, number },
     );
@@ -185,6 +185,10 @@ export class GitHubSource implements DataSource {
 
   async merge(pr: PrDetail, method: MergeMethod): Promise<void> {
     await this.octokit.pulls.merge({ owner: this.owner, repo: this.name, pull_number: pr.number, sha: pr.headSha, merge_method: method });
+  }
+
+  async comment(pr: PrDetail, body: string): Promise<void> {
+    await this.octokit.issues.createComment({ owner: this.owner, repo: this.name, issue_number: pr.number, body });
   }
 
   async updateBranch(pr: PrDetail): Promise<void> {

@@ -11,7 +11,9 @@ This is phase 1 of five: a read-only review panel on GitHub data. The agent step
 - **Checks:** every check run and commit status (Vercel, for one) on the latest commit, failures first, with a link to each log. A failed GitHub Actions job names the step that failed and shows the error lines from its log.
 - **Fix with agent:** on any failing check, hands the failure to your AI agent as a ready prompt: the PR, the branch, the failed step, the error lines, and a plan that works in a separate worktree and asks before pushing. It opens a new Claude Code session if Claude Code is installed, otherwise VS Code's chat in agent mode, otherwise copies the prompt. The prompt is filled in, not sent.
 - **Your review:** the PR's description and conversation above its changed files, with a Viewed checkbox for each file, and the diff. Viewed state is GitHub's own, so it matches github.com.
-- **Description and conversation:** the start of the description, formatted as on GitHub, with **Show full description** for the rest. The Conversation tab lists comments, reviews and comments on lines of code, newest first, marking what's new since you last looked. A comment on a line of code opens that file.
+- **Description and conversation:** the start of the description, formatted as on GitHub, with **Show full description** for the rest. The Conversation tab lists comments, reviews and comments on lines of code, newest first, marking what's new since you last looked. A comment on a line of code opens that file, and an unresolved one has **Fix with agent**, so review findings (Codex's included) go to your agent like a failing check.
+- **Comments:** post a comment from the Conversation tab (⌘Enter sends). Comments you post often, like `@codex review`, can be one-click buttons that show when that reviewer last replied; see `reviewDesk.commentActions`.
+- **Close or ignore** a Dependabot PR: posts the Dependabot command you pick, such as ignoring the new major version, and Dependabot closes the PR.
 - **New commits since you looked:** when the agent pushes after you opened a PR, a banner names the files and shows only what changed since.
 - **Approve and Merge** from the header. Merge asks before it runs, uses the repo's allowed merge method, and takes you back to the queue when it's done. While a check fails, the button reads **Merge anyway** and asks first, naming the failing checks. Conflicts block a merge.
 
@@ -34,6 +36,7 @@ To install it as a normal extension, run `npm run package` and install the `.vsi
 | --- | --- |
 | `reviewDesk.repository` | Always review this `owner/name`. **Switch repository** updates it when it's set |
 | `reviewDesk.label` | Only show PRs with this label, such as `review-desk` |
+| `reviewDesk.commentActions` | One-click comments in the Conversation tab, such as `[{ "label": "Ask Codex to review", "comment": "@codex review", "reviewer": "chatgpt-codex-connector" }]` |
 | `reviewDesk.agent` | Where **Fix with agent** sends a failure: `auto` (default), `claudeCode`, `chat` or `clipboard` |
 
 ## How it's built
@@ -46,6 +49,7 @@ The extension host talks to GitHub; the webview only renders. `src/controller.ts
 | `src/github.ts` | GitHub REST and GraphQL calls |
 | `src/controller.ts` | Review state and the messages the webview sends |
 | `src/agent.ts` | The prompt **Fix with agent** gives your AI agent |
+| `src/dependabot.ts` | The Dependabot commands behind **Close or ignore** |
 | `src/conversation.ts` | A PR's comments, reviews and line threads as one timeline |
 | `src/logs.ts` | The error lines from a failed GitHub Actions log |
 | `src/repos.ts` | Which repo to review: the setting, your last pick, or the folders that are open |

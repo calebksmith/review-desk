@@ -70,6 +70,8 @@ export interface Comment {
   author: string;
   createdAt: string;
   html: string;
+  /** The comment as written (Markdown), for prompts. */
+  text: string;
   url: string;
   /** Posted by someone else after the reviewer last opened the PR. */
   isNew: boolean;
@@ -81,7 +83,7 @@ export type ReviewVerdict = 'approved' | 'changes_requested' | 'commented' | 'di
 export type ConversationItem =
   | { kind: 'comment'; comment: Comment }
   | { kind: 'review'; verdict: ReviewVerdict; comment: Comment }
-  | { kind: 'thread'; path: string; line: number | null; resolved: boolean; outdated: boolean; comments: Comment[] };
+  | { kind: 'thread'; id: string; path: string; line: number | null; resolved: boolean; outdated: boolean; comments: Comment[] };
 
 export interface PrDetail extends PrSummary {
   nodeId: string;
@@ -101,6 +103,14 @@ export interface PrDetail extends PrSummary {
   sinceLastLook: SinceLastLook | null;
 }
 
+/** A comment the reviewer can post in one click, like "@codex review". From the reviewDesk.commentActions setting. */
+export interface CommentAction {
+  label: string;
+  comment: string;
+  /** The account that answers it, such as chatgpt-codex-connector. Its latest reply shows beside the button. */
+  reviewer?: string;
+}
+
 export interface HostState {
   repo: string;
   user: string;
@@ -109,11 +119,12 @@ export interface HostState {
   queue: PrSummary[];
   pr: PrDetail | null;
   loading: boolean;
-  busy: 'approve' | 'merge' | 'update' | 'bulk' | null;
+  busy: 'approve' | 'merge' | 'update' | 'bulk' | 'comment' | null;
   /** Progress while merging Dependabot updates in one go. */
   bulk: { done: number; total: number } | null;
   /** What the last bulk merge did, until the reviewer dismisses it. */
   notice: string | null;
+  actions: CommentAction[];
   error: string | null;
 }
 
@@ -134,4 +145,7 @@ export type FromWebview =
   | { type: 'openExternal'; url: string }
   | { type: 'mergeDependabot' }
   | { type: 'fixWithAgent'; check: string }
+  | { type: 'fixThread'; id: string }
+  | { type: 'comment'; body: string }
+  | { type: 'closeDependabot' }
   | { type: 'dismissNotice' };

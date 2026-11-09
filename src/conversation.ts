@@ -2,7 +2,7 @@ import type { Comment, ConversationItem, ReviewVerdict } from './protocol';
 
 // Turns a PR's comments, reviews and review threads from GitHub's GraphQL API into one timeline.
 
-export interface RawComment { author: { login: string } | null; createdAt: string; bodyHTML: string; url: string }
+export interface RawComment { author: { login: string } | null; createdAt: string; body: string; bodyHTML: string; url: string }
 export interface RawReview {
   author: { login: string } | null;
   state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING';
@@ -11,12 +11,12 @@ export interface RawReview {
   bodyHTML: string;
   url: string;
 }
-export interface RawThread { isResolved: boolean; isOutdated: boolean; path: string; line: number | null; originalLine: number | null; comments: { nodes: RawComment[] } }
+export interface RawThread { id: string; isResolved: boolean; isOutdated: boolean; path: string; line: number | null; originalLine: number | null; comments: { nodes: RawComment[] } }
 
 /** Comment fields to request on PR comments and on each review thread's comments. */
-export const COMMENT_FIELDS = 'author { login } createdAt bodyHTML url';
+export const COMMENT_FIELDS = 'author { login } createdAt body bodyHTML url';
 
-const comment = (c: RawComment): Comment => ({ author: c.author?.login ?? 'ghost', createdAt: c.createdAt, html: c.bodyHTML, url: c.url, isNew: false });
+const comment = (c: RawComment): Comment => ({ author: c.author?.login ?? 'ghost', createdAt: c.createdAt, html: c.bodyHTML, text: c.body, url: c.url, isNew: false });
 
 const VERDICT: Record<Exclude<RawReview['state'], 'PENDING'>, ReviewVerdict> = {
   APPROVED: 'approved', CHANGES_REQUESTED: 'changes_requested', COMMENTED: 'commented', DISMISSED: 'dismissed',
@@ -33,7 +33,7 @@ export function toConversation(comments: RawComment[], reviews: RawReview[], thr
   }
   for (const t of threads) {
     if (!t.comments.nodes.length) continue;
-    items.push({ kind: 'thread', path: t.path, line: t.line ?? t.originalLine, resolved: t.isResolved, outdated: t.isOutdated, comments: t.comments.nodes.map(comment) });
+    items.push({ kind: 'thread', id: t.id, path: t.path, line: t.line ?? t.originalLine, resolved: t.isResolved, outdated: t.isOutdated, comments: t.comments.nodes.map(comment) });
   }
   return items.sort((a, b) => Date.parse(startedAt(a)) - Date.parse(startedAt(b)));
 }
