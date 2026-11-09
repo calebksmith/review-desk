@@ -14,6 +14,7 @@ const controller = new Controller(new SampleSource(), { get: <T>(k: string) => s
   openFile: (path, line) => console.log('openFile', path, line),
   openExternal: (url) => console.log('openExternal', url),
   confirm: async () => true,
+  askAgent: async (prompt) => { console.log(prompt); return 'clipboard'; },
 });
 
 (window as unknown as { acquireVsCodeApi: () => unknown }).acquireVsCodeApi = () => ({

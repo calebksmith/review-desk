@@ -9,6 +9,7 @@ This is phase 1 of five: a read-only review panel on GitHub data. The agent step
 - **Review queue:** open and recently merged PRs, filtered by Needs you, Approved and Merged, sorted by what needs you first.
 - **Dependabot updates in one click:** when Dependabot PRs have no conflicts and every check passed, **Merge N Dependabot updates** in the queue approves and merges them one at a time. Each is re-checked before its turn, since merging one can make the next conflict. Any that GitHub refuses, for example because the repo needs another approval, are skipped with GitHub's reason. Ones with failing checks stay in the queue for you to open.
 - **Checks:** every check run and commit status (Vercel, for one) on the latest commit, failures first, with a link to each log. A failed GitHub Actions job names the step that failed and shows the error lines from its log.
+- **Fix with agent:** on any failing check, hands the failure to your AI agent as a ready prompt: the PR, the branch, the failed step, the error lines, and a plan that works in a separate worktree and asks before pushing. It opens a new Claude Code session if Claude Code is installed, otherwise VS Code's chat in agent mode, otherwise copies the prompt. The prompt is filled in, not sent.
 - **Your review:** the PR's description and conversation above its changed files, with a Viewed checkbox for each file, and the diff. Viewed state is GitHub's own, so it matches github.com.
 - **Description and conversation:** the start of the description, formatted as on GitHub, with **Show full description** for the rest. The Conversation tab lists comments, reviews and comments on lines of code, newest first, marking what's new since you last looked. A comment on a line of code opens that file.
 - **New commits since you looked:** when the agent pushes after you opened a PR, a banner names the files and shows only what changed since.
@@ -33,6 +34,7 @@ To install it as a normal extension, run `npm run package` and install the `.vsi
 | --- | --- |
 | `reviewDesk.repository` | Always review this `owner/name`. **Switch repository** updates it when it's set |
 | `reviewDesk.label` | Only show PRs with this label, such as `review-desk` |
+| `reviewDesk.agent` | Where **Fix with agent** sends a failure: `auto` (default), `claudeCode`, `chat` or `clipboard` |
 
 ## How it's built
 
@@ -43,6 +45,7 @@ The extension host talks to GitHub; the webview only renders. `src/controller.ts
 | `src/extension.ts` | Commands, GitHub sign-in, the webview panel |
 | `src/github.ts` | GitHub REST and GraphQL calls |
 | `src/controller.ts` | Review state and the messages the webview sends |
+| `src/agent.ts` | The prompt **Fix with agent** gives your AI agent |
 | `src/conversation.ts` | A PR's comments, reviews and line threads as one timeline |
 | `src/logs.ts` | The error lines from a failed GitHub Actions log |
 | `src/repos.ts` | Which repo to review: the setting, your last pick, or the folders that are open |

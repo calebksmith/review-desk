@@ -29,6 +29,13 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Only show pull requests with this label. Leave empty to show every open pull request."
+        },
+        "reviewDesk.agent": {
+          "type": "string",
+          "enum": ["auto", "claudeCode", "chat", "clipboard"],
+          "enumDescriptions": ["Claude Code if it's installed, then VS Code's chat, then the clipboard", "A new Claude Code session", "VS Code's chat, in agent mode (Copilot or another chat agent)", "Copy the prompt to paste into any agent"],
+          "default": "auto",
+          "markdownDescription": "Where **Fix with agent** sends a failing check. The prompt is filled in, not sent, so you can read it first."
         }
       }
     }

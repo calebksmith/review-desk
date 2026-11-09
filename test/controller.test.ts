@@ -7,10 +7,11 @@ function setup(label = '', onConfirm: (question: string, action: string) => void
   const sent: ToWebview[] = [];
   const store = new Map<string, unknown>();
   let confirmed = true;
-  const host: Host = { post: (m) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async (q, a) => { onConfirm(q, a); return confirmed; } };
+  const prompts: string[] = [];
+  const host: Host = { post: (m) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async (q, a) => { onConfirm(q, a); return confirmed; }, askAgent: async (p) => { prompts.push(p); return 'clipboard'; } };
   const c = new Controller(new SampleSource(), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host, label);
   const last = (): HostState => (sent.filter((m) => m.type === 'state').at(-1) as { state: HostState }).state;
-  return { c, sent, store, last, refuse: () => { confirmed = false; } };
+  return { c, sent, store, last, prompts, refuse: () => { confirmed = false; } };
 }
 
 describe('Controller', () => {
@@ -142,5 +143,15 @@ describe('Controller', () => {
     await c.handle({ type: 'mergeDependabot' });
     expect(last().queue.find((p) => p.number === 60)?.state).toBe('open');
     expect(last().notice).toBeNull();
+  });
+
+  it('hands a failing check to the agent and says where the prompt went', async () => {
+    const { c, sent, prompts } = setup();
+    await c.handle({ type: 'openPr', number: 55 });
+    await c.handle({ type: 'fixWithAgent', check: 'Tests' });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Failing check: Tests (GitHub Actions)');
+    expect(prompts[0]).toContain('AssertionError');
+    expect(sent.at(-1)).toEqual({ type: 'toast', text: 'Copied why Tests failed as a prompt. Paste it into your agent.' });
   });
 });

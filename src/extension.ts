@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { AgentRoute } from './agent';
 import { Controller, type Host } from './controller';
 import { GitHubSource } from './github';
 import type { FromWebview } from './protocol';
@@ -127,6 +128,7 @@ function open(context: vscode.ExtensionContext, source: DataSource): void {
     },
     openExternal: (url) => { void vscode.env.openExternal(vscode.Uri.parse(url)); },
     confirm: async (question, action) => (await vscode.window.showWarningMessage(question, { modal: true }, action)) === action,
+    askAgent,
   };
   const label = vscode.workspace.getConfiguration('reviewDesk').get<string>('label')?.trim() ?? '';
   const store = { get: <T>(key: string) => context.workspaceState.get<T>(key), set: (key: string, value: unknown) => context.workspaceState.update(key, value) };
@@ -135,6 +137,36 @@ function open(context: vscode.ExtensionContext, source: DataSource): void {
   panel.onDidDispose(() => { panel = undefined; }, undefined, context.subscriptions);
   webview.html = html(webview, context.extensionUri);
 }
+
+/**
+ * Gives a prompt to the reviewer's AI agent, filled in but not sent. Claude Code and VS Code's chat
+ * are opened through their commands; neither is a documented API, so any failure falls back to the
+ * clipboard, which works with every agent.
+ */
+async function askAgent(prompt: string): Promise<AgentRoute> {
+  const choice = vscode.workspace.getConfiguration('reviewDesk').get<string>('agent') ?? 'auto';
+  const commands = new Set(await vscode.commands.getCommands(true));
+  const tryClaude = (choice === 'auto' || choice === 'claudeCode') && commands.has(CLAUDE_OPEN);
+  const tryChat = (choice === 'auto' || choice === 'chat') && commands.has(CHAT_OPEN);
+  if (tryClaude) {
+    try {
+      // Same call Claude Code's own vscode://anthropic.claude-code/open?prompt= link makes: a new session with the prompt in it.
+      await vscode.commands.executeCommand(CLAUDE_OPEN, undefined, prompt);
+      return 'claudeCode';
+    } catch { /* fall through */ }
+  }
+  if (tryChat) {
+    try {
+      await vscode.commands.executeCommand(CHAT_OPEN, { query: prompt, isPartialQuery: true, mode: 'agent' });
+      return 'chat';
+    } catch { /* fall through */ }
+  }
+  await vscode.env.clipboard.writeText(prompt);
+  return 'clipboard';
+}
+
+const CLAUDE_OPEN = 'claude-vscode.editor.open';
+const CHAT_OPEN = 'workbench.action.chat.open';
 
 function html(webview: vscode.Webview, root: vscode.Uri): string {
   const nonce = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');

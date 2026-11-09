@@ -1,4 +1,5 @@
 import type { FromWebview, HostState, MergeMethod, ToWebview } from './protocol';
+import { fixPrompt, type AgentRoute } from './agent';
 import { markNew } from './conversation';
 import type { DataSource, Store } from './source';
 import { bulkMergeable, bulkSkipReason, mergeBlocker, mergeWarning, plural } from './status';
@@ -8,6 +9,8 @@ export interface Host {
   openFile(path: string, line: number | null): void;
   openExternal(url: string): void;
   confirm(question: string, action: string): Promise<boolean>;
+  /** Hands a prompt to the reviewer's AI agent, filled in but not sent, and says where it went. */
+  askAgent(prompt: string): Promise<AgentRoute>;
 }
 
 /**
@@ -37,6 +40,7 @@ export class Controller {
         case 'openFile': this.host.openFile(msg.path, msg.line); break;
         case 'openExternal': this.host.openExternal(msg.url); break;
         case 'mergeDependabot': await this.mergeDependabot(); break;
+        case 'fixWithAgent': await this.fixWithAgent(msg.check); break;
         case 'dismissNotice': this.set({ notice: null }); break;
       }
     } catch (err) {
@@ -138,6 +142,19 @@ export class Controller {
     const done = merged.length ? `Merged ${plural(merged.length, 'Dependabot update')}: ${merged.map((n) => `#${n}`).join(', ')}.` : 'Merged nothing.';
     this.set({ busy: null, bulk: null, notice: skipped.length ? `${done} Skipped ${skipped.join('; ')}.` : done });
     await this.loadQueue();
+  }
+
+  private async fixWithAgent(check: string): Promise<void> {
+    const pr = this.state.pr;
+    const run = pr?.checkRuns.find((r) => r.name === check);
+    if (!pr || !run) return;
+    const via = await this.host.askAgent(fixPrompt(this.source.repo, pr, run));
+    const text = {
+      claudeCode: `Opened Claude Code with why ${run.name} failed. Read the prompt, then send it.`,
+      chat: `Opened chat with why ${run.name} failed. Read the prompt, then send it.`,
+      clipboard: `Copied why ${run.name} failed as a prompt. Paste it into your agent.`,
+    }[via];
+    this.host.post({ type: 'toast', text });
   }
 
   private async updateBranch(): Promise<void> {

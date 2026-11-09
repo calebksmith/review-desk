@@ -133,4 +133,5 @@ export type FromWebview =
   | { type: 'openFile'; path: string; line: number | null }
   | { type: 'openExternal'; url: string }
   | { type: 'mergeDependabot' }
+  | { type: 'fixWithAgent'; check: string }
   | { type: 'dismissNotice' };
