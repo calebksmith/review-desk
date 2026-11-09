@@ -74,7 +74,7 @@ export class Controller {
     // Seen means opened: the next push or comment after this is "new since you looked".
     await this.store.set(key, pr.headSha);
     await this.store.set(atKey, new Date().toISOString());
-    this.set({ pr: { ...pr, conversation: markNew(pr.conversation, seenAt, me) }, loading: false });
+    this.set({ pr: { ...pr, conversation: markNew(pr.conversation, seenAt, me), seenBefore: seenAt !== null }, loading: false });
   }
 
   private async setViewed(path: string, viewed: boolean): Promise<void> {

@@ -12,11 +12,13 @@ const vscode = acquireVsCodeApi();
 
 type Filter = 'all' | Bucket;
 type Sort = 'needs' | 'updated';
-type About = 'desc' | 'conv';
-interface View { filter: Filter; sort: Sort; step: 'checks' | 'review'; file: string | null; onlyNew: boolean; pr: number | null; sel: number; method: MergeMethod | null; keys: boolean; about: About; aboutOpen: boolean; menu: 'checklist' | 'methods' | null }
+type Step = 'overview' | 'checks' | 'files';
+interface View { filter: Filter; sort: Sort; step: Step; file: string | null; onlyNew: boolean; pr: number | null; sel: number; method: MergeMethod | null; keys: boolean; menu: 'checklist' | 'methods' | null }
 
 let host: HostState | null = null;
-let view: View = { filter: 'all', sort: 'needs', step: 'review', file: null, onlyNew: false, pr: null, sel: 0, method: null, about: 'desc', aboutOpen: false, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
+let view: View = { filter: 'all', sort: 'needs', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
+// State saved by older versions named the files page "review".
+if (!['overview', 'checks', 'files'].includes(view.step)) view.step = 'files';
 const send = (msg: FromWebview) => vscode.postMessage(msg);
 const app = document.getElementById('app')!;
 
@@ -38,6 +40,7 @@ const I = {
   com: svg('M4 5h16v11H9l-5 4z'),
   minus: svg('M6 12h12'),
   down: svg('M7 10l5 5 5-5', 'ico caretico'),
+  doc: svg('M7 4h7l4 4v12H7zM14 4v4h4M10 12h5M10 16h5'),
   spark: svg('M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z'),
 };
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -195,17 +198,19 @@ function checksState(pr: PrDetail): { cls: 'done' | 'fail' | 'run'; sub: string 
 }
 const isFail = (r: CheckRun) => r.status === 'completed' && ['failure', 'timed_out', 'cancelled', 'action_required', 'stale'].includes(r.conclusion ?? '');
 
+/** The PR's pages, as GitHub's tabs: Overview (its Conversation tab), Checks, Files changed. */
 function sidebar(pr: PrDetail): string {
   const c = checksState(pr);
-  const reviewDone = pr.state === 'merged' || pr.myReview === 'approved';
-  const unviewed = pr.files.filter((f) => f.viewed !== 'viewed').length;
-  const status = prStatus(pr).label;
-  const glyph = { done: I.check, fail: I.x, run: '', now: '' } as const;
-  const step = (k: View['step'], label: string, cls: keyof typeof glyph, sub: string) =>
-    `<li class="step ${cls}"><button class="stepbtn" data-step="${k}" aria-current="${view.step === k ? 'step' : 'false'}"><span class="sd" aria-hidden="true">${glyph[cls]}</span><span class="sl"><span>${label}</span><span class="sub">${sub}</span></span></button></li>`;
-  return `<aside class="side" aria-label="Review steps">
-    <div class="grp"><span class="lbl">Automated</span><ol class="steps">${step('checks', 'Checks', c.cls, c.sub)}</ol></div>
-    <div class="grp"><span class="lbl">You</span><ol class="steps">${step('review', 'Your review', reviewDone ? 'done' : 'now', !reviewDone && unviewed ? `${status} · ${plural(unviewed, 'file')} to read` : status)}</ol></div></aside>`;
+  const n = conversationCounts(pr.conversation);
+  const seen = pr.files.filter((f) => f.viewed === 'viewed').length;
+  const filesDone = pr.state === 'merged' || pr.myReview === 'approved' || (pr.files.length > 0 && seen === pr.files.length);
+  const glyph = { done: I.check, fail: I.x, run: '', now: '', info: I.doc } as const;
+  const step = (k: Step, label: string, cls: keyof typeof glyph, sub: string, key: number) =>
+    `<li class="step ${cls}"><button class="stepbtn" data-step="${k}" aria-current="${view.step === k ? 'page' : 'false'}" title="${label} (${key})"><span class="sd" aria-hidden="true">${glyph[cls]}</span><span class="sl"><span>${label}</span><span class="sub ${k === 'overview' && n.fresh ? 'fresh' : ''}">${sub}</span></span></button></li>`;
+  const overviewSub = n.fresh ? `${plural(n.fresh, 'new comment')}` : n.comments ? plural(n.comments, 'comment') : 'Description';
+  const filesSub = pr.myReview === 'approved' ? `Approved · ${seen} of ${pr.files.length} viewed` : `${seen} of ${plural(pr.files.length, 'file')} viewed`;
+  return `<aside class="side" aria-label="Pull request pages"><ol class="steps">
+    ${step('overview', 'Overview', 'info', overviewSub, 1)}${step('checks', 'Checks', c.cls, c.sub, 2)}${step('files', 'Files changed', filesDone ? 'done' : 'now', filesSub, 3)}</ol></aside>`;
 }
 
 function stepChecks(pr: PrDetail): string {
@@ -224,7 +229,7 @@ function stepChecks(pr: PrDetail): string {
     <div class="pad">${rows || '<div class="empty">This repo runs no checks on pull requests.</div>'}</div>`;
 }
 
-function stepReview(pr: PrDetail): string {
+function stepFiles(pr: PrDetail): string {
   const files = pr.files;
   if (!view.file || !files.some((f) => f.path === view.file)) view.file = (files.find((f) => f.viewed !== 'viewed') ?? files[0])?.path ?? null;
   const file = files.find((f) => f.path === view.file);
@@ -246,9 +251,7 @@ function stepReview(pr: PrDetail): string {
   const banner = since && pr.state !== 'merged' ? `<div class="newbar">${I.rerun}<b>${plural(since.commits, 'new commit')} since you looked</b><span class="chip">${esc(since.fromSha.slice(0, 7))}…${esc(since.toSha.slice(0, 7))}</span><span>${since.files.map((f) => esc(base(f.path))).join(', ')}</span>
     ${fileSince ? `<div class="seg"><button data-onlynew="0" aria-pressed="${!view.onlyNew}">Whole change</button><button data-onlynew="1" aria-pressed="${view.onlyNew}">Since you looked</button></div>` : since.files[0] ? `<button class="btn sm" data-file="${esc(since.files[0].path)}" data-onlynew="1">Show it${I.chev}</button>` : ''}</div>` : '';
 
-  // No page title: the header's button and the "Can it merge" strip already say what's next.
   return `${banner}
-    ${about(pr)}
     <div class="split"><nav class="files" aria-label="Changed files"><div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}<span class="hint"><kbd>n</kbd><kbd>p</kbd> next file <kbd>v</kbd> viewed</span></nav>
       <section class="diffpane" aria-label="Diff">${file ? `<div class="dh"><span class="mono">${esc(file.path)}</span><label class="vt"><input type="checkbox" data-viewed="${esc(file.path)}" ${file.viewed === 'viewed' ? 'checked' : ''}> Viewed</label></div>
         <div class="code">${lines ? lines.map(diffLine).join('') : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>'}</section></div>`;
@@ -266,21 +269,20 @@ const base = (p: string) => p.split('/').pop() ?? p;
 const dir = (p: string) => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i + 1); };
 
 /* ---------- Description and conversation ---------- */
-const COLLAPSED_ITEMS = 2;
-
-/** What the PR is for and what people said about it, above the diff. Collapsed, it shows the start. */
-function about(pr: PrDetail): string {
+/**
+ * GitHub's Conversation tab: the description in full, then the conversation oldest first, then the comment
+ * box. Nothing is clamped; this page is for reading.
+ */
+function stepOverview(pr: PrDetail): string {
   const n = conversationCounts(pr.conversation);
-  const conv = view.about === 'conv';
-  const tab = (k: About, label: string) => `<button role="tab" data-about="${k}" aria-selected="${view.about === k}" aria-pressed="${view.about === k}">${label}</button>`;
-  const fresh = n.fresh ? ` <span class="newtag">${n.fresh} new</span>` : '';
-  const more = view.aboutOpen ? 'Show less' : conv ? `Show all ${n.comments}` : 'Show full description';
-  const canMore = conv ? pr.conversation.length > COLLAPSED_ITEMS || view.aboutOpen : true;
-  return `<section class="about" aria-label="About this pull request"><div class="abh">
-      <div class="seg" role="tablist" aria-label="About this pull request">${tab('desc', 'Description')}${tab('conv', `Conversation <span class="n">${n.comments}</span>${fresh}`)}</div>
-      ${conv && n.unresolved ? `<span class="it warn">${I.alert}${plural(n.unresolved, 'unresolved thread')}</span>` : ''}
-      ${canMore ? `<button class="link more" data-do="about" aria-expanded="${view.aboutOpen}">${more}</button>` : ''}</div>
-    <div class="abb ${view.aboutOpen ? 'open' : 'clamp'}" role="tabpanel">${conv ? conversation(pr.conversation) : description(pr)}</div>${conv ? compose(pr) : ''}</section>`;
+  const meta = `<span>${esc(pr.author)} wants to merge <span class="mono">${esc(pr.headRef)}</span> into <span class="mono">${esc(pr.baseRef)}</span></span>`;
+  const jump = n.fresh ? `<button class="link" data-do="jumpNew">${plural(n.fresh, 'new comment')}${I.down}</button>` : '';
+  return `<div class="ov">
+    <div class="ovmeta">${meta}${jump}</div>
+    <section class="ovdesc" aria-label="Description">${description(pr)}</section>
+    <section class="ovconv" aria-label="Conversation"><h3 class="lbl">Conversation${n.comments ? ` · ${n.comments}` : ''}${n.unresolved ? ` <span class="warnc">${I.alert}${plural(n.unresolved, 'unresolved thread')}</span>` : ''}</h3>
+      ${conversation(pr.conversation)}</section>
+    ${compose(pr)}</div>`;
 }
 
 /** The comment box, with the reviewer's one-click comments (like "@codex review") above it. */
@@ -307,11 +309,16 @@ function description(pr: PrDetail): string {
   return pr.bodyHtml.trim() ? `<div class="md">${safe(pr.bodyHtml)}</div>` : '<p class="none">The author didn’t write a description.</p>';
 }
 
-/** Newest first, so what changed lately is on top. Collapsed, only the latest few show. */
+/** Oldest first, as on GitHub; the first new comment is marked so "N new comments" can jump to it. */
 function conversation(items: ConversationItem[]): string {
   if (!items.length) return '<p class="none">No comments yet.</p>';
-  const newest = [...items].sort((a, b) => Date.parse(startedAt(b)) - Date.parse(startedAt(a)));
-  return (view.aboutOpen ? newest : newest.slice(0, COLLAPSED_ITEMS)).map(convItem).join('');
+  let marked = false;
+  return [...items].sort((a, b) => Date.parse(startedAt(a)) - Date.parse(startedAt(b))).map((it) => {
+    const fresh = it.kind === 'thread' ? it.comments.some((c) => c.isNew) : it.comment.isNew;
+    const html = convItem(it, fresh && !marked);
+    if (fresh) marked = true;
+    return html;
+  }).join('');
 }
 
 const VERDICT: Record<ReviewVerdict, string> = {
@@ -319,12 +326,13 @@ const VERDICT: Record<ReviewVerdict, string> = {
   commented: '<span class="pill">Reviewed</span>', dismissed: '<span class="pill">Dismissed</span>',
 };
 
-function convItem(it: ConversationItem): string {
-  if (it.kind !== 'thread') return `<article class="ci">${comment(it.comment, it.kind === 'review' ? VERDICT[it.verdict] : '')}</article>`;
+function convItem(it: ConversationItem, firstNew = false): string {
+  const anchor = firstNew ? ' id="firstnew"' : '';
+  if (it.kind !== 'thread') return `<article class="ci"${anchor}>${comment(it.comment, it.kind === 'review' ? VERDICT[it.verdict] : '')}</article>`;
   const where = `${base(it.path)}${it.line ? `:${it.line}` : ''}`;
   const state = it.resolved ? '<span class="pill">Resolved</span>' : '<span class="pill need">Unresolved</span>';
   const fix = it.resolved ? '' : `<button class="btn sm fix end" data-thread="${esc(it.id)}" title="Send this comment to your AI agent">${I.spark}Fix with agent</button>`;
-  return `<article class="ci thread"><div class="cih">${I.com}<button class="link mono" data-file="${esc(it.path)}" title="Show ${esc(it.path)} in the diff">${esc(where)}</button>${state}${it.outdated ? '<span class="pill">Outdated</span>' : ''}${fix}</div>
+  return `<article class="ci thread"${anchor} data-thread-id="${esc(it.id)}"><div class="cih">${I.com}<button class="link mono" data-file="${esc(it.path)}" title="Show ${esc(it.path)} in the diff">${esc(where)}</button>${state}${it.outdated ? '<span class="pill">Outdated</span>' : ''}${fix}</div>
     ${it.comments.map((c) => comment(c, '')).join('')}</article>`;
 }
 
@@ -344,20 +352,10 @@ function safe(html: string): string {
   return out;
 }
 
-/** Hides "Show full description" when the description already fits. */
-function fitAbout(): void {
-  const box = app.querySelector<HTMLElement>('.abb.clamp');
-  if (!box || view.about !== 'desc') return;
-  if (box.scrollHeight <= box.clientHeight + 1) {
-    box.classList.remove('clamp');
-    app.querySelector<HTMLElement>('.about .more')?.remove();
-  }
-}
-
 function prView(h: HostState): string {
   const pr = h.pr;
   if (!pr) return `<div class="crumb"><button class="home" data-do="back">${I.inbox}Review queue</button></div><div class="empty"><span class="spin"></span>Loading pull request</div>`;
-  return `${crumb(pr, h)}<div class="cols">${sidebar(pr)}<main>${view.step === 'checks' ? stepChecks(pr) : stepReview(pr)}</main></div>`;
+  return `${crumb(pr, h)}<div class="cols">${sidebar(pr)}<main>${view.step === 'checks' ? stepChecks(pr) : view.step === 'files' ? stepFiles(pr) : stepOverview(pr)}</main></div>`;
 }
 
 function render(): void {
@@ -367,7 +365,6 @@ function render(): void {
   const box = document.getElementById('cbox') as HTMLTextAreaElement | null;
   const draft = box ? { value: box.value, focused: document.activeElement === box, at: box.selectionStart } : null;
   app.innerHTML = err + (host.view === 'pr' ? prView(host) : queue(host)) + (view.keys ? keysHelp() : '');
-  fitAbout();
   const next = document.getElementById('cbox') as HTMLTextAreaElement | null;
   if (next && draft && host.busy !== null) next.value = draft.value;
   else if (next && draft) { next.value = draft.value; if (draft.focused) { next.focus(); next.setSelectionRange(draft.at, draft.at); } }
@@ -377,7 +374,7 @@ function keysHelp(): string {
   const r = (ks: string[], t: string) => `<div class="kr">${ks.map((k) => `<kbd>${k}</kbd>`).join('')}<span>${t}</span></div>`;
   return `<div class="keys" data-do="keys"><div class="kp" role="dialog" aria-label="Keyboard shortcuts"><b>Keyboard shortcuts</b>
     <span class="lbl">Queue</span>${r(['j', 'k'], 'Move down or up')}${r(['Enter'], 'Open the pull request')}${r(['r'], 'Refresh')}
-    <span class="lbl">Pull request</span>${r(['j', 'k'], 'Next or previous pull request')}${r(['n', 'p'], 'Next or previous file')}${r(['v'], 'Toggle viewed on this file')}${r(['d'], 'Show or hide the full description')}${r(['1', '2'], 'Checks, Your review')}${r(['a'], 'Approve')}${r(['Esc'], 'Back to the queue')}${r(['?'], 'Show or hide this list')}</div></div>`;
+    <span class="lbl">Pull request</span>${r(['j', 'k'], 'Next or previous pull request')}${r(['n', 'p'], 'Next or previous file')}${r(['v'], 'Toggle viewed on this file')}${r(['1', '2', '3'], 'Overview, Checks, Files changed')}${r(['a'], 'Approve')}${r(['Esc'], 'Back to the queue')}${r(['?'], 'Show or hide this list')}</div></div>`;
 }
 
 /* ---------- Events ---------- */
@@ -386,8 +383,9 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
   if (msg.type === 'state') {
     const pr = msg.state.pr;
     if (pr && pr.number !== view.pr) {
-      // Open on the conversation when there's something new in it; otherwise on the description.
-      view = { ...view, pr: pr.number, file: null, onlyNew: false, step: 'review', about: conversationCounts(pr.conversation).fresh ? 'conv' : 'desc', aboutOpen: false, menu: null };
+      // First look, or new comments: start on Overview for the context. Otherwise pick up the files.
+      const start: Step = !pr.seenBefore || conversationCounts(pr.conversation).fresh ? 'overview' : 'files';
+      view = { ...view, pr: pr.number, file: null, onlyNew: false, step: start, menu: null };
       vscode.setState(view);
     }
     host = msg.state;
@@ -423,19 +421,18 @@ document.addEventListener('click', (e) => {
     if (/^https?:/.test(a.href)) send({ type: 'openExternal', url: a.href });
     return;
   }
-  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-step],[data-about],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
+  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
   if (!t || (t as HTMLButtonElement).disabled) return;
   // An action picked from a menu closes it.
   if (view.menu && t.closest('.pop')) view.menu = null;
   const d = t.dataset;
   if (d.open) send({ type: 'openPr', number: Number(d.open) });
   else if (d.filter) save({ filter: d.filter as Filter });
-  else if (d.step) save({ step: d.step as View['step'] });
-  else if (d.about) save({ about: d.about as About });
+  else if (d.step) save({ step: d.step as Step });
   else if (d.fix) send({ type: 'fixWithAgent', check: d.fix });
   else if (d.thread) send({ type: 'fixThread', id: d.thread });
   else if (d.action) { const a: CommentAction | undefined = host?.actions[Number(d.action)]; if (a) send({ type: 'comment', body: a.comment }); }
-  else if (d.file) save({ file: d.file, step: 'review', onlyNew: d.onlynew === '1' });
+  else if (d.file) save({ file: d.file, step: 'files', onlyNew: d.onlynew === '1' });
   else if (d.onlynew) save({ onlyNew: d.onlynew === '1' });
   else if (d.line && view.file) send({ type: 'openFile', path: view.file, line: Number(d.line) });
   else if (d.ext) send({ type: 'openExternal', url: d.ext });
@@ -445,13 +442,17 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'merge') send({ type: 'merge', method: (d.method as MergeMethod | undefined) ?? 'merge' });
   else if (d.do === 'updateBranch') send({ type: 'updateBranch' });
   else if (d.do === 'keys') save({ keys: false });
-  else if (d.do === 'about') save({ aboutOpen: !view.aboutOpen });
+  else if (d.do === 'jumpNew') document.getElementById('firstnew')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
   else if (d.do === 'fixConflicts') send({ type: 'fixConflicts' });
   else if (d.do === 'mergeDependabot') send({ type: 'mergeDependabot' });
   else if (d.do === 'closeDependabot') send({ type: 'closeDependabot' });
   else if (d.do === 'comment') postComment();
   else if (d.do === 'dismissNotice') send({ type: 'dismissNotice' });
-  else if (d.do === 'threads') save({ step: 'review', about: 'conv', aboutOpen: true });
+  else if (d.do === 'threads') {
+    save({ step: 'overview' });
+    const open = Array.from(document.querySelectorAll<HTMLElement>('[data-thread-id]')).find((el) => el.querySelector('.pill.need'));
+    open?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
 });
 
 function postComment(): void {
@@ -493,13 +494,13 @@ document.addEventListener('keydown', (e) => {
   } else if (k === 'n' || k === 'p') {
     const i = Math.max(0, pr.files.findIndex((f) => f.path === view.file));
     const f = pr.files[Math.min(pr.files.length - 1, Math.max(0, i + (k === 'n' ? 1 : -1)))];
-    if (f) save({ file: f.path, step: 'review', onlyNew: false });
-  } else if (k === 'v' && view.step === 'review' && view.file) {
+    if (f) save({ file: f.path, step: 'files', onlyNew: false });
+  } else if (k === 'v' && view.step === 'files' && view.file) {
     const f = pr.files.find((x) => x.path === view.file);
     if (f) send({ type: 'setViewed', path: f.path, viewed: f.viewed !== 'viewed' });
-  } else if (k === 'd') save({ step: 'review', about: 'desc', aboutOpen: view.step !== 'review' || view.about !== 'desc' || !view.aboutOpen });
-  else if (k === '1') save({ step: 'checks' });
-  else if (k === '2') save({ step: 'review' });
+  } else if (k === '1') save({ step: 'overview' });
+  else if (k === '2') save({ step: 'checks' });
+  else if (k === '3') save({ step: 'files' });
   else if (k === 'a' && pr.state !== 'merged' && pr.myReview !== 'approved') send({ type: 'approve' });
 });
 

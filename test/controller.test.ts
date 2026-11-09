@@ -193,4 +193,12 @@ describe('Controller', () => {
     await c.handle({ type: 'openPr', number: 61 });
     expect(last().pr!.conversation.at(-1)).toMatchObject({ comment: { text: '@dependabot ignore this major version' } });
   });
+
+  it('tells the panel whether the PR was opened before, so it can start on Overview the first time', async () => {
+    const { c, last } = setup();
+    await c.handle({ type: 'openPr', number: 57 });
+    expect(last().pr!.seenBefore).toBe(false);
+    await c.handle({ type: 'openPr', number: 57 });
+    expect(last().pr!.seenBefore).toBe(true);
+  });
 });

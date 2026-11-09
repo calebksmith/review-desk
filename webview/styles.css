@@ -118,8 +118,8 @@ main { flex: 1; min-width: 0; overflow: auto; display: flex; flex-direction: col
 .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px }
 .stepbtn { background: none; border: 0; padding: 8px; margin: 0 -8px; border-radius: 6px; display: flex; gap: 10px; width: calc(100% + 16px); text-align: left; cursor: pointer }
 .stepbtn:hover { background: var(--chrome) }
-.stepbtn[aria-current="step"] { background: var(--accent-soft) }
-.stepbtn[aria-current="step"] .sl > span:first-child { font-weight: 600 }
+.stepbtn[aria-current="page"] { background: var(--accent-soft) }
+.stepbtn[aria-current="page"] .sl > span:first-child { font-weight: 600 }
 .sd { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--line); display: flex; align-items: center; justify-content: center; flex-shrink: 0 }
 .sd .ico { width: 12px; height: 12px; stroke-width: 3 }
 .step.done .sd { background: var(--ok); border-color: var(--ok); color: var(--win) }
@@ -208,19 +208,8 @@ kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: ce
 .prc .end { flex-shrink: 0 }
 @media (max-width: 720px) { .prc .hl, .prc .sep { display: none } }
 
-/* Description and conversation */
-.about { border-bottom: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0 }
-.abh { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 20px; border-bottom: 1px solid var(--line-soft) }
-.abh .seg button { display: inline-flex; gap: 6px; align-items: center }
-.abh .it { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--warn) }
-.abh .it .ico { width: 14px; height: 14px }
-.abh .more { margin-left: auto }
+/* Overview: the description in full, then the conversation */
 .newtag { font-size: 10px; font-weight: 700; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--accent-fg); line-height: 16px }
-.abb { position: relative; padding: 10px 20px 12px }
-.abb > * { max-width: 90ch }
-.abb.clamp { max-height: 126px; overflow: hidden }
-.abb.clamp::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 32px; background: linear-gradient(transparent, var(--win)); pointer-events: none }
-.abb.open { max-height: 45vh; overflow: auto }
 .none { margin: 0; color: var(--fg-3) }
 .md { line-height: 20px; overflow-wrap: anywhere }
 .md > :first-child { margin-top: 0 } .md > :last-child { margin-bottom: 0 }
@@ -299,3 +288,20 @@ kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: ce
 .blockbar > .ico { color: var(--bad) }
 .blockbar .btn { margin-left: auto }
 @media (max-width: 720px) { .sumtext { display: none } }
+
+.ov { padding: 16px 20px 24px; display: flex; flex-direction: column; gap: 16px; max-width: calc(90ch + 40px) }
+.ovmeta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; color: var(--fg-2); font-size: 12px }
+.ovmeta .mono { font-size: 11px; padding: 1px 5px; border-radius: 4px; background: var(--chrome) }
+.ovmeta .link { margin-left: auto }
+.ovdesc { padding-bottom: 16px; border-bottom: 1px solid var(--line-soft) }
+.ovdesc .md { font-size: 13px; line-height: 21px }
+.ovconv { display: flex; flex-direction: column; gap: 4px }
+.ovconv h3 { margin: 0 0 6px; display: flex; align-items: center; gap: 10px }
+.ovconv .warnc { display: inline-flex; align-items: center; gap: 4px; color: var(--warn); text-transform: none; letter-spacing: 0 }
+.ovconv .warnc .ico { width: 13px; height: 13px }
+.ov .compose { padding: 12px 0 0; border-top: 1px solid var(--line-soft) }
+#firstnew { scroll-margin-top: 12px }
+.step.info .sd { border-color: var(--line); color: var(--fg-2) }
+.step.info .sd .ico { width: 12px; height: 12px; stroke-width: 2 }
+.sl .sub.fresh { color: var(--accent-ink); font-weight: 600 }
+.side .steps { gap: 2px }

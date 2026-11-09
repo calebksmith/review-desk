@@ -93,6 +93,8 @@ export interface PrDetail extends PrSummary {
   bodyHtml: string;
   /** Oldest first, as on GitHub. */
   conversation: ConversationItem[];
+  /** Whether the reviewer has opened this PR before; set by the controller. */
+  seenBefore?: boolean;
   headRef: string;
   baseRef: string;
   /** Merge methods the repo allows, the default first. */
