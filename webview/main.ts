@@ -294,7 +294,7 @@ function compose(pr: PrDetail): string {
     return `<span class="act"><button class="btn sm ${reply ? '' : 'fix'}" data-action="${i}" ${h.busy ? 'disabled' : ''} title="Posts “${esc(a.comment)}”">${esc(a.label)}</button>${reply ? `<span class="sub">${esc(reply.author)} replied ${ago(reply.createdAt)} ago</span>` : a.reviewer ? '<span class="sub">No reply yet</span>' : ''}</span>`;
   }).join('');
   return `<div class="compose">${acts ? `<div class="acts">${acts}</div>` : ''}
-    <div class="box"><textarea id="cbox" rows="2" placeholder="Leave a comment" aria-label="Leave a comment" ${busy ? 'disabled' : ''}></textarea>
+    <div class="box"><textarea id="cbox" rows="1" placeholder="Leave a comment" aria-label="Leave a comment" ${busy ? 'disabled' : ''}></textarea>
     <button class="btn" data-do="comment" ${h.busy ? 'disabled' : ''}>${busy ? '<span class="spin sm"></span>' : ''}Comment</button></div></div>`;
 }
 
@@ -397,6 +397,14 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
     clearTimeout((t as unknown as { timer?: number }).timer);
     (t as unknown as { timer?: number }).timer = window.setTimeout(() => t.classList.remove('show'), 2600);
   }
+});
+
+// The comment box grows with what's typed, up to its max height.
+document.addEventListener('input', (e) => {
+  const t = e.target as HTMLTextAreaElement;
+  if (t.id !== 'cbox') return;
+  t.style.height = 'auto';
+  t.style.height = `${t.scrollHeight + 2}px`;
 });
 
 document.addEventListener('change', (e) => {

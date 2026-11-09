@@ -289,7 +289,9 @@ kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: ce
 .blockbar .btn { margin-left: auto }
 @media (max-width: 720px) { .sumtext { display: none } }
 
-.ov { padding: 16px 20px 24px; display: flex; flex-direction: column; gap: 16px; max-width: calc(90ch + 40px) }
+.ov { padding: 16px 20px 24px; display: flex; flex-direction: column; gap: 16px; min-height: 100% }
+.ov > :not(.compose) { max-width: 90ch; width: 100% }
+.ov .ovconv { flex: 1 }
 .ovmeta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; color: var(--fg-2); font-size: 12px }
 .ovmeta .mono { font-size: 11px; padding: 1px 5px; border-radius: 4px; background: var(--chrome) }
 .ovmeta .link { margin-left: auto }
@@ -299,7 +301,10 @@ kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: ce
 .ovconv h3 { margin: 0 0 6px; display: flex; align-items: center; gap: 10px }
 .ovconv .warnc { display: inline-flex; align-items: center; gap: 4px; color: var(--warn); text-transform: none; letter-spacing: 0 }
 .ovconv .warnc .ico { width: 13px; height: 13px }
-.ov .compose { padding: 12px 0 0; border-top: 1px solid var(--line-soft) }
+/* The comment box stays at the bottom of Overview while the conversation scrolls, like a chat. */
+.ov { padding-bottom: 0 }
+.ov .compose { position: sticky; bottom: 0; z-index: 2; margin: 8px -20px 0; padding: 10px 20px 12px; background: var(--win); border-top: 1px solid var(--line); box-shadow: 0 -6px 12px -10px color-mix(in srgb, var(--fg) 30%, transparent) }
+.ov .compose .box textarea { min-height: 32px; max-height: 40vh }
 #firstnew { scroll-margin-top: 12px }
 .step.info .sd { border-color: var(--line); color: var(--fg-2) }
 .step.info .sd .ico { width: 12px; height: 12px; stroke-width: 2 }
