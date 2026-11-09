@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fixPrompt, threadPrompt } from '../src/agent';
+import { conflictPrompt, fixPrompt, threadPrompt } from '../src/agent';
 import type { ConversationItem } from '../src/protocol';
 import { SampleSource } from '../src/sample';
 
@@ -42,5 +42,15 @@ describe('threadPrompt', () => {
     expect(prompt).toContain('> calebksmith: This line logs req.path but not the company.');
     expect(prompt).toContain('> claude: Done in 9d07f3e.');
     expect(prompt).toContain('one-line reply');
+  });
+});
+
+describe('conflictPrompt', () => {
+  it('asks to merge the base in and explain each resolution', async () => {
+    const pr = await new SampleSource().getPr(57, null);
+    const prompt = conflictPrompt('acme/web', pr);
+    expect(prompt.split('\n')[0]).toBe('This PR has merge conflicts with main. Merge main into the branch, resolve the conflicts, and show me how you resolved each one.');
+    expect(prompt).toContain('Branch: claude/experience-dates');
+    expect(prompt).toContain('don’t push until I agree');
   });
 });

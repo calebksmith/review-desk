@@ -146,6 +146,7 @@ export type FromWebview =
   | { type: 'mergeDependabot' }
   | { type: 'fixWithAgent'; check: string }
   | { type: 'fixThread'; id: string }
+  | { type: 'fixConflicts' }
   | { type: 'comment'; body: string }
   | { type: 'closeDependabot' }
   | { type: 'dismissNotice' };

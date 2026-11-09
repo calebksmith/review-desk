@@ -15,7 +15,7 @@ This is phase 1 of five: a read-only review panel on GitHub data. The agent step
 - **Comments:** post a comment from the Conversation tab (⌘Enter sends). Comments you post often, like `@codex review`, can be one-click buttons that show when that reviewer last replied; see `reviewDesk.commentActions`.
 - **Close or ignore** a Dependabot PR from its Checks page: posts the Dependabot command you pick, such as ignoring the new major version, and Dependabot closes the PR.
 - **New commits since you looked:** when the agent pushes after you opened a PR, a banner names the files and shows only what changed since.
-- **Approve and Merge** from the header. Merge asks before it runs, uses the repo's allowed merge method, and takes you back to the queue when it's done. While a check fails, the button reads **Merge anyway** and asks first, naming the failing checks. Conflicts block a merge.
+- **Approve and Merge** from the header, beside one line that says what needs attention ("1 check failing +1") or that the PR is ready. Click that line for the merge checklist, in GitHub's order: approval, checks, conflicts, base branch, open threads, each with its fix. Merge is GitHub's **Squash and merge ▾**, with the method in its dropdown; it asks before it runs and takes you back to the queue. While a check fails it reads **Merge anyway** and names the failing checks. Conflicts block a merge and show a bar with **Fix with agent**.
 
 ## Try it
 

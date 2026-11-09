@@ -1,5 +1,5 @@
 import type { CommentAction, FromWebview, HostState, MergeMethod, ToWebview } from './protocol';
-import { fixPrompt, threadPrompt, type AgentRoute } from './agent';
+import { conflictPrompt, fixPrompt, threadPrompt, type AgentRoute } from './agent';
 import { closeOptions, type CloseOption } from './dependabot';
 import { markNew } from './conversation';
 import type { DataSource, Store } from './source';
@@ -48,6 +48,7 @@ export class Controller {
         case 'mergeDependabot': await this.mergeDependabot(); break;
         case 'fixWithAgent': await this.fixWithAgent(msg.check); break;
         case 'fixThread': await this.fixThread(msg.id); break;
+        case 'fixConflicts': await this.fixConflicts(); break;
         case 'comment': await this.comment(msg.body); break;
         case 'closeDependabot': await this.closeDependabot(); break;
         case 'dismissNotice': this.set({ notice: null }); break;
@@ -173,6 +174,13 @@ export class Controller {
     const via = await this.host.askAgent(threadPrompt(this.source.repo, pr, thread));
     const where = thread.path.split('/').pop();
     this.host.post({ type: 'toast', text: via === 'clipboard' ? `Copied the comment on ${where} as a prompt. Paste it into your agent.` : `Opened ${via === 'claudeCode' ? 'Claude Code' : 'chat'} with the comment on ${where}. Read the prompt, then send it.` });
+  }
+
+  private async fixConflicts(): Promise<void> {
+    const pr = this.state.pr;
+    if (!pr) return;
+    const via = await this.host.askAgent(conflictPrompt(this.source.repo, pr));
+    this.host.post({ type: 'toast', text: via === 'clipboard' ? 'Copied the conflicts as a prompt. Paste it into your agent.' : `Opened ${via === 'claudeCode' ? 'Claude Code' : 'chat'} to resolve the conflicts. Read the prompt, then send it.` });
   }
 
   private async comment(body: string): Promise<void> {

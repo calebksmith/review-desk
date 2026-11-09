@@ -44,3 +44,13 @@ export function threadPrompt(repo: string, pr: PrDetail, thread: Extract<Convers
     `Tell me if the comment is right. If it is, propose the change and a one-line reply for the thread. ${RULES}`,
   ].join('\n');
 }
+
+/** Conflicts with the base branch: Update branch can't fix these, so the agent merges the base in. */
+export function conflictPrompt(repo: string, pr: PrDetail): string {
+  return [
+    `This PR has merge conflicts with ${pr.baseRef}. Merge ${pr.baseRef} into the branch, resolve the conflicts, and show me how you resolved each one.`,
+    ...header(repo, pr),
+    '',
+    `Keep what the PR intends and what ${pr.baseRef} changed since; ask me where they truly disagree. ${RULES}`,
+  ].join('\n');
+}

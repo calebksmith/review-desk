@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { toMergeState, mergeMethods } from '../src/github';
 import type { PrDetail, PrSummary } from '../src/protocol';
-import { bulkMergeable, bulkSkipReason, mergeBlocker, mergeReadiness, mergeWarning, prStatus } from '../src/status';
+import { bulkMergeable, bulkSkipReason, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, prStatus } from '../src/status';
 
 const base: PrSummary = {
   number: 1, title: 't', author: 'a', url: '', additions: 0, deletions: 0, updatedAt: '', headSha: 'abc', isDraft: false, state: 'open',
@@ -32,16 +32,34 @@ describe('prStatus', () => {
 });
 
 describe('mergeReadiness', () => {
-  it('lists conflicts, base, checks and open threads', () => {
+  it('lists reviews, checks, conflicts, base and open threads, in GitHub order', () => {
     const items = mergeReadiness(detail({ mergeState: 'behind', unresolvedThreads: 2, checks: { passed: 2, failed: 1, pending: 0, total: 3 } }));
-    expect(items.map((i) => [i.key, i.tone])).toEqual([['conflicts', 'ok'], ['base', 'warn'], ['checks', 'bad'], ['threads', 'warn']]);
-    expect(items.find((i) => i.key === 'base')?.action).toBe('updateBranch');
+    expect(items.map((i) => [i.key, i.tone])).toEqual([['approval', 'muted'], ['checks', 'bad'], ['conflicts', 'ok'], ['base', 'warn'], ['threads', 'warn']]);
+    expect(items.find((i) => i.key === 'base')).toMatchObject({ text: 'Out of date with main', action: 'updateBranch' });
+    expect(mergeReadiness(detail({ mergeable: false })).find((i) => i.key === 'conflicts')).toMatchObject({ tone: 'bad', action: 'fixConflicts' });
   });
 
   it('says when conflicts are still being worked out', () => {
-    expect(mergeReadiness(detail({ mergeable: null }))[0]).toMatchObject({ tone: 'muted', text: 'Checking for conflicts' });
+    expect(mergeReadiness(detail({ mergeable: null })).find((i) => i.key === 'conflicts')).toMatchObject({ tone: 'muted', text: 'Checking for conflicts' });
+  });
+});
+
+describe('mergeSummary', () => {
+  it('leads with the most urgent problem and counts the rest', () => {
+    expect(mergeSummary(detail({ mergeState: 'behind', unresolvedThreads: 1, checks: { passed: 2, failed: 1, pending: 0, total: 3 } }))).toEqual({ tone: 'bad', text: '1 check failing', more: 2 });
+    expect(mergeSummary(detail({ mergeable: false, mergeState: 'dirty' }))).toMatchObject({ tone: 'bad', text: 'Conflicts with main', more: 0 });
+    expect(mergeSummary(detail({ mergeable: false, checks: { passed: 0, failed: 1, pending: 0, total: 1 } }))).toMatchObject({ text: 'Conflicts with main', more: 1 });
+    expect(mergeSummary(detail({ checks: { passed: 1, failed: 0, pending: 2, total: 3 } }))).toMatchObject({ tone: 'run', text: '2 checks running' });
   });
 
+  it('says ready when nothing needs attention, without leading on approval', () => {
+    expect(mergeSummary(detail())).toEqual({ tone: 'ok', text: 'Ready once you approve', more: 0 });
+    expect(mergeSummary(detail({ myReview: 'approved' }))).toEqual({ tone: 'ok', text: 'Ready to merge', more: 0 });
+    expect(mergeSummary(detail({ checks: { passed: 0, failed: 0, pending: 0, total: 0 } }))).toMatchObject({ text: 'Ready once you approve' });
+  });
+});
+
+describe('merge rules', () => {
   it('blocks merge only on red items', () => {
     expect(mergeBlocker(detail())).toBe(null);
     expect(mergeBlocker(detail({ mergeState: 'behind' }))).toBe(null);

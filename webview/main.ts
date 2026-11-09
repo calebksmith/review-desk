@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify';
 import { conversationCounts, startedAt } from '../src/conversation';
 import type { CheckRun, Comment, CommentAction, ConversationItem, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
-import { bulkMergeable, isDependabot, mergeBlocker, mergeReadiness, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
+import { bulkMergeable, isDependabot, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
 
 // The webview only renders. Everything it knows comes from the host's state messages;
 // what it remembers on its own is view state (filter, step, open file).
@@ -13,10 +13,10 @@ const vscode = acquireVsCodeApi();
 type Filter = 'all' | Bucket;
 type Sort = 'needs' | 'updated';
 type About = 'desc' | 'conv';
-interface View { filter: Filter; sort: Sort; step: 'checks' | 'review'; file: string | null; onlyNew: boolean; pr: number | null; sel: number; method: MergeMethod | null; keys: boolean; about: About; aboutOpen: boolean }
+interface View { filter: Filter; sort: Sort; step: 'checks' | 'review'; file: string | null; onlyNew: boolean; pr: number | null; sel: number; method: MergeMethod | null; keys: boolean; about: About; aboutOpen: boolean; menu: 'checklist' | 'methods' | null }
 
 let host: HostState | null = null;
-let view: View = { filter: 'all', sort: 'needs', step: 'review', file: null, onlyNew: false, pr: null, sel: 0, method: null, about: 'desc', aboutOpen: false, ...(vscode.getState() as Partial<View> | undefined), keys: false };
+let view: View = { filter: 'all', sort: 'needs', step: 'review', file: null, onlyNew: false, pr: null, sel: 0, method: null, about: 'desc', aboutOpen: false, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
 const send = (msg: FromWebview) => vscode.postMessage(msg);
 const app = document.getElementById('app')!;
 
@@ -37,6 +37,7 @@ const I = {
   alert: svg('M12 4l9 16H3zM12 10v4M12 17h.01'),
   com: svg('M4 5h16v11H9l-5 4z'),
   minus: svg('M6 12h12'),
+  down: svg('M7 10l5 5 5-5', 'ico caretico'),
   spark: svg('M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z'),
 };
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -116,22 +117,64 @@ function bulkButton(h: HostState): string {
 
 /* ---------- PR ---------- */
 function crumb(pr: PrDetail, h: HostState): string {
-  let act: string;
-  if (pr.state === 'merged') act = `<span role="status">${statusPill(pr)}</span>`;
-  else if (pr.myReview !== 'approved') act = `<button class="btn pri" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
-  else {
-    const blocker = mergeBlocker(pr);
-    const method = view.method && pr.mergeMethods.includes(view.method) ? view.method : pr.mergeMethods[0]!;
-    const verb = { squash: 'Squash and merge', merge: 'Merge', rebase: 'Rebase and merge' }[method];
-    const pick = pr.mergeMethods.length > 1 ? `<select id="method" aria-label="Merge method">${pr.mergeMethods.map((m) => `<option value="${m}" ${m === method ? 'selected' : ''}>${{ squash: 'Squash', merge: 'Merge commit', rebase: 'Rebase' }[m]}</option>`).join('')}</select>` : '';
-    // With a check failing, Merge stays available but stops being the primary action and says "anyway".
-    const warning = !blocker && mergeWarning(pr);
-    act = `${pick}<button class="btn ${warning ? '' : 'pri'}" data-do="merge" data-method="${method}" ${h.busy || blocker ? 'disabled' : ''} ${blocker || warning ? `title="${esc(blocker || `${warning}. You'll be asked to confirm.`)}"` : ''}>${h.busy === 'merge' ? '<span class="spin"></span>' : I.merge}${verb}${warning ? ' anyway' : ''}</button>`;
-  }
-  // One line: the title truncates before anything else gives way. It's the link to GitHub.
+  // One line: identity on the left, the decision on the right. The title truncates first; it's the GitHub link.
   return `<div class="crumb prc"><button class="home" data-do="back" aria-label="Back to the review queue">${I.inbox}<span class="hl">Review queue</span></button><span class="sep" aria-hidden="true">/</span>
     <div class="pt"><span class="num">#${pr.number}</span><button class="ttl" data-ext="${esc(pr.url)}" title="${esc(pr.title)} (open on GitHub)"><b>${esc(pr.title)}</b>${I.ext}</button><span class="diffstat"><span class="a">+${pr.additions}</span> <span class="d">−${pr.deletions}</span></span></div>
-    <div class="end">${act}</div></div>${pr.state === 'merged' ? '' : readiness(pr, h)}`;
+    <div class="end">${pr.state === 'merged' ? `<span role="status">${statusPill(pr)}</span>` : `${summary(pr, h)}${decision(pr, h)}`}</div></div>${pr.state === 'merged' ? '' : blockBar(pr)}`;
+}
+
+const TONE_ICON: Record<Tone, string> = { ok: I.check, bad: I.x, warn: I.alert, run: '<span class="spin sm"></span>', muted: I.minus };
+
+/**
+ * The one line beside the button: the most urgent thing to know, or that it's ready. It's a disclosure,
+ * styled as text, that opens the merge checklist.
+ */
+function summary(pr: PrDetail, h: HostState): string {
+  const s = mergeSummary(pr);
+  const open = view.menu === 'checklist';
+  return `<div class="dz"><button class="sumline ${s.tone}" data-menu="checklist" aria-expanded="${open}" aria-haspopup="dialog" title="Merge checklist">${TONE_ICON[s.tone]}<span class="sumtext">${esc(s.text)}${s.more ? ` <span class="more">+${s.more}</span>` : ''}</span>${I.down}</button>${open ? checklist(pr, h) : ''}</div>`;
+}
+
+/** GitHub's merge box, on demand: every condition, each with its fix. */
+function checklist(pr: PrDetail, h: HostState): string {
+  const rows = mergeReadiness(pr).map((it) => {
+    const act = it.action === 'updateBranch' ? `<button class="btn sm" data-do="updateBranch" ${h.busy ? 'disabled' : ''}>${h.busy === 'update' ? '<span class="spin sm"></span>' : ''}Update branch</button>`
+      : it.action === 'showChecks' && it.tone !== 'ok' ? '<button class="link" data-step="checks">Show checks</button>'
+      : it.action === 'openThreads' ? '<button class="link" data-do="threads">Show</button>'
+      : it.action === 'fixConflicts' ? `<button class="btn sm fix" data-do="fixConflicts">${I.spark}Fix with agent</button>` : '';
+    return `<li class="ck ${it.tone}">${TONE_ICON[it.tone]}<span>${esc(it.text)}</span>${act}</li>`;
+  }).join('');
+  return `<div class="pop" role="dialog" aria-label="Merge checklist"><span class="lbl">Merge checklist</span><ul>${rows}</ul></div>`;
+}
+
+const VERB: Record<MergeMethod, string> = { squash: 'Squash and merge', merge: 'Create a merge commit', rebase: 'Rebase and merge' };
+const METHOD_NOTE: Record<MergeMethod, string> = {
+  squash: 'Combine all commits into one on the base branch.',
+  merge: 'Keep every commit, joined by a merge commit.',
+  rebase: 'Replay each commit onto the base branch.',
+};
+
+/** The one button that moves the PR forward: Approve, then GitHub's "Squash and merge ▾". */
+function decision(pr: PrDetail, h: HostState): string {
+  if (pr.myReview !== 'approved') return `<button class="btn pri" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
+  const blocker = mergeBlocker(pr);
+  const method = view.method && pr.mergeMethods.includes(view.method) ? view.method : pr.mergeMethods[0]!;
+  // With a check failing, Merge stays available but stops being the primary action and says "anyway".
+  const warning = !blocker && mergeWarning(pr);
+  const cls = `btn ${warning ? '' : 'pri'}`;
+  const off = h.busy || blocker ? 'disabled' : '';
+  const tip = blocker || (warning ? `${warning}. You'll be asked to confirm.` : '');
+  const main = `<button class="${cls} main" data-do="merge" data-method="${method}" ${off} ${tip ? `title="${esc(tip)}"` : ''}>${h.busy === 'merge' ? '<span class="spin"></span>' : I.merge}${VERB[method]}${warning ? ' anyway' : ''}</button>`;
+  if (pr.mergeMethods.length < 2) return main;
+  const open = view.menu === 'methods';
+  const menu = open ? `<div class="pop menu" role="menu" aria-label="Merge method">${pr.mergeMethods.map((m) => `<button role="menuitemradio" aria-checked="${m === method}" data-method-pick="${m}"><span class="mk">${m === method ? I.check : ''}</span><span><b>${VERB[m]}</b><span class="sub">${METHOD_NOTE[m]}</span></span></button>`).join('')}</div>` : '';
+  return `<div class="splitbtn">${main}<button class="${cls} caret" data-menu="methods" aria-haspopup="menu" aria-expanded="${open}" aria-label="Choose how to merge" ${h.busy ? 'disabled' : ''}>${I.down}</button>${menu}</div>`;
+}
+
+/** A conflict changes what the reviewer has to do, so it gets a bar above the page, not just a line in the checklist. */
+function blockBar(pr: PrDetail): string {
+  if (pr.mergeable !== false && pr.mergeState !== 'dirty') return '';
+  return `<div class="blockbar" role="alert">${I.x}<span><b>This branch has conflicts with ${esc(pr.baseRef)}.</b> Resolve them before merging.</span><button class="btn sm fix" data-do="fixConflicts">${I.spark}Fix with agent</button></div>`;
 }
 
 /**
@@ -140,20 +183,6 @@ function crumb(pr: PrDetail, h: HostState): string {
  */
 function closeButton(pr: PrDetail): string {
   return isDependabot(pr) && pr.state === 'open' ? `<button class="btn" data-do="closeDependabot" title="Close this PR, or tell Dependabot to skip this update">Close or ignore…</button>` : '';
-}
-
-/** The strip under the header: what stands between this PR and a merge. */
-function readiness(pr: PrDetail, h: HostState): string {
-  const icon: Record<Tone, string> = { ok: I.check, bad: I.x, warn: I.alert, run: '<span class="spin sm"></span>', muted: I.minus };
-  const items = mergeReadiness(pr).map((it) => {
-    const act = it.action === 'updateBranch' ? `<button class="btn sm" data-do="updateBranch" ${h.busy ? 'disabled' : ''}>${h.busy === 'update' ? '<span class="spin sm"></span>' : ''}Update branch</button>`
-      : it.action === 'showChecks' ? `<button class="link" data-step="checks">Show</button>`
-      : it.action === 'openThreads' ? `<button class="link" data-do="threads">Show</button>` : '';
-    return `<span class="it ${it.tone}">${icon[it.tone]}${esc(it.text)}</span>${act}`;
-  }).join('');
-  // Say why Merge is off where it can be read, not only in the disabled button's tooltip.
-  const blocker = pr.myReview === 'approved' ? mergeBlocker(pr) : null;
-  return `<div class="ready" aria-label="Can it merge"><span class="lbl">Can it merge</span>${items}${blocker ? `<span class="why">${esc(blocker)}</span>` : ''}</div>`;
 }
 
 function checksState(pr: PrDetail): { cls: 'done' | 'fail' | 'run'; sub: string } {
@@ -358,7 +387,7 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
     const pr = msg.state.pr;
     if (pr && pr.number !== view.pr) {
       // Open on the conversation when there's something new in it; otherwise on the description.
-      view = { ...view, pr: pr.number, file: null, onlyNew: false, step: 'review', about: conversationCounts(pr.conversation).fresh ? 'conv' : 'desc', aboutOpen: false };
+      view = { ...view, pr: pr.number, file: null, onlyNew: false, step: 'review', about: conversationCounts(pr.conversation).fresh ? 'conv' : 'desc', aboutOpen: false, menu: null };
       vscode.setState(view);
     }
     host = msg.state;
@@ -380,6 +409,13 @@ document.addEventListener('change', (e) => {
 });
 
 document.addEventListener('click', (e) => {
+  const target = e.target as HTMLElement;
+  // Menus: a toggle opens or closes its own; any click outside an open menu closes it.
+  const toggle = target.closest<HTMLElement>('[data-menu]');
+  if (toggle && !(toggle as HTMLButtonElement).disabled) { const m = toggle.dataset.menu as View['menu']; save({ menu: view.menu === m ? null : m }); return; }
+  const pick = target.closest<HTMLElement>('[data-method-pick]');
+  if (pick) { save({ method: pick.dataset.methodPick as MergeMethod, menu: null }); return; }
+  if (view.menu && !target.closest('.pop')) { view.menu = null; vscode.setState(view); if (!target.closest('[data-do],[data-step],[data-ext],[data-open]')) { render(); return; } }
   // Links inside descriptions and comments open in the browser, never inside the panel.
   const a = (e.target as HTMLElement).closest<HTMLAnchorElement>('.md a[href]');
   if (a) {
@@ -389,6 +425,8 @@ document.addEventListener('click', (e) => {
   }
   const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-step],[data-about],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
   if (!t || (t as HTMLButtonElement).disabled) return;
+  // An action picked from a menu closes it.
+  if (view.menu && t.closest('.pop')) view.menu = null;
   const d = t.dataset;
   if (d.open) send({ type: 'openPr', number: Number(d.open) });
   else if (d.filter) save({ filter: d.filter as Filter });
@@ -408,6 +446,7 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'updateBranch') send({ type: 'updateBranch' });
   else if (d.do === 'keys') save({ keys: false });
   else if (d.do === 'about') save({ aboutOpen: !view.aboutOpen });
+  else if (d.do === 'fixConflicts') send({ type: 'fixConflicts' });
   else if (d.do === 'mergeDependabot') send({ type: 'mergeDependabot' });
   else if (d.do === 'closeDependabot') send({ type: 'closeDependabot' });
   else if (d.do === 'comment') postComment();
@@ -433,6 +472,7 @@ document.addEventListener('keydown', (e) => {
   const k = e.key;
   if (k === '?') { save({ keys: !view.keys }); return; }
   if (view.keys) { if (k === 'Escape') save({ keys: false }); return; }
+  if (view.menu && k === 'Escape') { save({ menu: null }); return; }
   const rows = visibleQueue(host);
   if (host.view === 'queue') {
     if (k === 'j' || k === 'ArrowDown') { save({ sel: Math.min(rows.length - 1, view.sel + 1) }); e.preventDefault(); }

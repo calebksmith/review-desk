@@ -29,30 +29,54 @@ export function prStatus(p: PrSummary): PrStatus {
 }
 
 export interface ReadinessItem {
-  key: 'conflicts' | 'base' | 'checks' | 'threads';
+  key: 'approval' | 'checks' | 'conflicts' | 'base' | 'threads';
   tone: Tone;
   text: string;
-  action?: 'updateBranch' | 'showChecks' | 'openThreads';
+  action?: 'updateBranch' | 'showChecks' | 'openThreads' | 'fixConflicts';
 }
 
-/** What stands between this PR and a merge, in the order a reviewer should deal with it. */
+/**
+ * The merge checklist, in GitHub's merge-box order and wording: reviews, checks, conflicts, base, threads.
+ * Unresolved threads only show when there are some.
+ */
 export function mergeReadiness(pr: PrDetail): ReadinessItem[] {
   const items: ReadinessItem[] = [];
   const c = pr.checks;
-  if (pr.mergeable === false || pr.mergeState === 'dirty') items.push({ key: 'conflicts', tone: 'bad', text: `Conflicts with ${pr.baseRef}` });
-  else if (pr.mergeable === null) items.push({ key: 'conflicts', tone: 'muted', text: 'Checking for conflicts' });
-  else items.push({ key: 'conflicts', tone: 'ok', text: 'No conflicts' });
-
-  if (pr.mergeState === 'behind') items.push({ key: 'base', tone: 'warn', text: `Behind ${pr.baseRef}`, action: 'updateBranch' });
-  else items.push({ key: 'base', tone: 'ok', text: `Up to date with ${pr.baseRef}` });
+  if (pr.myReview === 'approved') items.push({ key: 'approval', tone: 'ok', text: 'Changes approved' });
+  else if (pr.myReview === 'changes_requested') items.push({ key: 'approval', tone: 'warn', text: 'You requested changes' });
+  else items.push({ key: 'approval', tone: 'muted', text: 'Not approved yet' });
 
   if (c.failed) items.push({ key: 'checks', tone: 'bad', text: plural(c.failed, 'check') + ' failing', action: 'showChecks' });
   else if (c.pending) items.push({ key: 'checks', tone: 'run', text: plural(c.pending, 'check') + ' running', action: 'showChecks' });
   else if (!c.total) items.push({ key: 'checks', tone: 'muted', text: 'No checks' });
-  else items.push({ key: 'checks', tone: 'ok', text: `All ${plural(c.total, 'check')} passed` });
+  else items.push({ key: 'checks', tone: 'ok', text: `All ${plural(c.total, 'check')} passed`, action: 'showChecks' });
 
-  if (pr.unresolvedThreads) items.push({ key: 'threads', tone: 'warn', text: plural(pr.unresolvedThreads, 'unresolved comment thread'), action: 'openThreads' });
+  if (pr.mergeable === false || pr.mergeState === 'dirty') items.push({ key: 'conflicts', tone: 'bad', text: `Conflicts with ${pr.baseRef}`, action: 'fixConflicts' });
+  else if (pr.mergeable === null) items.push({ key: 'conflicts', tone: 'muted', text: 'Checking for conflicts' });
+  else items.push({ key: 'conflicts', tone: 'ok', text: `No conflicts with ${pr.baseRef}` });
+
+  if (pr.mergeState === 'behind') items.push({ key: 'base', tone: 'warn', text: `Out of date with ${pr.baseRef}`, action: 'updateBranch' });
+  else items.push({ key: 'base', tone: 'ok', text: `Up to date with ${pr.baseRef}` });
+
+  if (pr.unresolvedThreads) items.push({ key: 'threads', tone: 'warn', text: plural(pr.unresolvedThreads, 'unresolved thread'), action: 'openThreads' });
   return items;
+}
+
+const URGENCY: Record<Tone, number> = { bad: 0, run: 1, warn: 2, muted: 3, ok: 4 };
+// Within a tone, what blocks a merge outright comes first.
+const LEAD: Record<ReadinessItem['key'], number> = { conflicts: 0, checks: 1, base: 2, threads: 3, approval: 4 };
+
+/**
+ * The one line beside the header's button: the most urgent item, and how many others need attention.
+ * When nothing does, it says the PR is ready. "Not approved yet" never leads, since Approve is the button.
+ */
+export function mergeSummary(pr: PrDetail): { tone: Tone; text: string; more: number } {
+  const attention = mergeReadiness(pr)
+    .filter((it) => it.tone !== 'ok' && !(it.key === 'approval' && it.tone === 'muted') && !(it.key === 'checks' && it.text === 'No checks'))
+    .sort((a, b) => URGENCY[a.tone] - URGENCY[b.tone] || LEAD[a.key] - LEAD[b.key]);
+  const first = attention[0];
+  if (!first) return { tone: 'ok', text: pr.myReview === 'approved' ? 'Ready to merge' : 'Ready once you approve', more: 0 };
+  return { tone: first.tone, text: first.text, more: attention.length - 1 };
 }
 
 /** Why Merge can't run at all, or null. Only conflicts: GitHub refuses to merge those. */
