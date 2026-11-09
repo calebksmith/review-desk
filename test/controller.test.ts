@@ -151,7 +151,7 @@ describe('Controller', () => {
     await c.handle({ type: 'openPr', number: 55 });
     await c.handle({ type: 'fixWithAgent', check: 'Tests' });
     expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toContain('Failing check: Tests (GitHub Actions)');
+    expect(prompts[0]).toContain('The "Tests" check is failing');
     expect(prompts[0]).toContain('AssertionError');
     expect(sent.at(-1)).toEqual({ type: 'toast', text: 'Copied why Tests failed as a prompt. Paste it into your agent.' });
   });
@@ -178,8 +178,8 @@ describe('Controller', () => {
     const { c, prompts } = setup();
     await c.handle({ type: 'openPr', number: 52 });
     await c.handle({ type: 'fixThread', id: 'T_52_1' });
-    expect(prompts[0]).toContain('File: src/components/WorkCard.tsx, line 44');
-    expect(prompts[0]).toContain('> Should the medal name sit under the summary instead?');
+    expect(prompts[0]).toContain('review comment on src/components/WorkCard.tsx:44');
+    expect(prompts[0]).toContain('> calebksmith: Should the medal name sit under the summary instead?');
   });
 
   it('closes a Dependabot PR with the command picked, then leaves it out of the queue', async () => {
