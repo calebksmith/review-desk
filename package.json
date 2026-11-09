@@ -9,14 +9,46 @@
   "engines": { "vscode": "^1.90.0" },
   "categories": ["Other"],
   "main": "./dist/extension.js",
-  "activationEvents": [],
+  "activationEvents": ["onStartupFinished"],
   "contributes": {
     "commands": [
-      { "command": "reviewDesk.open", "title": "Open", "category": "Review Desk", "icon": "$(checklist)" },
+      { "command": "reviewDesk.open", "title": "Open review queue", "category": "Review Desk", "icon": "$(checklist)" },
       { "command": "reviewDesk.openSample", "title": "Open with sample data", "category": "Review Desk" },
       { "command": "reviewDesk.switchRepository", "title": "Switch repository", "category": "Review Desk" },
-      { "command": "reviewDesk.signOut", "title": "Use a different GitHub account", "category": "Review Desk" }
+      { "command": "reviewDesk.signOut", "title": "Use a different GitHub account", "category": "Review Desk" },
+      { "command": "reviewDesk.connect", "title": "Sign in with GitHub", "category": "Review Desk" },
+      { "command": "reviewDesk.refresh", "title": "Refresh", "category": "Review Desk", "icon": "$(refresh)" },
+      { "command": "reviewDesk.openPr", "title": "Open pull request", "category": "Review Desk" },
+      { "command": "reviewDesk.openOnGitHub", "title": "Open on GitHub", "category": "Review Desk", "icon": "$(link-external)" }
     ],
+    "viewsContainers": {
+      "activitybar": [{ "id": "reviewDesk", "title": "Review Desk", "icon": "media/review-desk.svg" }]
+    },
+    "views": {
+      "reviewDesk": [{ "id": "reviewDesk.queue", "name": "Pull requests", "icon": "media/review-desk.svg" }]
+    },
+    "viewsWelcome": [
+      {
+        "view": "reviewDesk.queue",
+        "when": "!reviewDesk.connected",
+        "contents": "Review pull requests that agents wrote, beside your code.\n[Sign in with GitHub](command:reviewDesk.connect)\nNo GitHub repo handy? [Try it with sample data](command:reviewDesk.openSample)."
+      }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "reviewDesk.open", "when": "view == reviewDesk.queue && reviewDesk.connected", "group": "navigation@1" },
+        { "command": "reviewDesk.refresh", "when": "view == reviewDesk.queue && reviewDesk.connected", "group": "navigation@2" },
+        { "command": "reviewDesk.switchRepository", "when": "view == reviewDesk.queue", "group": "1_repo@1" },
+        { "command": "reviewDesk.signOut", "when": "view == reviewDesk.queue && reviewDesk.connected", "group": "1_repo@2" }
+      ],
+      "view/item/context": [
+        { "command": "reviewDesk.openOnGitHub", "when": "view == reviewDesk.queue && viewItem == pr", "group": "inline" }
+      ],
+      "commandPalette": [
+        { "command": "reviewDesk.openPr", "when": "false" },
+        { "command": "reviewDesk.openOnGitHub", "when": "false" }
+      ]
+    },
     "configuration": {
       "title": "Review Desk",
       "properties": {

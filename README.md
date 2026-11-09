@@ -22,7 +22,7 @@ npm install
 npm run build
 ```
 
-Then press F5 in VS Code to open an Extension Development Host, and run **Review Desk: Open** from the Command Palette. It signs in with your GitHub account in VS Code and reviews the open folder's GitHub repo. If several folders are open, it asks which repo to review and remembers your choice for that workspace. To review a different one, run **Review Desk: Switch repository**: pick an open folder's repo or type any `owner/name`.
+Then press F5 in VS Code to open an Extension Development Host. Click the Review Desk icon in the left rail: the **Pull requests** list groups PRs by what they need, with a badge for how many need you. Click one to open it in the full panel, or run **Review Desk: Open review queue** from the Command Palette. It signs in with your GitHub account in VS Code and reviews the open folder's GitHub repo. If several folders are open, it asks which repo to review and remembers your choice for that workspace. To review a different one, run **Review Desk: Switch repository**: pick an open folder's repo or type any `owner/name`.
 
 **Review Desk: Open with sample data** works without GitHub. To see the UI in a browser instead, run `npm run preview` and open `.preview/index.html` (add `?theme=dark` for dark).
 
@@ -50,6 +50,7 @@ The extension host talks to GitHub; the webview only renders. `src/controller.ts
 | `src/logs.ts` | The error lines from a failed GitHub Actions log |
 | `src/repos.ts` | Which repo to review: the setting, your last pick, or the folders that are open |
 | `src/protocol.ts` | Types shared by the host and the webview |
+| `src/sidebar.ts` | How the sidebar groups and counts PRs |
 | `src/sample.ts` | Sample PRs for demos and tests |
 | `webview/` | The panel's UI, styled from the VS Code theme |
 
