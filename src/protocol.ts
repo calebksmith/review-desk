@@ -109,7 +109,11 @@ export interface HostState {
   queue: PrSummary[];
   pr: PrDetail | null;
   loading: boolean;
-  busy: 'approve' | 'merge' | 'update' | null;
+  busy: 'approve' | 'merge' | 'update' | 'bulk' | null;
+  /** Progress while merging Dependabot updates in one go. */
+  bulk: { done: number; total: number } | null;
+  /** What the last bulk merge did, until the reviewer dismisses it. */
+  notice: string | null;
   error: string | null;
 }
 
@@ -127,4 +131,6 @@ export type FromWebview =
   | { type: 'merge'; method: MergeMethod }
   | { type: 'updateBranch' }
   | { type: 'openFile'; path: string; line: number | null }
-  | { type: 'openExternal'; url: string };
+  | { type: 'openExternal'; url: string }
+  | { type: 'mergeDependabot' }
+  | { type: 'dismissNotice' };

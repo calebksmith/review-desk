@@ -1,7 +1,7 @@
 import type { FromWebview, HostState, MergeMethod, ToWebview } from './protocol';
 import { markNew } from './conversation';
 import type { DataSource, Store } from './source';
-import { mergeBlocker, mergeWarning } from './status';
+import { bulkMergeable, bulkSkipReason, mergeBlocker, mergeWarning, plural } from './status';
 
 export interface Host {
   post(msg: ToWebview): void;
@@ -18,7 +18,7 @@ export class Controller {
   private state: HostState;
 
   constructor(private readonly source: DataSource, private readonly store: Store, private readonly host: Host, private readonly label = '') {
-    this.state = { repo: source.repo, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, error: null };
+    this.state = { repo: source.repo, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, bulk: null, notice: null, error: null };
   }
 
   get snapshot(): HostState { return this.state; }
@@ -36,6 +36,8 @@ export class Controller {
         case 'updateBranch': await this.updateBranch(); break;
         case 'openFile': this.host.openFile(msg.path, msg.line); break;
         case 'openExternal': this.host.openExternal(msg.url); break;
+        case 'mergeDependabot': await this.mergeDependabot(); break;
+        case 'dismissNotice': this.set({ notice: null }); break;
       }
     } catch (err) {
       this.set({ loading: false, busy: null, error: message(err) });
@@ -50,7 +52,7 @@ export class Controller {
   }
 
   private async loadPr(number: number): Promise<void> {
-    this.set({ view: 'pr', loading: true, error: null, pr: this.state.pr?.number === number ? this.state.pr : null });
+    this.set({ view: 'pr', loading: true, error: null, notice: null, pr: this.state.pr?.number === number ? this.state.pr : null });
     const key = `lastSeen:${this.source.repo}#${number}`;
     const atKey = `lastSeenAt:${this.source.repo}#${number}`;
     const seenAt = this.store.get<string>(atKey) ?? null;
@@ -104,6 +106,40 @@ export class Controller {
     await this.loadQueue();
   }
 
+  /**
+   * Approves and merges every Dependabot PR that has no conflicts and passing checks, one at a time.
+   * Each is re-read first: merging one can make the next conflict, since they all touch the lockfile.
+   * Anything GitHub refuses (another approval needed, a conflict) is skipped with GitHub's reason.
+   */
+  private async mergeDependabot(): Promise<void> {
+    if (this.state.busy) return;
+    const picks = bulkMergeable(this.state.queue);
+    if (!picks.length) return;
+    const list = picks.map((p) => `#${p.number} ${p.title}`).join('\n');
+    const verb = `Approve and merge ${picks.length}`;
+    if (!(await this.host.confirm(`Approve and merge ${plural(picks.length, 'Dependabot update')}, one at a time?\n\n${list}\n\nAny that conflict or fail by their turn are skipped.`, verb))) return;
+
+    const merged: number[] = [];
+    const skipped: string[] = [];
+    this.set({ busy: 'bulk', bulk: { done: 0, total: picks.length }, notice: null, error: null });
+    for (const [i, p] of picks.entries()) {
+      this.set({ bulk: { done: i, total: picks.length } });
+      try {
+        const pr = await this.source.getPr(p.number, null);
+        const why = bulkSkipReason(pr);
+        if (why) { skipped.push(`#${p.number} (${why})`); continue; }
+        if (pr.myReview !== 'approved') await this.source.approve(pr);
+        await this.source.merge(pr, pr.mergeMethods[0]!);
+        merged.push(p.number);
+      } catch (err) {
+        skipped.push(`#${p.number} (${message(err).replace(/\.$/, '')})`);
+      }
+    }
+    const done = merged.length ? `Merged ${plural(merged.length, 'Dependabot update')}: ${merged.map((n) => `#${n}`).join(', ')}.` : 'Merged nothing.';
+    this.set({ busy: null, bulk: null, notice: skipped.length ? `${done} Skipped ${skipped.join('; ')}.` : done });
+    await this.loadQueue();
+  }
+
   private async updateBranch(): Promise<void> {
     const pr = this.state.pr;
     if (!pr || this.state.busy) return;
@@ -134,5 +170,6 @@ export class Controller {
 function message(err: unknown): string {
   if (err && typeof err === 'object' && 'status' in err && (err as { status: number }).status === 401) return 'GitHub sign-in expired. Run “Review Desk: Use a different GitHub account”.';
   if (err && typeof err === 'object' && 'status' in err && (err as { status: number }).status === 405) return (err as { message?: string }).message ?? 'GitHub refused the merge.';
-  return err instanceof Error ? err.message : String(err);
+  // Octokit appends the docs link to GitHub's message; the message alone reads better.
+  return (err instanceof Error ? err.message : String(err)).replace(/ - https:\/\/docs\.github\.com\S*$/, '');
 }

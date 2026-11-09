@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify';
 import { conversationCounts, startedAt } from '../src/conversation';
 import type { CheckRun, Comment, ConversationItem, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
-import { mergeBlocker, mergeReadiness, mergeWarning, prStatus, type Bucket, type Tone } from '../src/status';
+import { bulkMergeable, isDependabot, mergeBlocker, mergeReadiness, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
 
 // The webview only renders. Everything it knows comes from the host's state messages;
 // what it remembers on its own is view state (filter, step, open file).
@@ -93,13 +93,24 @@ function queue(h: HostState): string {
       <span class="t"><b>${esc(p.title)}</b><span class="sub"><span class="diffstat"><span class="a">+${p.additions}</span> <span class="d">−${p.deletions}</span></span><span>${esc(p.author)}</span></span></span>
       ${checksGlyph(p)}<span class="st">${statusPill(p)}</span><span class="when">${ago(p.updatedAt)}</span>${I.chev}</button>`).join('');
   const empty = h.loading ? '<div class="empty"><span class="spin"></span>Loading pull requests</div>' : `<div class="empty">${I.check}No pull requests here</div>`;
-  return `<div class="crumb"><span class="home cur">${I.inbox}Review queue</span><span class="repo">${esc(h.repo)}</span>${h.sample ? '<span class="chip">Sample data</span>' : ''}<div class="end"><button class="btn" data-do="refresh" aria-label="Refresh">${I.rerun}Refresh</button></div></div>
+  return `<div class="crumb"><span class="home cur">${I.inbox}Review queue</span><span class="repo">${esc(h.repo)}</span>${h.sample ? '<span class="chip">Sample data</span>' : ''}<div class="end">${bulkButton(h)}<button class="btn" data-do="refresh" aria-label="Refresh">${I.rerun}Refresh</button></div></div>
+    ${h.notice ? `<div class="note" role="status">${I.check}<span>${esc(h.notice)}</span><button class="btn sm" data-do="dismissNotice">Dismiss</button></div>` : ''}
     <div class="pad">
       <div class="toolbar"><div class="seg" role="group" aria-label="Filter">${f('all', 'All')}${f('needs', 'Needs you')}${f('waiting', 'Waiting on author')}${f('approved', 'Approved')}${f('merged', 'Merged')}</div>
         <label class="sort"><span class="lbl">Sort</span><select id="sort" aria-label="Sort"><option value="needs" ${view.sort === 'needs' ? 'selected' : ''}>Needs you first</option><option value="updated" ${view.sort === 'updated' ? 'selected' : ''}>Recently updated</option></select></label></div>
       <div class="list">${list || empty}</div>
       <span class="hint"><kbd>j</kbd><kbd>k</kbd> move <kbd>Enter</kbd> open <kbd>?</kbd> all shortcuts</span>
     </div>`;
+}
+
+/** One click for the Dependabot updates that are safe to merge without opening: no conflicts, checks passed. */
+function bulkButton(h: HostState): string {
+  if (h.busy === 'bulk' && h.bulk) return `<button class="btn pri" disabled><span class="spin"></span>Merging ${h.bulk.done + 1} of ${h.bulk.total}</button>`;
+  const ready = bulkMergeable(h.queue);
+  if (!ready.length) return '';
+  const held = h.queue.filter((p) => isDependabot(p) && p.state === 'open' && !ready.includes(p)).length;
+  const tip = `Approves and merges ${ready.map((p) => `#${p.number}`).join(', ')}, one at a time.${held ? ` ${count(held, 'other Dependabot update')} ${held === 1 ? 'has' : 'have'} conflicts or failing checks; open ${held === 1 ? 'it' : 'them'} to review.` : ''}`;
+  return `<button class="btn pri" data-do="mergeDependabot" title="${esc(tip)}" ${h.busy ? 'disabled' : ''}>${I.merge}Merge ${count(ready.length, 'Dependabot update')}</button>`;
 }
 
 /* ---------- PR ---------- */
@@ -358,6 +369,8 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'updateBranch') send({ type: 'updateBranch' });
   else if (d.do === 'keys') save({ keys: false });
   else if (d.do === 'about') save({ aboutOpen: !view.aboutOpen });
+  else if (d.do === 'mergeDependabot') send({ type: 'mergeDependabot' });
+  else if (d.do === 'dismissNotice') send({ type: 'dismissNotice' });
   else if (d.do === 'threads') save({ step: 'review', about: 'conv', aboutOpen: true });
 });
 

@@ -7,6 +7,7 @@ This is phase 1 of five: a read-only review panel on GitHub data. The agent step
 ## What it does today
 
 - **Review queue:** open and recently merged PRs, filtered by Needs you, Approved and Merged, sorted by what needs you first.
+- **Dependabot updates in one click:** when Dependabot PRs have no conflicts and every check passed, **Merge N Dependabot updates** in the queue approves and merges them one at a time. Each is re-checked before its turn, since merging one can make the next conflict. Any that GitHub refuses, for example because the repo needs another approval, are skipped with GitHub's reason. Ones with failing checks stay in the queue for you to open.
 - **Checks:** every check run and commit status (Vercel, for one) on the latest commit, failures first, with a link to each log. A failed GitHub Actions job names the step that failed and shows the error lines from its log.
 - **Your review:** the PR's description and conversation above its changed files, with a Viewed checkbox for each file, and the diff. Viewed state is GitHub's own, so it matches github.com.
 - **Description and conversation:** the start of the description, formatted as on GitHub, with **Show full description** for the rest. The Conversation tab lists comments, reviews and comments on lines of code, newest first, marking what's new since you last looked. A comment on a line of code opens that file.

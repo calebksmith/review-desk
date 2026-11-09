@@ -73,6 +73,31 @@ export function failingChecks(pr: PrDetail): string[] {
   return pr.checkRuns.filter((r) => r.status === 'completed' && FAILED.includes(r.conclusion ?? '')).map((r) => r.name);
 }
 
+/** Dependabot opens PRs as the "dependabot" app; REST and GraphQL spell its login differently. */
+export function isDependabot(p: PrSummary): boolean {
+  return ['dependabot', 'dependabot[bot]', 'app/dependabot'].includes(p.author);
+}
+
+/**
+ * Why a PR can't go in a one-click bulk merge, or null if it can: open, no conflicts, and every check
+ * finished and passed. Required approvals aren't checked here; the bulk merge approves first and
+ * GitHub says if it needs more.
+ */
+export function bulkSkipReason(p: PrSummary): string | null {
+  if (p.state === 'merged') return 'already merged';
+  if (p.isDraft) return 'draft';
+  if (p.mergeable === false || p.mergeState === 'dirty') return 'conflicts with its base';
+  if (p.mergeable === null) return 'GitHub still checking for conflicts';
+  if (p.checks.failed) return `${plural(p.checks.failed, 'check')} failing`;
+  if (p.checks.pending) return 'checks still running';
+  return null;
+}
+
+/** Dependabot PRs that are safe to approve and merge without opening them. */
+export function bulkMergeable(queue: PrSummary[]): PrSummary[] {
+  return queue.filter((p) => isDependabot(p) && !bulkSkipReason(p)).sort((a, b) => a.number - b.number);
+}
+
 export function plural(n: number, one: string, many = one + 's'): string {
   return `${n} ${n === 1 ? one : many}`;
 }

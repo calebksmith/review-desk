@@ -107,4 +107,40 @@ describe('Controller', () => {
     await c.handle({ type: 'openPr', number: 55 });
     expect(JSON.stringify(last().pr!.conversation)).not.toContain('"isNew":true');
   });
+
+  it('approves and merges passing Dependabot updates in one go, skipping the rest', async () => {
+    const asked: string[] = [];
+    const { c, last } = setup(undefined, (q) => asked.push(q));
+    await c.handle({ type: 'ready' });
+    await c.handle({ type: 'mergeDependabot' });
+    expect(asked[0]).toContain('#60 Bump vite');
+    expect(asked[0]).not.toContain('#61');
+    const merged = last().queue.find((p) => p.number === 60)!;
+    expect(merged.state).toBe('merged');
+    expect(merged.myReview).toBe('approved');
+    expect(last().queue.find((p) => p.number === 61)?.state).toBe('open');
+    expect(last().notice).toBe('Merged 1 Dependabot update: #60.');
+    expect(last().busy).toBeNull();
+    await c.handle({ type: 'dismissNotice' });
+    expect(last().notice).toBeNull();
+  });
+
+  it('skips a PR that changed by its turn, with the reason', async () => {
+    const { c, last } = setup();
+    await c.handle({ type: 'ready' });
+    const source = (c as unknown as { source: SampleSource }).source;
+    const real = source.getPr.bind(source);
+    source.getPr = async (n, s) => ({ ...(await real(n, s)), mergeable: false });
+    await c.handle({ type: 'mergeDependabot' });
+    expect(last().notice).toBe('Merged nothing. Skipped #60 (conflicts with its base).');
+  });
+
+  it('does nothing when the reviewer cancels', async () => {
+    const { c, last, refuse } = setup();
+    await c.handle({ type: 'ready' });
+    refuse();
+    await c.handle({ type: 'mergeDependabot' });
+    expect(last().queue.find((p) => p.number === 60)?.state).toBe('open');
+    expect(last().notice).toBeNull();
+  });
 });

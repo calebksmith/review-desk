@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { toMergeState, mergeMethods } from '../src/github';
 import type { PrDetail, PrSummary } from '../src/protocol';
-import { mergeBlocker, mergeReadiness, mergeWarning, prStatus } from '../src/status';
+import { bulkMergeable, bulkSkipReason, mergeBlocker, mergeReadiness, mergeWarning, prStatus } from '../src/status';
 
 const base: PrSummary = {
   number: 1, title: 't', author: 'a', url: '', additions: 0, deletions: 0, updatedAt: '', headSha: 'abc', isDraft: false, state: 'open',
@@ -67,5 +67,24 @@ describe('GitHub mapping', () => {
   it('lists allowed merge methods, squash first', () => {
     expect(mergeMethods({ squashMergeAllowed: true, mergeCommitAllowed: false, rebaseMergeAllowed: true })).toEqual(['squash', 'rebase']);
     expect(mergeMethods({ squashMergeAllowed: false, mergeCommitAllowed: false, rebaseMergeAllowed: false })).toEqual(['merge']);
+  });
+});
+
+describe('bulk merge', () => {
+  const dep = (p: Partial<PrSummary> = {}) => pr({ author: 'dependabot', ...p });
+  it('takes Dependabot PRs with no conflicts and passing checks, oldest first', () => {
+    const queue = [dep({ number: 9 }), pr({ number: 3 }), dep({ number: 4, author: 'dependabot[bot]' })];
+    expect(bulkMergeable(queue).map((p) => p.number)).toEqual([4, 9]);
+  });
+
+  it('leaves out the rest, saying why', () => {
+    expect(bulkSkipReason(dep({ mergeable: false }))).toBe('conflicts with its base');
+    expect(bulkSkipReason(dep({ mergeable: null }))).toBe('GitHub still checking for conflicts');
+    expect(bulkSkipReason(dep({ checks: { passed: 1, failed: 1, pending: 0, total: 2 } }))).toBe('1 check failing');
+    expect(bulkSkipReason(dep({ checks: { passed: 1, failed: 0, pending: 1, total: 2 } }))).toBe('checks still running');
+    expect(bulkSkipReason(dep({ isDraft: true }))).toBe('draft');
+    expect(bulkSkipReason(dep({ state: 'merged' }))).toBe('already merged');
+    expect(bulkSkipReason(dep({ mergeState: 'behind' }))).toBeNull();
+    expect(bulkMergeable([dep({ mergeable: false })])).toEqual([]);
   });
 });
