@@ -1,4 +1,5 @@
-import type { CheckRun, DiffLine, FileDiff, FromWebview, HostState, PrDetail, PrSummary, ToWebview } from '../src/protocol';
+import type { CheckRun, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ToWebview } from '../src/protocol';
+import { mergeBlocker, mergeReadiness, prStatus, type Bucket, type Tone } from '../src/status';
 
 // The webview only renders. Everything it knows comes from the host's state messages;
 // what it remembers on its own is view state (filter, step, open file).
@@ -7,12 +8,12 @@ interface VsCodeApi { postMessage(msg: FromWebview): void; getState(): unknown; 
 declare function acquireVsCodeApi(): VsCodeApi;
 const vscode = acquireVsCodeApi();
 
-type Filter = 'all' | 'needs' | 'approved' | 'merged';
+type Filter = 'all' | Bucket;
 type Sort = 'needs' | 'updated';
-interface View { filter: Filter; sort: Sort; step: 'checks' | 'review'; file: string | null; onlyNew: boolean; pr: number | null }
+interface View { filter: Filter; sort: Sort; step: 'checks' | 'review'; file: string | null; onlyNew: boolean; pr: number | null; sel: number; method: MergeMethod | null; keys: boolean }
 
 let host: HostState | null = null;
-let view: View = { filter: 'all', sort: 'needs', step: 'review', file: null, onlyNew: false, pr: null, ...(vscode.getState() as Partial<View> | undefined) };
+let view: View = { filter: 'all', sort: 'needs', step: 'review', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false };
 const send = (msg: FromWebview) => vscode.postMessage(msg);
 const app = document.getElementById('app')!;
 
@@ -30,6 +31,9 @@ const I = {
   merge: '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v10M6 7c0 3 3 5 10 5"/></svg>',
   you: svg('M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0'),
   clock: svg('M12 7v5l3 2M12 21a9 9 0 1 1 0-18 9 9 0 0 1 0 18z'),
+  alert: svg('M12 4l9 16H3zM12 10v4M12 17h.01'),
+  com: svg('M4 5h16v11H9l-5 4z'),
+  minus: svg('M6 12h12'),
 };
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const plural = (n: number, one: string, many = one + 's') => `${n} ${n === 1 ? one : many}`;
@@ -48,16 +52,12 @@ function save(patch: Partial<View>): void {
 }
 
 /* ---------- Queue ---------- */
-function bucket(p: PrSummary): Exclude<Filter, 'all'> {
-  if (p.state === 'merged') return 'merged';
-  return p.myReview === 'approved' ? 'approved' : 'needs';
-}
+const bucket = (p: PrSummary): Bucket => prStatus(p).bucket;
 function urgency(p: PrSummary): number {
-  if (p.state === 'merged') return 9;
-  if (p.myReview === 'approved') return 5;
-  if (p.isDraft) return 4;
-  return p.checks.failed ? 1 : 0;
+  const s = prStatus(p);
+  return { needs: s.tone === 'bad' ? 0 : 1, approved: 2, waiting: 3, merged: 9 }[s.bucket];
 }
+const PILL: Record<Tone, string> = { ok: 'ok', warn: 'need', bad: 'bad', run: 'run', muted: '' };
 
 function checksGlyph(p: PrSummary): string {
   const c = p.checks;
@@ -67,44 +67,68 @@ function checksGlyph(p: PrSummary): string {
   return `<span class="cs ok">${I.check}${c.passed}/${c.total}</span>`;
 }
 
+/** The one status label for a PR. The queue, the header and the sidebar all use it. */
 function statusPill(p: PrSummary): string {
-  if (p.state === 'merged') return '<span class="pill">Merged</span>';
-  if (p.myReview === 'approved') return '<span class="pill ok">Approved</span>';
-  if (p.isDraft) return '<span class="pill">Draft</span>';
-  return '<span class="pill need">Needs you</span>';
+  const s = prStatus(p);
+  return `<span class="pill ${PILL[s.tone]}">${esc(s.label)}</span>`;
+}
+
+function visibleQueue(h: HostState): PrSummary[] {
+  return h.queue
+    .filter((p) => view.filter === 'all' || bucket(p) === view.filter)
+    .sort(view.sort === 'needs' ? (a, b) => urgency(a) - urgency(b) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt) : (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
 function queue(h: HostState): string {
-  const counts = { all: h.queue.length, needs: 0, approved: 0, merged: 0 };
+  const counts: Record<Filter, number> = { all: h.queue.length, needs: 0, waiting: 0, approved: 0, merged: 0 };
   h.queue.forEach((p) => counts[bucket(p)]++);
-  const rows = h.queue
-    .filter((p) => view.filter === 'all' || bucket(p) === view.filter)
-    .sort(view.sort === 'needs' ? (a, b) => urgency(a) - urgency(b) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt) : (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  const rows = visibleQueue(h);
+  if (view.sel >= rows.length) view.sel = Math.max(0, rows.length - 1);
   const f = (k: Filter, label: string) => `<button data-filter="${k}" aria-pressed="${view.filter === k}">${label} <span class="n">${counts[k]}</span></button>`;
-  const list = rows.map((p) => `<button class="qrow" data-open="${p.number}">
+  const list = rows.map((p, i) => `<button class="qrow ${i === view.sel ? 'sel' : ''}" data-open="${p.number}">
       <span class="num">#${p.number}</span>
       <span class="t"><b>${esc(p.title)}</b><span class="sub"><span class="diffstat"><span class="a">+${p.additions}</span> <span class="d">−${p.deletions}</span></span><span>${esc(p.author)}</span></span></span>
       ${checksGlyph(p)}<span class="st">${statusPill(p)}</span><span class="when">${ago(p.updatedAt)}</span>${I.chev}</button>`).join('');
   const empty = h.loading ? '<div class="empty"><span class="spin"></span>Loading pull requests</div>' : `<div class="empty">${I.check}No pull requests here</div>`;
   return `<div class="crumb"><span class="home cur">${I.inbox}Review queue</span><span class="repo">${esc(h.repo)}</span>${h.sample ? '<span class="chip">Sample data</span>' : ''}<div class="end"><button class="btn" data-do="refresh" aria-label="Refresh">${I.rerun}Refresh</button></div></div>
     <div class="pad">
-      <div class="toolbar"><div class="seg" role="group" aria-label="Filter">${f('all', 'All')}${f('needs', 'Needs you')}${f('approved', 'Approved')}${f('merged', 'Merged')}</div>
+      <div class="toolbar"><div class="seg" role="group" aria-label="Filter">${f('all', 'All')}${f('needs', 'Needs you')}${f('waiting', 'Waiting on author')}${f('approved', 'Approved')}${f('merged', 'Merged')}</div>
         <label class="sort"><span class="lbl">Sort</span><select id="sort" aria-label="Sort"><option value="needs" ${view.sort === 'needs' ? 'selected' : ''}>Needs you first</option><option value="updated" ${view.sort === 'updated' ? 'selected' : ''}>Recently updated</option></select></label></div>
       <div class="list">${list || empty}</div>
+      <span class="hint"><kbd>j</kbd><kbd>k</kbd> move <kbd>Enter</kbd> open <kbd>?</kbd> all shortcuts</span>
     </div>`;
 }
 
 /* ---------- PR ---------- */
 function crumb(pr: PrDetail, h: HostState): string {
   const seen = pr.files.filter((f) => f.viewed === 'viewed').length;
-  const viewed = `<span class="stat ${seen === pr.files.length ? 'ok' : ''}" role="status">${seen} of ${plural(pr.files.length, 'file')} viewed</span>`;
+  const viewed = `<span class="stat ${seen === pr.files.length ? 'ok' : ''}">${seen} of ${plural(pr.files.length, 'file')} viewed</span>`;
+  const pill = `<span role="status">${statusPill(pr)}</span>`;
   let act: string;
-  if (pr.state === 'merged') act = '<span class="stat ok">Merged</span>';
-  else if (pr.myReview !== 'approved') act = `${viewed}<button class="btn pri" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
-  else act = `<span class="stat ok">Approved</span><button class="btn pri" data-do="merge" ${h.busy || pr.mergeable === false ? 'disabled' : ''} ${pr.mergeable === false ? 'title="Resolve the merge conflict on GitHub first"' : ''}>${h.busy === 'merge' ? '<span class="spin"></span>' : I.merge}Merge</button>`;
+  if (pr.state === 'merged') act = pill;
+  else if (pr.myReview !== 'approved') act = `${viewed}${pill}<button class="btn pri" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
+  else {
+    const blocker = mergeBlocker(pr);
+    const method = view.method && pr.mergeMethods.includes(view.method) ? view.method : pr.mergeMethods[0]!;
+    const verb = { squash: 'Squash and merge', merge: 'Merge', rebase: 'Rebase and merge' }[method];
+    const pick = pr.mergeMethods.length > 1 ? `<select id="method" aria-label="Merge method">${pr.mergeMethods.map((m) => `<option value="${m}" ${m === method ? 'selected' : ''}>${{ squash: 'Squash', merge: 'Merge commit', rebase: 'Rebase' }[m]}</option>`).join('')}</select>` : '';
+    act = `${pill}${pick}<button class="btn pri" data-do="merge" data-method="${method}" ${h.busy || blocker ? 'disabled' : ''} ${blocker ? `title="${esc(blocker)}"` : ''}>${h.busy === 'merge' ? '<span class="spin"></span>' : I.merge}${verb}</button>`;
+  }
   return `<div class="crumb"><button class="home" data-do="back">${I.inbox}Review queue</button><span class="sep" aria-hidden="true">/</span>
     <div class="pt"><span class="num">#${pr.number}</span><b>${esc(pr.title)}</b><span class="diffstat"><span class="a">+${pr.additions}</span> <span class="d">−${pr.deletions}</span></span><button class="link" data-ext="${esc(pr.url)}">${I.ext}GitHub</button></div>
-    <div class="end">${act}</div></div>`;
+    <div class="end">${act}</div></div>${pr.state === 'merged' ? '' : readiness(pr, h)}`;
+}
+
+/** The strip under the header: what stands between this PR and a merge. */
+function readiness(pr: PrDetail, h: HostState): string {
+  const icon: Record<Tone, string> = { ok: I.check, bad: I.x, warn: I.alert, run: '<span class="spin sm"></span>', muted: I.minus };
+  const items = mergeReadiness(pr).map((it) => {
+    const act = it.action === 'updateBranch' ? `<button class="btn sm" data-do="updateBranch" ${h.busy ? 'disabled' : ''}>${h.busy === 'update' ? '<span class="spin sm"></span>' : ''}Update branch</button>`
+      : it.action === 'showChecks' ? `<button class="link" data-step="checks">Show</button>`
+      : it.action === 'openThreads' ? `<button class="link" data-ext="${esc(pr.url)}">Open on GitHub${I.ext}</button>` : '';
+    return `<span class="it ${it.tone}">${icon[it.tone]}${esc(it.text)}</span>${act}`;
+  }).join('');
+  return `<div class="ready" aria-label="Can it merge"><span class="lbl">Can it merge</span>${items}</div>`;
 }
 
 function checksState(pr: PrDetail): { cls: 'done' | 'fail' | 'run'; sub: string } {
@@ -121,20 +145,21 @@ function sidebar(pr: PrDetail): string {
   const c = checksState(pr);
   const reviewDone = pr.state === 'merged' || pr.myReview === 'approved';
   const unviewed = pr.files.filter((f) => f.viewed !== 'viewed').length;
+  const status = prStatus(pr).label;
   const glyph = { done: I.check, fail: I.x, run: '', now: '' } as const;
   const step = (k: View['step'], label: string, cls: keyof typeof glyph, sub: string) =>
     `<li class="step ${cls}"><button class="stepbtn" data-step="${k}" aria-current="${view.step === k ? 'step' : 'false'}"><span class="sd" aria-hidden="true">${glyph[cls]}</span><span class="sl"><span>${label}</span><span class="sub">${sub}</span></span></button></li>`;
   return `<aside class="side" aria-label="Review steps">
     <div class="grp"><span class="lbl">Automated</span><ol class="steps">${step('checks', 'Checks', c.cls, c.sub)}</ol></div>
-    <div class="grp"><span class="lbl">You</span><ol class="steps">${step('review', 'Your review', reviewDone ? 'done' : 'now', pr.state === 'merged' ? 'Merged' : reviewDone ? 'Approved' : unviewed ? `${plural(unviewed, 'file')} to read` : 'Ready to approve')}</ol></div></aside>`;
+    <div class="grp"><span class="lbl">You</span><ol class="steps">${step('review', 'Your review', reviewDone ? 'done' : 'now', !reviewDone && unviewed ? `${status} · ${plural(unviewed, 'file')} to read` : status)}</ol></div></aside>`;
 }
 
 function stepChecks(pr: PrDetail): string {
   const c = checksState(pr);
   const order = (r: CheckRun) => (isFail(r) ? 0 : r.status !== 'completed' ? 1 : 2);
   const runs = [...pr.checkRuns].sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name));
-  const pill = c.cls === 'fail' ? `<span class="oc open">${c.sub}</span>` : c.cls === 'run' ? `<span class="oc run">${c.sub}</span>` : '<span class="oc ok">All passed</span>';
-  const line = c.cls === 'fail' ? 'Read what failed before you approve. Required checks still hold the merge on GitHub.' : c.cls === 'run' ? 'Some checks are still running. This updates when you refresh.' : 'Every check passed on the latest commit.';
+  const pill = c.cls === 'fail' ? `<span class="oc bad">${c.sub}, blocks merge</span>` : c.cls === 'run' ? `<span class="oc run">${c.sub}</span>` : '<span class="oc ok">All passed</span>';
+  const line = c.cls === 'fail' ? 'Read what failed before you approve. Review Desk won’t merge while a check is failing.' : c.cls === 'run' ? 'Some checks are still running. This updates when you refresh.' : 'Every check passed on the latest commit.';
   const rows = runs.map((r) => {
     const g = isFail(r) ? `<span class="g bad">${I.x}</span>` : r.status !== 'completed' ? '<span class="g run"><span class="spin sm"></span></span>' : `<span class="g ok">${I.check}</span>`;
     return `<div class="cg ${isFail(r) ? 'bad' : ''}"><div class="cgh">${g}<span class="nm">${esc(r.name)}</span><span class="tool">${esc(r.app)}</span>
@@ -169,7 +194,7 @@ function stepReview(pr: PrDetail): string {
 
   return `<div class="sh"><div class="tx"><h2>Your review</h2><p>${line}</p></div></div>${banner}
     ${pr.body.trim() ? `<section class="intent" aria-label="Description"><span>${esc(firstParagraph(pr.body))}</span></section>` : ''}
-    <div class="split"><nav class="files" aria-label="Changed files"><div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}</nav>
+    <div class="split"><nav class="files" aria-label="Changed files"><div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}<span class="hint"><kbd>n</kbd><kbd>p</kbd> next file <kbd>v</kbd> viewed</span></nav>
       <section class="diffpane" aria-label="Diff">${file ? `<div class="dh"><span class="mono">${esc(file.path)}</span><label class="vt"><input type="checkbox" data-viewed="${esc(file.path)}" ${file.viewed === 'viewed' ? 'checked' : ''}> Viewed</label></div>
         <div class="code">${lines ? lines.map(diffLine).join('') : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>'}</section></div>`;
 }
@@ -195,7 +220,14 @@ function prView(h: HostState): string {
 function render(): void {
   if (!host) return;
   const err = host.error ? `<div class="err" role="alert">${esc(host.error)}<button class="btn sm" data-do="refresh">Try again</button></div>` : '';
-  app.innerHTML = err + (host.view === 'pr' ? prView(host) : queue(host));
+  app.innerHTML = err + (host.view === 'pr' ? prView(host) : queue(host)) + (view.keys ? keysHelp() : '');
+}
+
+function keysHelp(): string {
+  const r = (ks: string[], t: string) => `<div class="kr">${ks.map((k) => `<kbd>${k}</kbd>`).join('')}<span>${t}</span></div>`;
+  return `<div class="keys" data-do="keys"><div class="kp" role="dialog" aria-label="Keyboard shortcuts"><b>Keyboard shortcuts</b>
+    <span class="lbl">Queue</span>${r(['j', 'k'], 'Move down or up')}${r(['Enter'], 'Open the pull request')}${r(['r'], 'Refresh')}
+    <span class="lbl">Pull request</span>${r(['j', 'k'], 'Next or previous pull request')}${r(['n', 'p'], 'Next or previous file')}${r(['v'], 'Toggle viewed on this file')}${r(['1', '2'], 'Checks, Your review')}${r(['a'], 'Approve')}${r(['Esc'], 'Back to the queue')}${r(['?'], 'Show or hide this list')}</div></div>`;
 }
 
 /* ---------- Events ---------- */
@@ -217,6 +249,7 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
 document.addEventListener('change', (e) => {
   const t = e.target as HTMLInputElement | HTMLSelectElement;
   if (t.id === 'sort') save({ sort: t.value as Sort });
+  else if (t.id === 'method') save({ method: t.value as MergeMethod });
   else if (t instanceof HTMLInputElement && t.dataset.viewed) send({ type: 'setViewed', path: t.dataset.viewed, viewed: t.checked });
 });
 
@@ -234,7 +267,46 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'back') send({ type: 'back' });
   else if (d.do === 'refresh') send({ type: 'refresh' });
   else if (d.do === 'approve') send({ type: 'approve' });
-  else if (d.do === 'merge') send({ type: 'merge' });
+  else if (d.do === 'merge') send({ type: 'merge', method: (d.method as MergeMethod | undefined) ?? 'merge' });
+  else if (d.do === 'updateBranch') send({ type: 'updateBranch' });
+  else if (d.do === 'keys') save({ keys: false });
+});
+
+/* ---------- Keyboard ---------- */
+document.addEventListener('keydown', (e) => {
+  if (!host || e.metaKey || e.ctrlKey || e.altKey) return;
+  const tag = (e.target as HTMLElement).tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  const k = e.key;
+  if (k === '?') { save({ keys: !view.keys }); return; }
+  if (view.keys) { if (k === 'Escape') save({ keys: false }); return; }
+  const rows = visibleQueue(host);
+  if (host.view === 'queue') {
+    if (k === 'j' || k === 'ArrowDown') { save({ sel: Math.min(rows.length - 1, view.sel + 1) }); e.preventDefault(); }
+    else if (k === 'k' || k === 'ArrowUp') { save({ sel: Math.max(0, view.sel - 1) }); e.preventDefault(); }
+    else if (k === 'Enter' && rows[view.sel] && !(e.target as HTMLElement).closest('button')) send({ type: 'openPr', number: rows[view.sel]!.number });
+    else if (k === 'r') send({ type: 'refresh' });
+    return;
+  }
+  const pr = host.pr;
+  if (!pr) return;
+  if (k === 'Escape') send({ type: 'back' });
+  else if (k === 'j' || k === 'k') {
+    if (!rows.length) return;
+    const at = rows.findIndex((p) => p.number === pr.number);
+    const next = rows[(at + (k === 'j' ? 1 : -1) + rows.length) % rows.length]!;
+    view.sel = rows.indexOf(next);
+    send({ type: 'openPr', number: next.number });
+  } else if (k === 'n' || k === 'p') {
+    const i = Math.max(0, pr.files.findIndex((f) => f.path === view.file));
+    const f = pr.files[Math.min(pr.files.length - 1, Math.max(0, i + (k === 'n' ? 1 : -1)))];
+    if (f) save({ file: f.path, step: 'review', onlyNew: false });
+  } else if (k === 'v' && view.step === 'review' && view.file) {
+    const f = pr.files.find((x) => x.path === view.file);
+    if (f) send({ type: 'setViewed', path: f.path, viewed: f.viewed !== 'viewed' });
+  } else if (k === '1') save({ step: 'checks' });
+  else if (k === '2') save({ step: 'review' });
+  else if (k === 'a' && pr.state !== 'merged' && pr.myReview !== 'approved') send({ type: 'approve' });
 });
 
 send({ type: 'ready' });

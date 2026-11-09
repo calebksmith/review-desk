@@ -48,9 +48,36 @@ describe('Controller', () => {
     await c.handle({ type: 'approve' });
     expect(last().pr?.myReview).toBe('approved');
     refuse();
-    await c.handle({ type: 'merge' });
+    await c.handle({ type: 'merge', method: 'squash' });
     expect(last().pr?.state).toBe('open');
     expect(sent.some((m) => m.type === 'toast' && m.text === 'Approved #57')).toBe(true);
+  });
+
+  it('merges with the method the reviewer picked, once confirmed', async () => {
+    const { c, last, sent } = setup();
+    await c.handle({ type: 'openPr', number: 52 });
+    await c.handle({ type: 'approve' });
+    await c.handle({ type: 'merge', method: 'rebase' });
+    expect(last().pr?.state).toBe('merged');
+    expect(sent.some((m) => m.type === 'toast' && m.text === 'Merged #52 into main')).toBe(true);
+  });
+
+  it('won’t merge while a check is failing', async () => {
+    const { c, last, sent } = setup();
+    await c.handle({ type: 'openPr', number: 55 });
+    await c.handle({ type: 'approve' });
+    await c.handle({ type: 'merge', method: 'squash' });
+    expect(last().pr?.state).toBe('open');
+    expect(sent.some((m) => m.type === 'toast' && m.text.startsWith('1 check failing'))).toBe(true);
+  });
+
+  it('updates a branch that is behind its base, then reloads it', async () => {
+    const { c, last } = setup();
+    await c.handle({ type: 'openPr', number: 57 });
+    expect(last().pr?.mergeState).toBe('behind');
+    await c.handle({ type: 'updateBranch' });
+    expect(last().pr?.mergeState).toBe('clean');
+    expect(last().busy).toBe(null);
   });
 
   it('shows an error instead of throwing', async () => {

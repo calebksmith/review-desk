@@ -19,7 +19,15 @@ export interface PrSummary {
   /** The signed-in reviewer's latest review on this PR. */
   myReview: 'approved' | 'changes_requested' | 'commented' | null;
   checks: ChecksTally;
+  /** False when the PR conflicts with its base. Null while GitHub is still working it out. */
+  mergeable: boolean | null;
+  /** GitHub's merge state: 'behind' means the base has moved on since the branch was cut. */
+  mergeState: MergeState;
+  unresolvedThreads: number;
 }
+
+export type MergeState = 'clean' | 'behind' | 'blocked' | 'dirty' | 'unstable' | 'draft' | 'unknown';
+export type MergeMethod = 'squash' | 'merge' | 'rebase';
 
 export type ViewedState = 'viewed' | 'unviewed' | 'changed';
 
@@ -58,8 +66,8 @@ export interface PrDetail extends PrSummary {
   body: string;
   headRef: string;
   baseRef: string;
-  mergeable: boolean | null;
-  mergeMethod: 'squash' | 'merge' | 'rebase';
+  /** Merge methods the repo allows, the default first. */
+  mergeMethods: MergeMethod[];
   files: FileDiff[];
   checkRuns: CheckRun[];
   /** Changes pushed since the reviewer last opened this PR, when there are any. */
@@ -74,7 +82,7 @@ export interface HostState {
   queue: PrSummary[];
   pr: PrDetail | null;
   loading: boolean;
-  busy: 'approve' | 'merge' | null;
+  busy: 'approve' | 'merge' | 'update' | null;
   error: string | null;
 }
 
@@ -89,6 +97,7 @@ export type FromWebview =
   | { type: 'back' }
   | { type: 'setViewed'; path: string; viewed: boolean }
   | { type: 'approve' }
-  | { type: 'merge' }
+  | { type: 'merge'; method: MergeMethod }
+  | { type: 'updateBranch' }
   | { type: 'openFile'; path: string; line: number | null }
   | { type: 'openExternal'; url: string };

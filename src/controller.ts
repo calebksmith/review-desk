@@ -1,5 +1,6 @@
-import type { FromWebview, HostState, ToWebview } from './protocol';
+import type { FromWebview, HostState, MergeMethod, ToWebview } from './protocol';
 import type { DataSource, Store } from './source';
+import { mergeBlocker } from './status';
 
 export interface Host {
   post(msg: ToWebview): void;
@@ -30,7 +31,8 @@ export class Controller {
         case 'back': this.set({ view: 'queue', pr: null }); await this.loadQueue(); break;
         case 'setViewed': await this.setViewed(msg.path, msg.viewed); break;
         case 'approve': await this.approve(); break;
-        case 'merge': await this.merge(); break;
+        case 'merge': await this.merge(msg.method); break;
+        case 'updateBranch': await this.updateBranch(); break;
         case 'openFile': this.host.openFile(msg.path, msg.line); break;
         case 'openExternal': this.host.openExternal(msg.url); break;
       }
@@ -78,14 +80,31 @@ export class Controller {
     this.host.post({ type: 'toast', text: `Approved #${pr.number}` });
   }
 
-  private async merge(): Promise<void> {
+  private async merge(method: MergeMethod): Promise<void> {
     const pr = this.state.pr;
     if (!pr || this.state.busy) return;
-    if (!(await this.host.confirm(`Merge #${pr.number} into ${pr.baseRef}?`, 'Merge'))) return;
+    const blocker = mergeBlocker(pr);
+    if (blocker) { this.host.post({ type: 'toast', text: blocker }); return; }
+    if (!pr.mergeMethods.includes(method)) method = pr.mergeMethods[0]!;
+    const verb = { squash: 'Squash and merge', merge: 'Merge', rebase: 'Rebase and merge' }[method];
+    if (!(await this.host.confirm(`${verb} #${pr.number} into ${pr.baseRef}?`, verb))) return;
     this.set({ busy: 'merge' });
-    await this.source.merge(pr);
+    await this.source.merge(pr, method);
     this.set({ busy: null, pr: { ...pr, state: 'merged' } });
     this.host.post({ type: 'toast', text: `Merged #${pr.number} into ${pr.baseRef}` });
+  }
+
+  private async updateBranch(): Promise<void> {
+    const pr = this.state.pr;
+    if (!pr || this.state.busy) return;
+    this.set({ busy: 'update' });
+    try {
+      await this.source.updateBranch(pr);
+    } finally {
+      this.set({ busy: null });
+    }
+    this.host.post({ type: 'toast', text: `Brought ${pr.baseRef} into #${pr.number}. Checks run again.` });
+    await this.loadPr(pr.number);
   }
 
   private patchFile(path: string, viewed: 'viewed' | 'unviewed' | 'changed'): void {

@@ -1,5 +1,5 @@
 import { parsePatch } from './patch';
-import type { CheckRun, FileDiff, PrDetail, PrSummary } from './protocol';
+import type { CheckRun, FileDiff, MergeMethod, PrDetail, PrSummary } from './protocol';
 import type { DataSource } from './source';
 
 // Sample PRs for demos, screenshots and tests. Content is made up; shapes match GitHub.
@@ -20,7 +20,7 @@ interface SamplePr { summary: PrSummary; files: FileDiff[]; checkRuns: CheckRun[
 function seed(): SamplePr[] {
   const prs: SamplePr[] = [
     {
-      summary: { number: 55, title: 'Count access-link opens by company', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(8), headSha: '9d07f3e', isDraft: false, state: 'open', labels: ['review-desk'], myReview: null, checks: { passed: 4, failed: 1, pending: 0, total: 5 } },
+      summary: { number: 55, title: 'Count access-link opens by company', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(8), headSha: '9d07f3e', isDraft: false, state: 'open', labels: ['review-desk'], myReview: null, checks: { passed: 4, failed: 1, pending: 0, total: 5 }, mergeable: true, mergeState: 'unstable', unresolvedThreads: 0 },
       body: 'Show which company opened each access link, by day.',
       headRef: 'claude/access-link-company',
       files: [
@@ -65,7 +65,7 @@ function seed(): SamplePr[] {
       ],
     },
     {
-      summary: { number: 52, title: 'Add medals to case study cards', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(24), headSha: '0b8e4f1', isDraft: false, state: 'open', labels: ['review-desk'], myReview: null, checks: { passed: 5, failed: 0, pending: 0, total: 5 } },
+      summary: { number: 52, title: 'Add medals to case study cards', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(24), headSha: '0b8e4f1', isDraft: false, state: 'open', labels: ['review-desk'], myReview: null, checks: { passed: 5, failed: 0, pending: 0, total: 5 }, mergeable: true, mergeState: 'clean', unresolvedThreads: 1 },
       body: 'Show each case study’s medal (its small badge icon and name) on its card.',
       headRef: 'claude/case-study-medals',
       files: [
@@ -104,7 +104,7 @@ function seed(): SamplePr[] {
       checkRuns: [pass('Lint', 'GitHub Actions'), pass('Prettier', 'GitHub Actions'), pass('Types', 'GitHub Actions'), pass('Tests', 'GitHub Actions', '12 of 12 passed'), pass('Vercel', 'Vercel', 'Preview ready')],
     },
     {
-      summary: { number: 57, title: 'Fix dates on the Experience page', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(62), headSha: 'e1f04aa', isDraft: false, state: 'open', labels: ['review-desk'], myReview: null, checks: { passed: 4, failed: 0, pending: 1, total: 5 } },
+      summary: { number: 57, title: 'Fix dates on the Experience page', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(62), headSha: 'e1f04aa', isDraft: false, state: 'open', labels: ['review-desk'], myReview: null, checks: { passed: 4, failed: 0, pending: 1, total: 5 }, mergeable: true, mergeState: 'behind', unresolvedThreads: 0 },
       body: 'Use one date format across the Experience page.',
       headRef: 'claude/experience-dates',
       files: [file('src/content/experience.mdx', [
@@ -123,7 +123,7 @@ function seed(): SamplePr[] {
         { name: 'Vercel', app: 'Vercel', status: 'in_progress', conclusion: null, url: 'https://github.com', summary: 'Building preview' }],
     },
     {
-      summary: { number: 48, title: 'Tighten homepage spacing', author: 'calebksmith', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(60 * 26), headSha: 'a71c2d0', isDraft: false, state: 'merged', labels: [], myReview: 'approved', checks: { passed: 5, failed: 0, pending: 0, total: 5 } },
+      summary: { number: 48, title: 'Tighten homepage spacing', author: 'calebksmith', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(60 * 26), headSha: 'a71c2d0', isDraft: false, state: 'merged', labels: [], myReview: 'approved', checks: { passed: 5, failed: 0, pending: 0, total: 5 }, mergeable: null, mergeState: 'unknown', unresolvedThreads: 0 },
       body: 'Use the 8px scale on the homepage sections.',
       headRef: 'homepage-spacing',
       files: [file('src/app/page.tsx', ['@@ -20,2 +20,2 @@', '-<section className="mt-6">', '+<section className="mt-8">'].join('\n'), 'viewed')],
@@ -154,7 +154,7 @@ export class SampleSource implements DataSource {
       : null;
     return {
       ...p.summary, nodeId: `PR_${number}`, body: p.body, headRef: p.headRef, baseRef: 'main',
-      mergeable: true, mergeMethod: 'squash', files: p.files.map((f) => ({ ...f })), checkRuns: p.checkRuns, sinceLastLook,
+      mergeMethods: ['squash', 'rebase'], files: p.files.map((f) => ({ ...f })), checkRuns: p.checkRuns, sinceLastLook,
     };
   }
 
@@ -165,7 +165,9 @@ export class SampleSource implements DataSource {
 
   async approve(pr: PrDetail): Promise<void> { this.find(pr.number).summary.myReview = 'approved'; }
 
-  async merge(pr: PrDetail): Promise<void> { this.find(pr.number).summary.state = 'merged'; }
+  async merge(pr: PrDetail, _method: MergeMethod): Promise<void> { this.find(pr.number).summary.state = 'merged'; }
+
+  async updateBranch(pr: PrDetail): Promise<void> { this.find(pr.number).summary.mergeState = 'clean'; }
 
   private find(number: number): SamplePr {
     const p = this.prs.find((x) => x.summary.number === number);

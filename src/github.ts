@@ -1,10 +1,11 @@
 import { Octokit } from '@octokit/rest';
 import { parsePatch } from './patch';
-import type { CheckConclusion, CheckRun, ChecksTally, FileDiff, PrDetail, PrSummary, ViewedState } from './protocol';
+import type { CheckConclusion, CheckRun, ChecksTally, FileDiff, MergeMethod, MergeState, PrDetail, PrSummary, ViewedState } from './protocol';
 import type { DataSource } from './source';
 
 const PR_FIELDS = `
-  number title url additions deletions updatedAt isDraft state headRefOid
+  number title url additions deletions updatedAt isDraft state headRefOid mergeable mergeStateStatus
+  reviewThreads(first: 100) { nodes { isResolved } }
   author { login }
   labels(first: 10) { nodes { name } }
   latestReviews(first: 20) { nodes { author { login } state } }
@@ -18,6 +19,8 @@ const PR_FIELDS = `
 interface RawPr {
   number: number; title: string; url: string; additions: number; deletions: number; updatedAt: string;
   isDraft: boolean; state: 'OPEN' | 'MERGED' | 'CLOSED'; headRefOid: string;
+  mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN'; mergeStateStatus: string;
+  reviewThreads: { nodes: { isResolved: boolean }[] };
   author: { login: string } | null;
   labels: { nodes: { name: string }[] };
   latestReviews: { nodes: { author: { login: string } | null; state: string }[] };
@@ -61,13 +64,13 @@ export class GitHubSource implements DataSource {
 
   async getPr(number: number, sinceSha: string | null): Promise<PrDetail> {
     const me = await this.viewer();
-    const data = await this.octokit.graphql<{ repository: { squashMergeAllowed: boolean; mergeCommitAllowed: boolean; pullRequest: RawPr & {
-      id: string; body: string; headRefName: string; baseRefName: string; mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
+    const data = await this.octokit.graphql<{ repository: { squashMergeAllowed: boolean; mergeCommitAllowed: boolean; rebaseMergeAllowed: boolean; pullRequest: RawPr & {
+      id: string; body: string; headRefName: string; baseRefName: string;
       files: { nodes: { path: string; viewerViewedState: 'VIEWED' | 'UNVIEWED' | 'DISMISSED' }[] };
     } } }>(
       `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) {
-        squashMergeAllowed mergeCommitAllowed
-        pullRequest(number: $number) { ${PR_FIELDS} id body headRefName baseRefName mergeable
+        squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
+        pullRequest(number: $number) { ${PR_FIELDS} id body headRefName baseRefName
           files(first: 100) { nodes { path viewerViewedState } } }
       } }`,
       { owner: this.owner, name: this.name, number },
@@ -119,8 +122,7 @@ export class GitHubSource implements DataSource {
       body: raw.body,
       headRef: raw.headRefName,
       baseRef: raw.baseRefName,
-      mergeable: raw.mergeable === 'UNKNOWN' ? null : raw.mergeable === 'MERGEABLE',
-      mergeMethod: data.repository.squashMergeAllowed ? 'squash' : data.repository.mergeCommitAllowed ? 'merge' : 'rebase',
+      mergeMethods: mergeMethods(data.repository),
       files,
       checkRuns,
       sinceLastLook,
@@ -136,8 +138,12 @@ export class GitHubSource implements DataSource {
     await this.octokit.pulls.createReview({ owner: this.owner, repo: this.name, pull_number: pr.number, commit_id: pr.headSha, event: 'APPROVE' });
   }
 
-  async merge(pr: PrDetail): Promise<void> {
-    await this.octokit.pulls.merge({ owner: this.owner, repo: this.name, pull_number: pr.number, sha: pr.headSha, merge_method: pr.mergeMethod });
+  async merge(pr: PrDetail, method: MergeMethod): Promise<void> {
+    await this.octokit.pulls.merge({ owner: this.owner, repo: this.name, pull_number: pr.number, sha: pr.headSha, merge_method: method });
+  }
+
+  async updateBranch(pr: PrDetail): Promise<void> {
+    await this.octokit.pulls.updateBranch({ owner: this.owner, repo: this.name, pull_number: pr.number, expected_head_sha: pr.headSha });
   }
 }
 
@@ -161,7 +167,24 @@ function toSummary(p: RawPr, me: string): PrSummary {
     labels: p.labels.nodes.map((l) => l.name),
     myReview: mine === 'APPROVED' ? 'approved' : mine === 'CHANGES_REQUESTED' ? 'changes_requested' : mine === 'COMMENTED' ? 'commented' : null,
     checks: tally(p.commits.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? []),
+    mergeable: p.mergeable === 'UNKNOWN' ? null : p.mergeable === 'MERGEABLE',
+    mergeState: toMergeState(p.mergeStateStatus),
+    unresolvedThreads: p.reviewThreads.nodes.filter((t) => !t.isResolved).length,
   };
+}
+
+export function toMergeState(s: string): MergeState {
+  const v = s.toLowerCase();
+  return v === 'clean' || v === 'behind' || v === 'blocked' || v === 'dirty' || v === 'unstable' || v === 'draft' ? v : 'unknown';
+}
+
+/** The repo's allowed merge methods, squash first when it's on. */
+export function mergeMethods(r: { squashMergeAllowed: boolean; mergeCommitAllowed: boolean; rebaseMergeAllowed: boolean }): MergeMethod[] {
+  const out: MergeMethod[] = [];
+  if (r.squashMergeAllowed) out.push('squash');
+  if (r.mergeCommitAllowed) out.push('merge');
+  if (r.rebaseMergeAllowed) out.push('rebase');
+  return out.length ? out : ['merge'];
 }
 
 export function tally(contexts: RawContext[]): ChecksTally {
