@@ -52,6 +52,10 @@ export interface CheckRun {
   conclusion: CheckConclusion | null;
   url: string | null;
   summary: string | null;
+  /** The step that failed, for a GitHub Actions job. */
+  failedStep: string | null;
+  /** The error lines from the failed step's log. */
+  excerpt: string[] | null;
 }
 
 export interface SinceLastLook {
@@ -61,9 +65,32 @@ export interface SinceLastLook {
   files: FileDiff[];
 }
 
+/** One comment, with its body as GitHub renders it. The webview sanitizes the HTML before showing it. */
+export interface Comment {
+  author: string;
+  createdAt: string;
+  html: string;
+  url: string;
+  /** Posted by someone else after the reviewer last opened the PR. */
+  isNew: boolean;
+}
+
+export type ReviewVerdict = 'approved' | 'changes_requested' | 'commented' | 'dismissed';
+
+/** What people said on a PR: comments, reviews, and threads on lines of code. */
+export type ConversationItem =
+  | { kind: 'comment'; comment: Comment }
+  | { kind: 'review'; verdict: ReviewVerdict; comment: Comment }
+  | { kind: 'thread'; path: string; line: number | null; resolved: boolean; outdated: boolean; comments: Comment[] };
+
 export interface PrDetail extends PrSummary {
   nodeId: string;
+  /** The description as written (Markdown). */
   body: string;
+  /** The description as GitHub renders it. */
+  bodyHtml: string;
+  /** Oldest first, as on GitHub. */
+  conversation: ConversationItem[];
   headRef: string;
   baseRef: string;
   /** Merge methods the repo allows, the default first. */

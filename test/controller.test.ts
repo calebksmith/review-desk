@@ -3,11 +3,11 @@ import { Controller, type Host } from '../src/controller';
 import type { HostState, ToWebview } from '../src/protocol';
 import { SampleSource } from '../src/sample';
 
-function setup(label = '') {
+function setup(label = '', onConfirm: (question: string, action: string) => void = () => {}) {
   const sent: ToWebview[] = [];
   const store = new Map<string, unknown>();
   let confirmed = true;
-  const host: Host = { post: (m) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async () => confirmed };
+  const host: Host = { post: (m) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async (q, a) => { onConfirm(q, a); return confirmed; } };
   const c = new Controller(new SampleSource(), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host, label);
   const last = (): HostState => (sent.filter((m) => m.type === 'state').at(-1) as { state: HostState }).state;
   return { c, sent, store, last, refuse: () => { confirmed = false; } };
@@ -58,17 +58,23 @@ describe('Controller', () => {
     await c.handle({ type: 'openPr', number: 52 });
     await c.handle({ type: 'approve' });
     await c.handle({ type: 'merge', method: 'rebase' });
-    expect(last().pr?.state).toBe('merged');
     expect(sent.some((m) => m.type === 'toast' && m.text === 'Merged #52 into main')).toBe(true);
+    // Nothing is left to do on a merged PR, so the reviewer lands back on the queue, now showing it merged.
+    expect(last().view).toBe('queue');
+    expect(last().pr).toBeNull();
+    expect(last().queue.find((p) => p.number === 52)?.state).toBe('merged');
   });
 
-  it('won’t merge while a check is failing', async () => {
-    const { c, last, sent } = setup();
+  it('merges with a failing check only after a warning that names it', async () => {
+    const asked: [string, string][] = [];
+    const { c, last, sent, refuse } = setup(undefined, (q, a) => asked.push([q, a]));
     await c.handle({ type: 'openPr', number: 55 });
     await c.handle({ type: 'approve' });
+    refuse();
     await c.handle({ type: 'merge', method: 'squash' });
+    expect(asked[0]).toEqual(['Tests is failing on #55. Squash and merge into main anyway?', 'Squash and merge anyway']);
     expect(last().pr?.state).toBe('open');
-    expect(sent.some((m) => m.type === 'toast' && m.text.startsWith('1 check failing'))).toBe(true);
+    expect(sent.some((m) => m.type === 'toast' && m.text.startsWith('Merged'))).toBe(false);
   });
 
   it('updates a branch that is behind its base, then reloads it', async () => {
@@ -84,5 +90,21 @@ describe('Controller', () => {
     const { c, last } = setup();
     await c.handle({ type: 'openPr', number: 999 });
     expect(last().error).toBe('No sample PR #999');
+  });
+
+  it('marks comments posted since the last look as new', async () => {
+    const { c, store, last } = setup();
+    store.set('lastSeenAt:calebksmith/portfolio#55', new Date(Date.now() - 30 * 60_000).toISOString());
+    await c.handle({ type: 'openPr', number: 55 });
+    const comments = last().pr!.conversation.flatMap((it) => (it.kind === 'thread' ? it.comments : [it.comment]));
+    expect(comments.filter((x) => x.isNew).map((x) => x.author)).toEqual(['claude', 'claude']);
+    await c.handle({ type: 'refresh' });
+    expect(last().pr!.conversation.some((it) => it.kind === 'comment' && it.comment.isNew)).toBe(false);
+  });
+
+  it('marks nothing new the first time a PR is opened', async () => {
+    const { c, last } = setup();
+    await c.handle({ type: 'openPr', number: 55 });
+    expect(JSON.stringify(last().pr!.conversation)).not.toContain('"isNew":true');
   });
 });

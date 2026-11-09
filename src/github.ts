@@ -1,4 +1,6 @@
 import { Octokit } from '@octokit/rest';
+import { COMMENT_FIELDS, toConversation, type RawComment, type RawReview, type RawThread } from './conversation';
+import { logExcerpt } from './logs';
 import { parsePatch } from './patch';
 import type { CheckConclusion, CheckRun, ChecksTally, FileDiff, MergeMethod, MergeState, PrDetail, PrSummary, ViewedState } from './protocol';
 import type { DataSource } from './source';
@@ -65,13 +67,19 @@ export class GitHubSource implements DataSource {
   async getPr(number: number, sinceSha: string | null): Promise<PrDetail> {
     const me = await this.viewer();
     const data = await this.octokit.graphql<{ repository: { squashMergeAllowed: boolean; mergeCommitAllowed: boolean; rebaseMergeAllowed: boolean; pullRequest: RawPr & {
-      id: string; body: string; headRefName: string; baseRefName: string;
+      id: string; body: string; bodyHTML: string; headRefName: string; baseRefName: string;
       files: { nodes: { path: string; viewerViewedState: 'VIEWED' | 'UNVIEWED' | 'DISMISSED' }[] };
+      comments: { nodes: RawComment[] };
+      reviews: { nodes: RawReview[] };
+      threads: { nodes: RawThread[] };
     } } }>(
       `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) {
         squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
-        pullRequest(number: $number) { ${PR_FIELDS} id body headRefName baseRefName
-          files(first: 100) { nodes { path viewerViewedState } } }
+        pullRequest(number: $number) { ${PR_FIELDS} id body bodyHTML headRefName baseRefName
+          files(first: 100) { nodes { path viewerViewedState } }
+          comments(last: 50) { nodes { ${COMMENT_FIELDS} } }
+          reviews(last: 50) { nodes { author { login } state submittedAt body bodyHTML url } }
+          threads: reviewThreads(first: 50) { nodes { isResolved isOutdated path line originalLine comments(first: 30) { nodes { ${COMMENT_FIELDS} } } } } }
       } }`,
       { owner: this.owner, name: this.name, number },
     );
@@ -88,15 +96,37 @@ export class GitHubSource implements DataSource {
         lines: f.patch ? parsePatch(f.patch) : null,
       }));
 
-    const runs = await this.octokit.paginate(this.octokit.checks.listForRef, { owner: this.owner, repo: this.name, ref: raw.headRefOid, per_page: 100 });
-    const checkRuns = runs.map((r): CheckRun => ({
-      name: r.name,
-      app: r.app?.name ?? '',
-      status: r.status,
-      conclusion: r.conclusion as CheckConclusion | null,
-      url: r.html_url ?? null,
-      summary: r.output?.summary ?? null,
+    const [runs, statuses] = await Promise.all([
+      this.octokit.paginate(this.octokit.checks.listForRef, { owner: this.owner, repo: this.name, ref: raw.headRefOid, per_page: 100 }),
+      this.octokit.repos.getCombinedStatusForRef({ owner: this.owner, repo: this.name, ref: raw.headRefOid, per_page: 100 }),
+    ]);
+    const checkRuns = await Promise.all(runs.map(async (r): Promise<CheckRun> => {
+      const run: CheckRun = {
+        name: r.name,
+        app: r.app?.name ?? '',
+        status: r.status,
+        conclusion: r.conclusion as CheckConclusion | null,
+        url: r.html_url ?? null,
+        summary: r.output?.summary ?? null,
+        failedStep: null,
+        excerpt: null,
+      };
+      // A failed GitHub Actions job says only "exit code 1". Name the step and show its error lines.
+      return r.app?.slug === 'github-actions' && isFailure(run.conclusion) ? { ...run, ...(await this.jobFailure(r.id)) } : run;
     }));
+    // Older integrations (Vercel, for one) report commit statuses instead of check runs.
+    for (const st of statuses.data.statuses) {
+      checkRuns.push({
+        name: st.context,
+        app: 'Commit status',
+        status: st.state === 'pending' ? 'pending' : 'completed',
+        conclusion: st.state === 'success' ? 'success' : st.state === 'pending' ? null : 'failure',
+        url: st.target_url ?? null,
+        summary: st.description ?? null,
+        failedStep: null,
+        excerpt: null,
+      });
+    }
 
     let sinceLastLook: PrDetail['sinceLastLook'] = null;
     if (sinceSha && sinceSha !== raw.headRefOid) {
@@ -120,6 +150,8 @@ export class GitHubSource implements DataSource {
       ...toSummary(raw, me),
       nodeId: raw.id,
       body: raw.body,
+      bodyHtml: raw.bodyHTML,
+      conversation: toConversation(raw.comments.nodes, raw.reviews.nodes, raw.threads.nodes),
       headRef: raw.headRefName,
       baseRef: raw.baseRefName,
       mergeMethods: mergeMethods(data.repository),
@@ -127,6 +159,19 @@ export class GitHubSource implements DataSource {
       checkRuns,
       sinceLastLook,
     };
+  }
+
+  /** The failed step of an Actions job and the error lines from its log. Logs can expire; then it's just the step. */
+  private async jobFailure(jobId: number): Promise<Pick<CheckRun, 'failedStep' | 'excerpt'>> {
+    let failedStep: string | null = null;
+    try {
+      const job = await this.octokit.actions.getJobForWorkflowRun({ owner: this.owner, repo: this.name, job_id: jobId });
+      failedStep = job.data.steps?.find((st) => st.conclusion === 'failure')?.name ?? null;
+      const log = await this.octokit.actions.downloadJobLogsForWorkflowRun({ owner: this.owner, repo: this.name, job_id: jobId });
+      return { failedStep, excerpt: typeof log.data === 'string' ? logExcerpt(log.data) : null };
+    } catch {
+      return { failedStep, excerpt: null };
+    }
   }
 
   async setViewed(pr: PrDetail, path: string, viewed: boolean): Promise<void> {
@@ -146,6 +191,8 @@ export class GitHubSource implements DataSource {
     await this.octokit.pulls.updateBranch({ owner: this.owner, repo: this.name, pull_number: pr.number, expected_head_sha: pr.headSha });
   }
 }
+
+const isFailure = (c: CheckConclusion | null) => c === 'failure' || c === 'timed_out' || c === 'cancelled' || c === 'action_required' || c === 'stale';
 
 function toViewed(s: 'VIEWED' | 'UNVIEWED' | 'DISMISSED'): ViewedState {
   return s === 'VIEWED' ? 'viewed' : s === 'DISMISSED' ? 'changed' : 'unviewed';

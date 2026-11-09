@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { toMergeState, mergeMethods } from '../src/github';
 import type { PrDetail, PrSummary } from '../src/protocol';
-import { mergeBlocker, mergeReadiness, prStatus } from '../src/status';
+import { mergeBlocker, mergeReadiness, mergeWarning, prStatus } from '../src/status';
 
 const base: PrSummary = {
   number: 1, title: 't', author: 'a', url: '', additions: 0, deletions: 0, updatedAt: '', headSha: 'abc', isDraft: false, state: 'open',
   labels: [], myReview: null, checks: { passed: 3, failed: 0, pending: 0, total: 3 }, mergeable: true, mergeState: 'clean', unresolvedThreads: 0,
 };
 const pr = (p: Partial<PrSummary> = {}): PrSummary => ({ ...base, ...p });
-const detail = (p: Partial<PrDetail> = {}): PrDetail => ({ ...base, nodeId: '', body: '', headRef: 'h', baseRef: 'main', mergeMethods: ['squash'], files: [], checkRuns: [], sinceLastLook: null, ...p });
+const detail = (p: Partial<PrDetail> = {}): PrDetail => ({ ...base, nodeId: '', body: '', bodyHtml: '', conversation: [], headRef: 'h', baseRef: 'main', mergeMethods: ['squash'], files: [], checkRuns: [], sinceLastLook: null, ...p });
 
 describe('prStatus', () => {
   it('names each state once', () => {
@@ -46,7 +46,16 @@ describe('mergeReadiness', () => {
     expect(mergeBlocker(detail())).toBe(null);
     expect(mergeBlocker(detail({ mergeState: 'behind' }))).toBe(null);
     expect(mergeBlocker(detail({ mergeable: false }))).toMatch(/conflicts/);
-    expect(mergeBlocker(detail({ checks: { passed: 0, failed: 1, pending: 0, total: 1 } }))).toMatch(/^1 check failing/);
+    expect(mergeBlocker(detail({ checks: { passed: 0, failed: 1, pending: 0, total: 1 } }))).toBe(null);
+  });
+
+  it('warns about failing checks by name, without blocking', () => {
+    const failing = { passed: 1, failed: 2, pending: 0, total: 3 };
+    const run = (name: string, conclusion: 'success' | 'failure') => ({ name, app: '', status: 'completed' as const, conclusion, url: null, summary: null, failedStep: null, excerpt: null });
+    expect(mergeWarning(detail())).toBe(null);
+    expect(mergeWarning(detail({ checks: failing, checkRuns: [run('checks', 'failure'), run('lint', 'success'), run('Vercel', 'failure')] }))).toBe('checks, Vercel are failing');
+    expect(mergeWarning(detail({ checks: { ...failing, failed: 1 }, checkRuns: [run('checks', 'failure')] }))).toBe('checks is failing');
+    expect(mergeWarning(detail({ checks: failing }))).toBe('2 checks failing');
   });
 });
 

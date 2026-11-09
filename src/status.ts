@@ -55,11 +55,22 @@ export function mergeReadiness(pr: PrDetail): ReadinessItem[] {
   return items;
 }
 
-/** Why Merge is off, or null when it can run. Only red items block. */
+/** Why Merge can't run at all, or null. Only conflicts: GitHub refuses to merge those. */
 export function mergeBlocker(pr: PrDetail): string | null {
   if (pr.mergeable === false || pr.mergeState === 'dirty') return `Resolve the conflicts with ${pr.baseRef} first.`;
-  if (pr.checks.failed) return `${plural(pr.checks.failed, 'check')} failing. Fix ${pr.checks.failed === 1 ? 'it' : 'them'} first, or merge on GitHub.`;
   return null;
+}
+
+/** Failing checks don't block a merge; the reviewer can merge anyway once they've been told. Null when none fail. */
+export function mergeWarning(pr: PrDetail): string | null {
+  if (!pr.checks.failed) return null;
+  const names = failingChecks(pr);
+  return names.length ? `${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} failing` : `${plural(pr.checks.failed, 'check')} failing`;
+}
+
+const FAILED = ['failure', 'timed_out', 'cancelled', 'action_required', 'stale'];
+export function failingChecks(pr: PrDetail): string[] {
+  return pr.checkRuns.filter((r) => r.status === 'completed' && FAILED.includes(r.conclusion ?? '')).map((r) => r.name);
 }
 
 export function plural(n: number, one: string, many = one + 's'): string {

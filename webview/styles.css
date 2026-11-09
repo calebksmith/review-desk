@@ -85,6 +85,9 @@ select { font: inherit; background: var(--input); color: var(--fg); border: 1px 
 
 /* Queue */
 .pad { padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; overflow: auto }
+/* The queue fills the rest of the panel and scrolls inside it. */
+#app > .pad { flex: 1; min-height: 0 }
+.list { flex-shrink: 0 }
 .toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap }
 .sort { margin-left: auto; display: flex; gap: 8px; align-items: center }
 .list { border: 1px solid var(--line); border-radius: 8px; overflow: hidden }
@@ -140,7 +143,6 @@ main { flex: 1; min-width: 0; overflow: auto; display: flex; flex-direction: col
 .newbar { display: flex; align-items: center; gap: 10px; padding: 8px 20px; background: var(--accent-soft); border-bottom: 1px solid var(--line); flex-wrap: wrap }
 .newbar .seg { margin-left: auto; background: var(--win) }
 .newbar > .btn { margin-left: auto }
-.intent { padding: 12px 20px; border-bottom: 1px solid var(--line-soft); font-size: 14px; line-height: 20px; max-width: 80ch }
 .split { display: flex; flex: 1; min-height: 0 }
 .files { width: 260px; flex-shrink: 0; border-right: 1px solid var(--line); background: var(--chrome); padding: 8px; display: flex; flex-direction: column; gap: 2px; overflow: auto }
 .fh { display: flex; justify-content: space-between; align-items: center; padding: 4px 6px 6px }
@@ -191,3 +193,63 @@ kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: ce
   .side, .files { width: 100%; border-right: 0; border-bottom: 1px solid var(--line) }
   .cs, .qrow .when { display: none }
 }
+
+/* PR header: one line. The title gives way first. */
+.crumb.prc { flex-wrap: nowrap }
+.prc .home { flex-shrink: 0 }
+.prc .pt { flex-wrap: nowrap; align-items: center; min-width: 0 }
+.prc .pt .num, .prc .pt .diffstat { flex-shrink: 0 }
+.ttl { display: inline-flex; align-items: center; gap: 6px; min-width: 0; background: none; border: 0; padding: 2px 0; cursor: pointer; text-align: left }
+.ttl b { font-size: 15px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.ttl .ico { width: 13px; height: 13px; color: var(--fg-3); flex-shrink: 0; opacity: 0; transition: opacity .1s }
+.ttl:hover b { text-decoration: underline; color: var(--accent-ink) }
+.ttl:hover .ico, .ttl:focus-visible .ico { opacity: 1 }
+.prc .end { flex-shrink: 0 }
+@media (max-width: 720px) { .prc .hl, .prc .sep { display: none } }
+.ready .why { margin-left: auto; color: var(--fg-2) }
+
+/* Description and conversation */
+.about { border-bottom: 1px solid var(--line); padding: 10px 20px 12px; display: flex; flex-direction: column; gap: 8px; flex-shrink: 0 }
+.abh { display: flex; align-items: center; gap: 12px; flex-wrap: wrap }
+.abh .seg button { display: inline-flex; gap: 6px; align-items: center }
+.abh .it { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--warn) }
+.abh .it .ico { width: 14px; height: 14px }
+.abh .more { margin-left: auto }
+.newtag { font-size: 10px; font-weight: 700; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--accent-fg); line-height: 16px }
+.abb { position: relative; max-width: 90ch }
+.abb.clamp { max-height: 104px; overflow: hidden }
+.abb.clamp::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 32px; background: linear-gradient(transparent, var(--win)); pointer-events: none }
+.abb.open { max-height: 45vh; overflow: auto; padding-right: 8px }
+.none { margin: 0; color: var(--fg-3) }
+.md { line-height: 20px; overflow-wrap: anywhere }
+.md > :first-child { margin-top: 0 } .md > :last-child { margin-bottom: 0 }
+.md p, .md ul, .md ol, .md pre, .md blockquote, .md table { margin: 0 0 8px }
+.md h1, .md h2, .md h3, .md h4 { font-size: 13px; margin: 12px 0 4px; font-weight: 700 }
+.md h1, .md h2 { font-size: 14px }
+.md ul, .md ol { padding-left: 20px }
+.md li > input[type="checkbox"] { margin: 0 6px 0 -18px; vertical-align: middle }
+.md li:has(> input[type="checkbox"]) { list-style: none }
+.md code { font-family: var(--mono); font-size: 12px; padding: 1px 4px; border-radius: 3px; background: var(--chrome) }
+.md pre { font-family: var(--mono); font-size: 12px; padding: 8px 10px; border-radius: 6px; background: var(--chrome); overflow: auto }
+.md pre code { padding: 0; background: none }
+.md blockquote { padding-left: 10px; border-left: 3px solid var(--line); color: var(--fg-2) }
+.md a { color: var(--accent-ink) }
+.md img { max-width: 100%; height: auto }
+.md table { border-collapse: collapse } .md th, .md td { border: 1px solid var(--line-soft); padding: 3px 8px; text-align: left }
+.ci { padding: 8px 0; border-top: 1px solid var(--line-soft) }
+.ci:first-child { border-top: 0; padding-top: 0 }
+.ci.thread { display: flex; flex-direction: column; gap: 6px }
+.ci.thread .cm { padding-left: 22px }
+.cih { display: flex; align-items: center; gap: 8px }
+.cih > .ico { width: 14px; height: 14px; color: var(--fg-3) }
+.cm { display: flex; flex-direction: column; gap: 4px }
+.cm.new { box-shadow: inset 2px 0 0 var(--accent); padding-left: 10px }
+.ci.thread .cm.new { padding-left: 22px }
+.cmh { display: flex; align-items: center; gap: 8px; font-size: 12px }
+.cmh .when { color: var(--fg-3) }
+.cmh .gh { margin-left: auto; color: var(--fg-3) }
+
+/* Why a check failed */
+.cgb { display: flex; flex-direction: column; gap: 6px; padding: 0 12px 12px 38px }
+.fstep { font-size: 12px; color: var(--fg-2) }
+.log { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 18px; padding: 8px 10px; border-radius: 6px; background: var(--win); border: 1px solid var(--line-soft); overflow: auto; white-space: pre; max-height: 240px }

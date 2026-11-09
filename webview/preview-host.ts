@@ -6,6 +6,8 @@ import { SampleSource } from '../src/sample';
 // so the preview page shows exactly what the extension would.
 
 const store = new Map<string, unknown>();
+// #55 was last opened 30 minutes ago, so its newer comments show as new.
+store.set('lastSeenAt:calebksmith/portfolio#55', new Date(Date.now() - 30 * 60_000).toISOString());
 let state: unknown;
 const controller = new Controller(new SampleSource(), { get: <T>(k: string) => store.get(k) as T | undefined, set: (k, v) => { store.set(k, v); } }, {
   post: (msg) => window.postMessage(msg, '*'),

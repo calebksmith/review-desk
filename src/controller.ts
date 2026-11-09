@@ -1,6 +1,7 @@
 import type { FromWebview, HostState, MergeMethod, ToWebview } from './protocol';
+import { markNew } from './conversation';
 import type { DataSource, Store } from './source';
-import { mergeBlocker } from './status';
+import { mergeBlocker, mergeWarning } from './status';
 
 export interface Host {
   post(msg: ToWebview): void;
@@ -51,10 +52,13 @@ export class Controller {
   private async loadPr(number: number): Promise<void> {
     this.set({ view: 'pr', loading: true, error: null, pr: this.state.pr?.number === number ? this.state.pr : null });
     const key = `lastSeen:${this.source.repo}#${number}`;
-    const pr = await this.source.getPr(number, this.store.get<string>(key) ?? null);
-    // Seen means opened: the next push after this one is "new since you looked".
+    const atKey = `lastSeenAt:${this.source.repo}#${number}`;
+    const seenAt = this.store.get<string>(atKey) ?? null;
+    const [pr, me] = await Promise.all([this.source.getPr(number, this.store.get<string>(key) ?? null), this.source.viewer()]);
+    // Seen means opened: the next push or comment after this is "new since you looked".
     await this.store.set(key, pr.headSha);
-    this.set({ pr, loading: false });
+    await this.store.set(atKey, new Date().toISOString());
+    this.set({ pr: { ...pr, conversation: markNew(pr.conversation, seenAt, me) }, loading: false });
   }
 
   private async setViewed(path: string, viewed: boolean): Promise<void> {
@@ -87,11 +91,17 @@ export class Controller {
     if (blocker) { this.host.post({ type: 'toast', text: blocker }); return; }
     if (!pr.mergeMethods.includes(method)) method = pr.mergeMethods[0]!;
     const verb = { squash: 'Squash and merge', merge: 'Merge', rebase: 'Rebase and merge' }[method];
-    if (!(await this.host.confirm(`${verb} #${pr.number} into ${pr.baseRef}?`, verb))) return;
+    const warning = mergeWarning(pr);
+    const ok = warning
+      ? await this.host.confirm(`${warning} on #${pr.number}. ${verb} into ${pr.baseRef} anyway?`, `${verb} anyway`)
+      : await this.host.confirm(`${verb} #${pr.number} into ${pr.baseRef}?`, verb);
+    if (!ok) return;
     this.set({ busy: 'merge' });
     await this.source.merge(pr, method);
-    this.set({ busy: null, pr: { ...pr, state: 'merged' } });
+    // A merged PR is a dead end, so go back to the queue for the next one.
+    this.set({ busy: null, view: 'queue', pr: null });
     this.host.post({ type: 'toast', text: `Merged #${pr.number} into ${pr.baseRef}` });
+    await this.loadQueue();
   }
 
   private async updateBranch(): Promise<void> {

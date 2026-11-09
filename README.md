@@ -7,10 +7,11 @@ This is phase 1 of five: a read-only review panel on GitHub data. The agent step
 ## What it does today
 
 - **Review queue:** open and recently merged PRs, filtered by Needs you, Approved and Merged, sorted by what needs you first.
-- **Checks:** every check run on the latest commit, failures first, with a link to each log.
-- **Your review:** the PR's description, its changed files with a Viewed checkbox each, and the diff. Viewed state is GitHub's own, so it matches github.com.
+- **Checks:** every check run and commit status (Vercel, for one) on the latest commit, failures first, with a link to each log. A failed GitHub Actions job names the step that failed and shows the error lines from its log.
+- **Your review:** the PR's description and conversation above its changed files, with a Viewed checkbox for each file, and the diff. Viewed state is GitHub's own, so it matches github.com.
+- **Description and conversation:** the start of the description, formatted as on GitHub, with **Show full description** for the rest. The Conversation tab lists comments, reviews and comments on lines of code, newest first, marking what's new since you last looked. A comment on a line of code opens that file.
 - **New commits since you looked:** when the agent pushes after you opened a PR, a banner names the files and shows only what changed since.
-- **Approve and Merge** from the header. Merge asks before it runs and uses the repo's allowed merge method.
+- **Approve and Merge** from the header. Merge asks before it runs, uses the repo's allowed merge method, and takes you back to the queue when it's done. While a check fails, the button reads **Merge anyway** and asks first, naming the failing checks. Conflicts block a merge.
 
 ## Try it
 
@@ -41,6 +42,8 @@ The extension host talks to GitHub; the webview only renders. `src/controller.ts
 | `src/extension.ts` | Commands, GitHub sign-in, the webview panel |
 | `src/github.ts` | GitHub REST and GraphQL calls |
 | `src/controller.ts` | Review state and the messages the webview sends |
+| `src/conversation.ts` | A PR's comments, reviews and line threads as one timeline |
+| `src/logs.ts` | The error lines from a failed GitHub Actions log |
 | `src/repos.ts` | Which repo to review: the setting, your last pick, or the folders that are open |
 | `src/protocol.ts` | Types shared by the host and the webview |
 | `src/sample.ts` | Sample PRs for demos and tests |

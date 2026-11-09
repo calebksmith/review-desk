@@ -1,5 +1,7 @@
-import type { CheckRun, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ToWebview } from '../src/protocol';
-import { mergeBlocker, mergeReadiness, prStatus, type Bucket, type Tone } from '../src/status';
+import DOMPurify from 'dompurify';
+import { conversationCounts, startedAt } from '../src/conversation';
+import type { CheckRun, Comment, ConversationItem, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
+import { mergeBlocker, mergeReadiness, mergeWarning, prStatus, type Bucket, type Tone } from '../src/status';
 
 // The webview only renders. Everything it knows comes from the host's state messages;
 // what it remembers on its own is view state (filter, step, open file).
@@ -10,10 +12,11 @@ const vscode = acquireVsCodeApi();
 
 type Filter = 'all' | Bucket;
 type Sort = 'needs' | 'updated';
-interface View { filter: Filter; sort: Sort; step: 'checks' | 'review'; file: string | null; onlyNew: boolean; pr: number | null; sel: number; method: MergeMethod | null; keys: boolean }
+type About = 'desc' | 'conv';
+interface View { filter: Filter; sort: Sort; step: 'checks' | 'review'; file: string | null; onlyNew: boolean; pr: number | null; sel: number; method: MergeMethod | null; keys: boolean; about: About; aboutOpen: boolean }
 
 let host: HostState | null = null;
-let view: View = { filter: 'all', sort: 'needs', step: 'review', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false };
+let view: View = { filter: 'all', sort: 'needs', step: 'review', file: null, onlyNew: false, pr: null, sel: 0, method: null, about: 'desc', aboutOpen: false, ...(vscode.getState() as Partial<View> | undefined), keys: false };
 const send = (msg: FromWebview) => vscode.postMessage(msg);
 const app = document.getElementById('app')!;
 
@@ -101,21 +104,21 @@ function queue(h: HostState): string {
 
 /* ---------- PR ---------- */
 function crumb(pr: PrDetail, h: HostState): string {
-  const seen = pr.files.filter((f) => f.viewed === 'viewed').length;
-  const viewed = `<span class="stat ${seen === pr.files.length ? 'ok' : ''}">${seen} of ${plural(pr.files.length, 'file')} viewed</span>`;
-  const pill = `<span role="status">${statusPill(pr)}</span>`;
   let act: string;
-  if (pr.state === 'merged') act = pill;
-  else if (pr.myReview !== 'approved') act = `${viewed}${pill}<button class="btn pri" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
+  if (pr.state === 'merged') act = `<span role="status">${statusPill(pr)}</span>`;
+  else if (pr.myReview !== 'approved') act = `<button class="btn pri" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
   else {
     const blocker = mergeBlocker(pr);
     const method = view.method && pr.mergeMethods.includes(view.method) ? view.method : pr.mergeMethods[0]!;
     const verb = { squash: 'Squash and merge', merge: 'Merge', rebase: 'Rebase and merge' }[method];
     const pick = pr.mergeMethods.length > 1 ? `<select id="method" aria-label="Merge method">${pr.mergeMethods.map((m) => `<option value="${m}" ${m === method ? 'selected' : ''}>${{ squash: 'Squash', merge: 'Merge commit', rebase: 'Rebase' }[m]}</option>`).join('')}</select>` : '';
-    act = `${pill}${pick}<button class="btn pri" data-do="merge" data-method="${method}" ${h.busy || blocker ? 'disabled' : ''} ${blocker ? `title="${esc(blocker)}"` : ''}>${h.busy === 'merge' ? '<span class="spin"></span>' : I.merge}${verb}</button>`;
+    // With a check failing, Merge stays available but stops being the primary action and says "anyway".
+    const warning = !blocker && mergeWarning(pr);
+    act = `${pick}<button class="btn ${warning ? '' : 'pri'}" data-do="merge" data-method="${method}" ${h.busy || blocker ? 'disabled' : ''} ${blocker || warning ? `title="${esc(blocker || `${warning}. You'll be asked to confirm.`)}"` : ''}>${h.busy === 'merge' ? '<span class="spin"></span>' : I.merge}${verb}${warning ? ' anyway' : ''}</button>`;
   }
-  return `<div class="crumb"><button class="home" data-do="back">${I.inbox}Review queue</button><span class="sep" aria-hidden="true">/</span>
-    <div class="pt"><span class="num">#${pr.number}</span><b>${esc(pr.title)}</b><span class="diffstat"><span class="a">+${pr.additions}</span> <span class="d">−${pr.deletions}</span></span><button class="link" data-ext="${esc(pr.url)}">${I.ext}GitHub</button></div>
+  // One line: the title truncates before anything else gives way. It's the link to GitHub.
+  return `<div class="crumb prc"><button class="home" data-do="back" aria-label="Back to the review queue">${I.inbox}<span class="hl">Review queue</span></button><span class="sep" aria-hidden="true">/</span>
+    <div class="pt"><span class="num">#${pr.number}</span><button class="ttl" data-ext="${esc(pr.url)}" title="${esc(pr.title)} (open on GitHub)"><b>${esc(pr.title)}</b>${I.ext}</button><span class="diffstat"><span class="a">+${pr.additions}</span> <span class="d">−${pr.deletions}</span></span></div>
     <div class="end">${act}</div></div>${pr.state === 'merged' ? '' : readiness(pr, h)}`;
 }
 
@@ -125,10 +128,12 @@ function readiness(pr: PrDetail, h: HostState): string {
   const items = mergeReadiness(pr).map((it) => {
     const act = it.action === 'updateBranch' ? `<button class="btn sm" data-do="updateBranch" ${h.busy ? 'disabled' : ''}>${h.busy === 'update' ? '<span class="spin sm"></span>' : ''}Update branch</button>`
       : it.action === 'showChecks' ? `<button class="link" data-step="checks">Show</button>`
-      : it.action === 'openThreads' ? `<button class="link" data-ext="${esc(pr.url)}">Open on GitHub${I.ext}</button>` : '';
+      : it.action === 'openThreads' ? `<button class="link" data-do="threads">Show</button>` : '';
     return `<span class="it ${it.tone}">${icon[it.tone]}${esc(it.text)}</span>${act}`;
   }).join('');
-  return `<div class="ready" aria-label="Can it merge"><span class="lbl">Can it merge</span>${items}</div>`;
+  // Say why Merge is off where it can be read, not only in the disabled button's tooltip.
+  const blocker = pr.myReview === 'approved' ? mergeBlocker(pr) : null;
+  return `<div class="ready" aria-label="Can it merge"><span class="lbl">Can it merge</span>${items}${blocker ? `<span class="why">${esc(blocker)}</span>` : ''}</div>`;
 }
 
 function checksState(pr: PrDetail): { cls: 'done' | 'fail' | 'run'; sub: string } {
@@ -159,11 +164,12 @@ function stepChecks(pr: PrDetail): string {
   const order = (r: CheckRun) => (isFail(r) ? 0 : r.status !== 'completed' ? 1 : 2);
   const runs = [...pr.checkRuns].sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name));
   const pill = c.cls === 'fail' ? `<span class="oc bad">${c.sub}, blocks merge</span>` : c.cls === 'run' ? `<span class="oc run">${c.sub}</span>` : '<span class="oc ok">All passed</span>';
-  const line = c.cls === 'fail' ? 'Read what failed before you approve. Review Desk won’t merge while a check is failing.' : c.cls === 'run' ? 'Some checks are still running. This updates when you refresh.' : 'Every check passed on the latest commit.';
+  const line = c.cls === 'fail' ? 'Read what failed before you approve. You can still merge anyway; Review Desk asks first.' : c.cls === 'run' ? 'Some checks are still running. This updates when you refresh.' : 'Every check passed on the latest commit.';
   const rows = runs.map((r) => {
     const g = isFail(r) ? `<span class="g bad">${I.x}</span>` : r.status !== 'completed' ? '<span class="g run"><span class="spin sm"></span></span>' : `<span class="g ok">${I.check}</span>`;
+    const why = isFail(r) && (r.failedStep || r.excerpt) ? `<div class="cgb">${r.failedStep ? `<span class="fstep">Failed at <b>${esc(r.failedStep)}</b></span>` : ''}${r.excerpt ? `<pre class="log">${r.excerpt.map(esc).join('\n')}</pre>` : ''}</div>` : '';
     return `<div class="cg ${isFail(r) ? 'bad' : ''}"><div class="cgh">${g}<span class="nm">${esc(r.name)}</span><span class="tool">${esc(r.app)}</span>
-      <span class="res">${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ''}${r.url ? `<button class="btn sm" data-ext="${esc(r.url)}">${isFail(r) ? 'Open log' : 'Details'}${I.ext}</button>` : ''}</span></div></div>`;
+      <span class="res">${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ''}${r.url ? `<button class="btn sm" data-ext="${esc(r.url)}">${isFail(r) ? 'Open log' : 'Details'}${I.ext}</button>` : ''}</span></div>${why}</div>`;
   }).join('');
   return `<div class="sh"><div class="tx"><h2>Checks${pill}</h2><p>${line}</p><div class="prov"><span>${esc(pr.headSha.slice(0, 7))}</span><span>${esc(pr.headRef)} → ${esc(pr.baseRef)}</span></div></div></div>
     <div class="pad">${rows || '<div class="empty">This repo runs no checks on pull requests.</div>'}</div>`;
@@ -193,7 +199,7 @@ function stepReview(pr: PrDetail): string {
     ${fileSince ? `<div class="seg"><button data-onlynew="0" aria-pressed="${!view.onlyNew}">Whole change</button><button data-onlynew="1" aria-pressed="${view.onlyNew}">Since you looked</button></div>` : since.files[0] ? `<button class="btn sm" data-file="${esc(since.files[0].path)}" data-onlynew="1">Show it${I.chev}</button>` : ''}</div>` : '';
 
   return `<div class="sh"><div class="tx"><h2>Your review</h2><p>${line}</p></div></div>${banner}
-    ${pr.body.trim() ? `<section class="intent" aria-label="Description"><span>${esc(firstParagraph(pr.body))}</span></section>` : ''}
+    ${about(pr)}
     <div class="split"><nav class="files" aria-label="Changed files"><div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}<span class="hint"><kbd>n</kbd><kbd>p</kbd> next file <kbd>v</kbd> viewed</span></nav>
       <section class="diffpane" aria-label="Diff">${file ? `<div class="dh"><span class="mono">${esc(file.path)}</span><label class="vt"><input type="checkbox" data-viewed="${esc(file.path)}" ${file.viewed === 'viewed' ? 'checked' : ''}> Viewed</label></div>
         <div class="code">${lines ? lines.map(diffLine).join('') : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>'}</section></div>`;
@@ -209,7 +215,74 @@ function diffLine(l: DiffLine): string {
 
 const base = (p: string) => p.split('/').pop() ?? p;
 const dir = (p: string) => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i + 1); };
-const firstParagraph = (s: string) => s.trim().split(/\n\s*\n/)[0]!.replace(/[#*_`>]/g, '').slice(0, 400);
+
+/* ---------- Description and conversation ---------- */
+const COLLAPSED_ITEMS = 2;
+
+/** What the PR is for and what people said about it, above the diff. Collapsed, it shows the start. */
+function about(pr: PrDetail): string {
+  const n = conversationCounts(pr.conversation);
+  const conv = view.about === 'conv';
+  const tab = (k: About, label: string) => `<button role="tab" data-about="${k}" aria-selected="${view.about === k}" aria-pressed="${view.about === k}">${label}</button>`;
+  const fresh = n.fresh ? ` <span class="newtag">${n.fresh} new</span>` : '';
+  const more = view.aboutOpen ? 'Show less' : conv ? `Show all ${n.comments}` : 'Show full description';
+  const canMore = conv ? pr.conversation.length > COLLAPSED_ITEMS || view.aboutOpen : true;
+  return `<section class="about" aria-label="About this pull request"><div class="abh">
+      <div class="seg" role="tablist" aria-label="About this pull request">${tab('desc', 'Description')}${tab('conv', `Conversation <span class="n">${n.comments}</span>${fresh}`)}</div>
+      ${conv && n.unresolved ? `<span class="it warn">${I.alert}${plural(n.unresolved, 'unresolved thread')}</span>` : ''}
+      ${canMore ? `<button class="link more" data-do="about" aria-expanded="${view.aboutOpen}">${more}</button>` : ''}</div>
+    <div class="abb ${view.aboutOpen ? 'open' : 'clamp'}" role="tabpanel">${conv ? conversation(pr.conversation) : description(pr)}</div></section>`;
+}
+
+function description(pr: PrDetail): string {
+  return pr.bodyHtml.trim() ? `<div class="md">${safe(pr.bodyHtml)}</div>` : '<p class="none">The author didn’t write a description.</p>';
+}
+
+/** Newest first, so what changed lately is on top. Collapsed, only the latest few show. */
+function conversation(items: ConversationItem[]): string {
+  if (!items.length) return '<p class="none">No comments yet.</p>';
+  const newest = [...items].sort((a, b) => Date.parse(startedAt(b)) - Date.parse(startedAt(a)));
+  return (view.aboutOpen ? newest : newest.slice(0, COLLAPSED_ITEMS)).map(convItem).join('');
+}
+
+const VERDICT: Record<ReviewVerdict, string> = {
+  approved: '<span class="pill ok">Approved</span>', changes_requested: '<span class="pill need">Changes requested</span>',
+  commented: '<span class="pill">Reviewed</span>', dismissed: '<span class="pill">Dismissed</span>',
+};
+
+function convItem(it: ConversationItem): string {
+  if (it.kind !== 'thread') return `<article class="ci">${comment(it.comment, it.kind === 'review' ? VERDICT[it.verdict] : '')}</article>`;
+  const where = `${base(it.path)}${it.line ? `:${it.line}` : ''}`;
+  const state = it.resolved ? '<span class="pill">Resolved</span>' : '<span class="pill need">Unresolved</span>';
+  return `<article class="ci thread"><div class="cih">${I.com}<button class="link mono" data-file="${esc(it.path)}" title="Show ${esc(it.path)} in the diff">${esc(where)}</button>${state}${it.outdated ? '<span class="pill">Outdated</span>' : ''}</div>
+    ${it.comments.map((c) => comment(c, '')).join('')}</article>`;
+}
+
+function comment(c: Comment, badge: string): string {
+  return `<div class="cm ${c.isNew ? 'new' : ''}"><div class="cmh"><b>${esc(c.author)}</b>${badge}<span class="when">${ago(c.createdAt)} ago</span>${c.isNew ? '<span class="newtag">New</span>' : ''}
+    <button class="link gh" data-ext="${esc(c.url)}" aria-label="Open this comment on GitHub">${I.ext}</button></div>${c.html.trim() ? `<div class="md">${safe(c.html)}</div>` : ''}</div>`;
+}
+
+/** GitHub's rendered HTML, cleaned before it's shown. No ids or classes, so it can't restyle or clash with the panel. */
+const cleaned = new Map<string, string>();
+function safe(html: string): string {
+  let out = cleaned.get(html);
+  if (out === undefined) {
+    out = DOMPurify.sanitize(html, { FORBID_TAGS: ['style', 'form', 'button', 'textarea', 'select'], FORBID_ATTR: ['style', 'id', 'class', 'name'] });
+    cleaned.set(html, out);
+  }
+  return out;
+}
+
+/** Hides "Show full description" when the description already fits. */
+function fitAbout(): void {
+  const box = app.querySelector<HTMLElement>('.abb.clamp');
+  if (!box || view.about !== 'desc') return;
+  if (box.scrollHeight <= box.clientHeight + 1) {
+    box.classList.remove('clamp');
+    app.querySelector<HTMLElement>('.about .more')?.remove();
+  }
+}
 
 function prView(h: HostState): string {
   const pr = h.pr;
@@ -221,20 +294,26 @@ function render(): void {
   if (!host) return;
   const err = host.error ? `<div class="err" role="alert">${esc(host.error)}<button class="btn sm" data-do="refresh">Try again</button></div>` : '';
   app.innerHTML = err + (host.view === 'pr' ? prView(host) : queue(host)) + (view.keys ? keysHelp() : '');
+  fitAbout();
 }
 
 function keysHelp(): string {
   const r = (ks: string[], t: string) => `<div class="kr">${ks.map((k) => `<kbd>${k}</kbd>`).join('')}<span>${t}</span></div>`;
   return `<div class="keys" data-do="keys"><div class="kp" role="dialog" aria-label="Keyboard shortcuts"><b>Keyboard shortcuts</b>
     <span class="lbl">Queue</span>${r(['j', 'k'], 'Move down or up')}${r(['Enter'], 'Open the pull request')}${r(['r'], 'Refresh')}
-    <span class="lbl">Pull request</span>${r(['j', 'k'], 'Next or previous pull request')}${r(['n', 'p'], 'Next or previous file')}${r(['v'], 'Toggle viewed on this file')}${r(['1', '2'], 'Checks, Your review')}${r(['a'], 'Approve')}${r(['Esc'], 'Back to the queue')}${r(['?'], 'Show or hide this list')}</div></div>`;
+    <span class="lbl">Pull request</span>${r(['j', 'k'], 'Next or previous pull request')}${r(['n', 'p'], 'Next or previous file')}${r(['v'], 'Toggle viewed on this file')}${r(['d'], 'Show or hide the full description')}${r(['1', '2'], 'Checks, Your review')}${r(['a'], 'Approve')}${r(['Esc'], 'Back to the queue')}${r(['?'], 'Show or hide this list')}</div></div>`;
 }
 
 /* ---------- Events ---------- */
 window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
   const msg = e.data;
   if (msg.type === 'state') {
-    if (msg.state.pr && msg.state.pr.number !== view.pr) { view = { ...view, pr: msg.state.pr.number, file: null, onlyNew: false, step: 'review' }; vscode.setState(view); }
+    const pr = msg.state.pr;
+    if (pr && pr.number !== view.pr) {
+      // Open on the conversation when there's something new in it; otherwise on the description.
+      view = { ...view, pr: pr.number, file: null, onlyNew: false, step: 'review', about: conversationCounts(pr.conversation).fresh ? 'conv' : 'desc', aboutOpen: false };
+      vscode.setState(view);
+    }
     host = msg.state;
     render();
   } else if (msg.type === 'toast') {
@@ -254,12 +333,20 @@ document.addEventListener('change', (e) => {
 });
 
 document.addEventListener('click', (e) => {
-  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-step],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
+  // Links inside descriptions and comments open in the browser, never inside the panel.
+  const a = (e.target as HTMLElement).closest<HTMLAnchorElement>('.md a[href]');
+  if (a) {
+    e.preventDefault();
+    if (/^https?:/.test(a.href)) send({ type: 'openExternal', url: a.href });
+    return;
+  }
+  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-step],[data-about],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
   if (!t || (t as HTMLButtonElement).disabled) return;
   const d = t.dataset;
   if (d.open) send({ type: 'openPr', number: Number(d.open) });
   else if (d.filter) save({ filter: d.filter as Filter });
   else if (d.step) save({ step: d.step as View['step'] });
+  else if (d.about) save({ about: d.about as About });
   else if (d.file) save({ file: d.file, step: 'review', onlyNew: d.onlynew === '1' });
   else if (d.onlynew) save({ onlyNew: d.onlynew === '1' });
   else if (d.line && view.file) send({ type: 'openFile', path: view.file, line: Number(d.line) });
@@ -270,6 +357,8 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'merge') send({ type: 'merge', method: (d.method as MergeMethod | undefined) ?? 'merge' });
   else if (d.do === 'updateBranch') send({ type: 'updateBranch' });
   else if (d.do === 'keys') save({ keys: false });
+  else if (d.do === 'about') save({ aboutOpen: !view.aboutOpen });
+  else if (d.do === 'threads') save({ step: 'review', about: 'conv', aboutOpen: true });
 });
 
 /* ---------- Keyboard ---------- */
@@ -304,7 +393,8 @@ document.addEventListener('keydown', (e) => {
   } else if (k === 'v' && view.step === 'review' && view.file) {
     const f = pr.files.find((x) => x.path === view.file);
     if (f) send({ type: 'setViewed', path: f.path, viewed: f.viewed !== 'viewed' });
-  } else if (k === '1') save({ step: 'checks' });
+  } else if (k === 'd') save({ step: 'review', about: 'desc', aboutOpen: view.step !== 'review' || view.about !== 'desc' || !view.aboutOpen });
+  else if (k === '1') save({ step: 'checks' });
   else if (k === '2') save({ step: 'review' });
   else if (k === 'a' && pr.state !== 'merged' && pr.myReview !== 'approved') send({ type: 'approve' });
 });
