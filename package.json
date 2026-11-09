@@ -1,0 +1,53 @@
+{
+  "name": "review-desk",
+  "displayName": "Review Desk",
+  "description": "Review agent-written pull requests beside the code: what changed, what the checks found, and what's left for you.",
+  "version": "0.1.0",
+  "publisher": "calebksmith",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/calebksmith/review-desk" },
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Other"],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      { "command": "reviewDesk.open", "title": "Open", "category": "Review Desk", "icon": "$(checklist)" },
+      { "command": "reviewDesk.openSample", "title": "Open with sample data", "category": "Review Desk" },
+      { "command": "reviewDesk.signOut", "title": "Use a different GitHub account", "category": "Review Desk" }
+    ],
+    "configuration": {
+      "title": "Review Desk",
+      "properties": {
+        "reviewDesk.repository": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The repository to review, as `owner/name`. Leave empty to use the `origin` remote of the open folder."
+        },
+        "reviewDesk.label": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Only show pull requests with this label. Leave empty to show every open pull request."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p webview",
+    "test": "vitest run",
+    "preview": "node scripts/build.mjs && node scripts/preview.mjs",
+    "package": "node scripts/build.mjs --production && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@octokit/graphql": "^9.0.5",
+    "@octokit/rest": "^22.0.1",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "~1.90.0",
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

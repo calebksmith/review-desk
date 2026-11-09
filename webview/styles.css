@@ -1,0 +1,193 @@
+/* Review Desk webview. Colors come from the VS Code theme; the fallbacks are the prototype's light palette. */
+:root {
+  --win: var(--vscode-editor-background, #ffffff);
+  --chrome: var(--vscode-sideBar-background, #f1f2f4);
+  --line: var(--vscode-panel-border, #d9dbe0);
+  --line-soft: color-mix(in srgb, var(--line) 55%, transparent);
+  --fg: var(--vscode-foreground, #1d1f24);
+  --fg-2: var(--vscode-descriptionForeground, #4d525c);
+  --fg-3: color-mix(in srgb, var(--fg-2) 75%, var(--win));
+  --accent: var(--vscode-button-background, #2463c7);
+  --accent-fg: var(--vscode-button-foreground, #ffffff);
+  --accent-ink: var(--vscode-textLink-foreground, #1a4a96);
+  --accent-soft: color-mix(in srgb, var(--vscode-focusBorder, #2463c7) 14%, transparent);
+  --focus: var(--vscode-focusBorder, #2463c7);
+  --ok: var(--vscode-testing-iconPassed, #1f7a3d);
+  --bad: var(--vscode-testing-iconFailed, #b3361a);
+  --warn: var(--vscode-editorWarning-foreground, #b25b00);
+  --ok-soft: color-mix(in srgb, var(--ok) 14%, transparent);
+  --bad-soft: color-mix(in srgb, var(--bad) 12%, transparent);
+  --warn-soft: color-mix(in srgb, var(--warn) 14%, transparent);
+  --add: var(--vscode-diffEditor-insertedLineBackground, rgba(46, 160, 67, .15));
+  --del: var(--vscode-diffEditor-removedLineBackground, rgba(248, 81, 73, .15));
+  --btn2: var(--vscode-button-secondaryBackground, #e4e6ea);
+  --btn2-fg: var(--vscode-button-secondaryForeground, #1d1f24);
+  --input: var(--vscode-input-background, #ffffff);
+  --ui: var(--vscode-font-family, system-ui, -apple-system, "Segoe UI", sans-serif);
+  --mono: var(--vscode-editor-font-family, ui-monospace, "SF Mono", Menlo, monospace);
+}
+* { box-sizing: border-box }
+html, body { height: 100%; margin: 0; padding: 0 }
+body { background: var(--win); color: var(--fg); font-family: var(--ui); font-size: 13px; line-height: 18px }
+#app { height: 100%; display: flex; flex-direction: column }
+button { font: inherit; color: inherit }
+:focus-visible { outline: 1px solid var(--focus); outline-offset: 1px }
+.ico { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0 }
+.lbl { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-3) }
+.mono, .num, .diffstat, .chip { font-family: var(--mono) }
+.num { color: var(--fg-3) }
+.diffstat { font-size: 11px; white-space: nowrap } .diffstat .a { color: var(--ok) } .diffstat .d { color: var(--bad) }
+.chip { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--chrome); border: 1px solid var(--line-soft); color: var(--fg-2) }
+.empty { padding: 28px; display: flex; gap: 8px; align-items: center; justify-content: center; color: var(--fg-3) }
+.err { display: flex; gap: 10px; align-items: center; padding: 8px 20px; background: var(--bad-soft); color: var(--fg); border-bottom: 1px solid var(--bad) }
+.err .btn { margin-left: auto }
+
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 4px; border: 1px solid transparent; background: var(--btn2); color: var(--btn2-fg); font-weight: 600; cursor: pointer; white-space: nowrap }
+.btn:hover { filter: brightness(1.05) }
+.btn.pri { background: var(--accent); color: var(--accent-fg) }
+.btn.sm { padding: 2px 8px; font-size: 12px; font-weight: 500 }
+.btn[disabled] { opacity: .5; cursor: default; filter: none }
+.link { display: inline-flex; gap: 4px; align-items: center; background: none; border: 0; color: var(--accent-ink); cursor: pointer; font-size: 12px; padding: 0 }
+.link .ico { width: 13px; height: 13px }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden }
+.seg button { background: none; border: 0; padding: 4px 10px; cursor: pointer; color: var(--fg-2) }
+.seg button + button { border-left: 1px solid var(--line) }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--fg); font-weight: 600 }
+.seg .n { color: var(--fg-3); font-weight: 400 }
+select { font: inherit; background: var(--input); color: var(--fg); border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px }
+
+.pill, .oc { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; white-space: nowrap; background: var(--chrome); color: var(--fg-2) }
+.pill.ok, .oc.ok { background: var(--ok-soft); color: var(--ok) }
+.pill.need, .oc.open { background: var(--warn-soft); color: var(--warn) }
+.oc.run, .pill.run { background: var(--accent-soft); color: var(--accent-ink) }
+.pill.bad, .oc.bad { background: var(--bad-soft); color: var(--bad) }
+.stat { font-size: 12px; color: var(--fg-2); font-weight: 600 }
+.stat.ok { color: var(--ok) }
+.cs { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; width: 96px }
+.cs .ico { width: 14px; height: 14px }
+.cs.ok { color: var(--ok) } .cs.bad { color: var(--bad) } .cs.run { color: var(--accent-ink) } .cs.none { color: var(--fg-3) }
+
+.spin { width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; display: inline-block; flex-shrink: 0 }
+.spin.sm { width: 10px; height: 10px; border-width: 1.5px }
+@keyframes spin { to { transform: rotate(360deg) } }
+@media (prefers-reduced-motion: reduce) { .spin { animation-duration: 3s } }
+
+/* Header */
+.crumb { flex-shrink: 0; min-height: 52px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; padding: 8px 20px; flex-wrap: wrap }
+.crumb .home { background: none; border: 0; padding: 4px 6px; margin-left: -6px; border-radius: 4px; color: var(--fg-2); display: inline-flex; align-items: center; gap: 6px; cursor: pointer }
+.crumb .home:hover { background: var(--chrome); color: var(--fg) }
+.crumb .home.cur { color: var(--fg); font-weight: 600; cursor: default; background: none }
+.crumb .repo { font-family: var(--mono); font-size: 12px; color: var(--fg-3) }
+.crumb .sep { color: var(--fg-3) }
+.crumb .pt { display: flex; align-items: baseline; gap: 10px; min-width: 0; flex: 1; flex-wrap: wrap }
+.crumb .pt b { font-size: 15px; line-height: 20px }
+.crumb .end { display: flex; align-items: center; gap: 10px; margin-left: auto }
+
+/* Queue */
+.pad { padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; overflow: auto }
+.toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap }
+.sort { margin-left: auto; display: flex; gap: 8px; align-items: center }
+.list { border: 1px solid var(--line); border-radius: 8px; overflow: hidden }
+.qrow { width: 100%; display: flex; align-items: center; gap: 14px; padding: 10px 14px; background: none; border: 0; border-top: 1px solid var(--line-soft); text-align: left; cursor: pointer }
+.qrow:first-child { border-top: 0 }
+.qrow:hover { background: var(--chrome) }
+.qrow .num { width: 36px; font-size: 12px }
+.qrow .t { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px }
+.qrow .t b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.qrow .sub { display: flex; gap: 10px; align-items: center; color: var(--fg-3); font-size: 12px }
+.qrow .st { width: 90px; display: flex; justify-content: flex-end }
+.qrow .when { width: 32px; text-align: right; color: var(--fg-3); font-size: 11px; font-family: var(--mono) }
+.qrow > .ico { color: var(--fg-3) }
+
+/* PR layout */
+.cols { flex: 1; display: flex; min-height: 0 }
+main { flex: 1; min-width: 0; overflow: auto; display: flex; flex-direction: column }
+.side { width: 220px; flex-shrink: 0; border-right: 1px solid var(--line); padding: 16px; display: flex; flex-direction: column; gap: 16px; overflow: auto }
+.grp { display: flex; flex-direction: column; gap: 8px }
+.grp + .grp { padding-top: 14px; border-top: 1px solid var(--line-soft) }
+.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px }
+.stepbtn { background: none; border: 0; padding: 8px; margin: 0 -8px; border-radius: 6px; display: flex; gap: 10px; width: calc(100% + 16px); text-align: left; cursor: pointer }
+.stepbtn:hover { background: var(--chrome) }
+.stepbtn[aria-current="step"] { background: var(--accent-soft) }
+.stepbtn[aria-current="step"] .sl > span:first-child { font-weight: 600 }
+.sd { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--line); display: flex; align-items: center; justify-content: center; flex-shrink: 0 }
+.sd .ico { width: 12px; height: 12px; stroke-width: 3 }
+.step.done .sd { background: var(--ok); border-color: var(--ok); color: var(--win) }
+.step.fail .sd { background: var(--bad); border-color: var(--bad); color: var(--win) }
+.step.run .sd { border-color: var(--accent) }
+.step.now .sd { border-color: var(--accent); box-shadow: inset 0 0 0 3px var(--win); background: var(--accent) }
+.sl { flex: 1; display: flex; flex-direction: column; gap: 2px }
+.sl .sub { font-size: 12px; color: var(--fg-3) }
+.step.fail .sub { color: var(--bad) }
+
+.sh { padding: 18px 20px 12px; border-bottom: 1px solid var(--line-soft) }
+.sh .tx { display: flex; flex-direction: column; gap: 4px }
+.sh h2 { margin: 0; font-size: 16px; line-height: 22px; display: flex; gap: 10px; align-items: center }
+.sh p { margin: 0; color: var(--fg-2) }
+.prov { font-family: var(--mono); font-size: 11px; color: var(--fg-3); display: flex; gap: 14px; flex-wrap: wrap }
+
+/* Checks */
+.cg { border: 1px solid var(--line-soft); border-radius: 8px }
+.cg.bad { border-color: color-mix(in srgb, var(--bad) 55%, transparent); background: var(--bad-soft) }
+.cgh { display: flex; align-items: center; gap: 10px; padding: 10px 12px; flex-wrap: wrap }
+.cgh .g { display: flex } .g.ok { color: var(--ok) } .g.bad { color: var(--bad) }
+.cgh .nm { font-weight: 600 }
+.cgh .tool { font-size: 12px; color: var(--fg-3) }
+.cgh .res { margin-left: auto; display: flex; gap: 10px; align-items: center; min-width: 0 }
+.cgh .sum { color: var(--fg-2); font-size: 12px }
+
+/* Your review */
+.newbar { display: flex; align-items: center; gap: 10px; padding: 8px 20px; background: var(--accent-soft); border-bottom: 1px solid var(--line); flex-wrap: wrap }
+.newbar .seg { margin-left: auto; background: var(--win) }
+.newbar > .btn { margin-left: auto }
+.intent { padding: 12px 20px; border-bottom: 1px solid var(--line-soft); font-size: 14px; line-height: 20px; max-width: 80ch }
+.split { display: flex; flex: 1; min-height: 0 }
+.files { width: 260px; flex-shrink: 0; border-right: 1px solid var(--line); background: var(--chrome); padding: 8px; display: flex; flex-direction: column; gap: 2px; overflow: auto }
+.fh { display: flex; justify-content: space-between; align-items: center; padding: 4px 6px 6px }
+.fh .cnt { font-size: 11px; color: var(--fg-3); font-variant-numeric: tabular-nums }
+.frow { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 4px }
+.frow:hover { background: var(--win) }
+.frow[aria-current="true"] { background: var(--win); box-shadow: 0 0 0 1px var(--focus) }
+.frow .fn { flex: 1; min-width: 0; background: none; border: 0; padding: 2px 0; text-align: left; cursor: pointer; font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.frow .fn .dir { color: var(--fg-3) }
+.vbox { margin: 0; accent-color: var(--ok); cursor: pointer }
+.newdot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0 }
+.diffpane { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: auto }
+.dh { display: flex; align-items: center; gap: 10px; padding: 6px 12px; background: var(--chrome); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 1 }
+.vt { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--fg-2); cursor: pointer }
+.code { font-family: var(--mono); font-size: var(--vscode-editor-font-size, 12px); line-height: 1.6 }
+.ln { display: flex; white-space: pre }
+.ln.add { background: var(--add) } .ln.del { background: var(--del) }
+.ln .n { width: 52px; flex-shrink: 0; text-align: right; padding-right: 10px; color: var(--fg-3); background: none; border: 0; font: inherit; cursor: default }
+button.n { cursor: pointer } button.n:hover { color: var(--accent-ink); text-decoration: underline }
+.ln .m { width: 16px; flex-shrink: 0; color: var(--fg-3) }
+.ln .tx { padding-right: 16px }
+.hunk { font-family: var(--mono); font-size: 11px; color: var(--fg-3); background: var(--chrome); padding: 2px 14px 2px 68px; border-block: 1px solid var(--line-soft) }
+
+.toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--vscode-notifications-background, #1d1f24); color: var(--vscode-notifications-foreground, #fff); border: 1px solid var(--line); padding: 8px 14px; border-radius: 6px; opacity: 0; pointer-events: none; transition: opacity .2s }
+.toast.show { opacity: 1 }
+
+/* Can it merge */
+.ready { flex-shrink: 0; display: flex; align-items: center; gap: 6px 12px; padding: 6px 20px; border-bottom: 1px solid var(--line); background: var(--chrome); font-size: 12px; flex-wrap: wrap }
+.ready .it { display: inline-flex; align-items: center; gap: 5px; color: var(--fg-2) }
+.ready .it .ico { width: 14px; height: 14px }
+.ready .it.ok .ico { color: var(--ok) }
+.ready .it.bad { color: var(--bad); font-weight: 600 }
+.ready .it.warn { color: var(--warn); font-weight: 600 }
+.ready .it.run { color: var(--accent-ink) }
+.ready .it.muted { color: var(--fg-3) }
+
+/* Keyboard */
+.qrow.sel { box-shadow: inset 2px 0 0 var(--focus); background: var(--accent-soft) }
+.hint { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; color: var(--fg-3); font-size: 11px; padding: 6px 4px 0 }
+kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: center; padding: 0 4px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; background: var(--win); color: var(--fg) }
+.keys { position: fixed; inset: 0; background: rgba(0, 0, 0, .35); display: flex; align-items: center; justify-content: center; z-index: 10 }
+.keys .kp { background: var(--win); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; width: 360px; max-width: calc(100% - 32px); display: flex; flex-direction: column; gap: 4px }
+.keys .kp .lbl { margin-top: 8px }
+.keys .kr { display: flex; gap: 4px; align-items: center } .keys .kr span { margin-left: 6px }
+
+@media (max-width: 760px) {
+  .cols, .split { flex-direction: column }
+  .side, .files { width: 100%; border-right: 0; border-bottom: 1px solid var(--line) }
+  .cs, .qrow .when { display: none }
+}
