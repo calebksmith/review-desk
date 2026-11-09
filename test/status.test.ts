@@ -12,7 +12,7 @@ const detail = (p: Partial<PrDetail> = {}): PrDetail => ({ ...base, nodeId: '', 
 
 describe('prStatus', () => {
   it('names each state once', () => {
-    expect(prStatus(pr()).label).toBe('Needs your review');
+    expect(prStatus(pr())).toMatchObject({ label: 'Needs your review', tone: 'muted', quiet: true });
     expect(prStatus(pr({ state: 'merged' })).label).toBe('Merged');
     expect(prStatus(pr({ isDraft: true })).who).toBe('author');
     expect(prStatus(pr({ myReview: 'approved' })).label).toBe('Ready to merge');

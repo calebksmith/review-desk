@@ -12,9 +12,10 @@
   "activationEvents": ["onStartupFinished"],
   "contributes": {
     "commands": [
-      { "command": "reviewDesk.open", "title": "Open review queue", "category": "Review Desk", "icon": "$(checklist)" },
+      { "command": "reviewDesk.open", "title": "Open review queue", "category": "Review Desk", "icon": "$(preview)" },
       { "command": "reviewDesk.openSample", "title": "Open with sample data", "category": "Review Desk" },
-      { "command": "reviewDesk.switchRepository", "title": "Switch repository", "category": "Review Desk" },
+      { "command": "reviewDesk.switchRepository", "title": "Switch repository", "category": "Review Desk", "icon": "$(repo)" },
+      { "command": "reviewDesk.mergeDependabot", "title": "Merge passing Dependabot updates", "category": "Review Desk", "icon": "$(git-merge)" },
       { "command": "reviewDesk.signOut", "title": "Use a different GitHub account", "category": "Review Desk" },
       { "command": "reviewDesk.connect", "title": "Sign in with GitHub", "category": "Review Desk" },
       { "command": "reviewDesk.refresh", "title": "Refresh", "category": "Review Desk", "icon": "$(refresh)" },
@@ -38,11 +39,12 @@
       "view/title": [
         { "command": "reviewDesk.open", "when": "view == reviewDesk.queue && reviewDesk.connected", "group": "navigation@1" },
         { "command": "reviewDesk.refresh", "when": "view == reviewDesk.queue && reviewDesk.connected", "group": "navigation@2" },
-        { "command": "reviewDesk.switchRepository", "when": "view == reviewDesk.queue", "group": "1_repo@1" },
+        { "command": "reviewDesk.switchRepository", "when": "view == reviewDesk.queue", "group": "navigation@3" },
         { "command": "reviewDesk.signOut", "when": "view == reviewDesk.queue && reviewDesk.connected", "group": "1_repo@2" }
       ],
       "view/item/context": [
-        { "command": "reviewDesk.openOnGitHub", "when": "view == reviewDesk.queue && viewItem == pr", "group": "inline" }
+        { "command": "reviewDesk.openOnGitHub", "when": "view == reviewDesk.queue && viewItem == pr", "group": "inline" },
+        { "command": "reviewDesk.mergeDependabot", "when": "view == reviewDesk.queue && viewItem == group-bulk", "group": "inline" }
       ],
       "commandPalette": [
         { "command": "reviewDesk.openPr", "when": "false" },

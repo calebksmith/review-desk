@@ -14,6 +14,8 @@ export interface Host {
   askAgent(prompt: string): Promise<AgentRoute>;
   /** Asks the reviewer to pick one option, like VS Code's quick pick. Undefined if they cancel. */
   choose<T extends { label: string; detail?: string }>(title: string, options: T[]): Promise<T | undefined>;
+  /** Asks which repo to review, the same as the Switch repository command. */
+  switchRepository(): void;
 }
 
 /**
@@ -51,6 +53,7 @@ export class Controller {
         case 'fixConflicts': await this.fixConflicts(); break;
         case 'comment': await this.comment(msg.body); break;
         case 'closeDependabot': await this.closeDependabot(); break;
+        case 'switchRepository': this.host.switchRepository(); break;
         case 'dismissNotice': this.set({ notice: null }); break;
       }
     } catch (err) {
@@ -127,6 +130,8 @@ export class Controller {
    */
   private async mergeDependabot(): Promise<void> {
     if (this.state.busy) return;
+    // From the sidebar the panel may have just opened, before its queue loaded.
+    if (!this.state.queue.length) await this.loadQueue();
     const picks = bulkMergeable(this.state.queue);
     if (!picks.length) return;
     const list = picks.map((p) => `#${p.number} ${p.title}`).join('\n');

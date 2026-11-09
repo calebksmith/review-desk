@@ -8,6 +8,8 @@ export type Bucket = 'needs' | 'waiting' | 'approved' | 'merged';
 
 export interface PrStatus {
   label: string;
+  /** The usual state for its bucket ("Needs your review", "Merged"): lists can leave it unsaid. */
+  quiet?: boolean;
   tone: Tone;
   bucket: Bucket;
   /** Who acts next: the reviewer, the PR's author, or nobody. */
@@ -15,7 +17,7 @@ export interface PrStatus {
 }
 
 export function prStatus(p: PrSummary): PrStatus {
-  if (p.state === 'merged') return { label: 'Merged', tone: 'muted', bucket: 'merged', who: null };
+  if (p.state === 'merged') return { label: 'Merged', tone: 'muted', bucket: 'merged', who: null, quiet: true };
   if (p.isDraft) return { label: 'Draft', tone: 'muted', bucket: 'waiting', who: 'author' };
   if (p.mergeable === false || p.mergeState === 'dirty') return { label: 'Has conflicts', tone: 'bad', bucket: 'needs', who: 'you' };
   if (p.checks.failed) return { label: plural(p.checks.failed, 'check') + ' failing', tone: 'bad', bucket: 'needs', who: 'you' };
@@ -25,7 +27,8 @@ export function prStatus(p: PrSummary): PrStatus {
     if (p.mergeState === 'behind') return { label: 'Approved · behind base', tone: 'warn', bucket: 'approved', who: 'you' };
     return { label: 'Ready to merge', tone: 'ok', bucket: 'approved', who: 'you' };
   }
-  return { label: 'Needs your review', tone: 'warn', bucket: 'needs', who: 'you' };
+  // The normal state of a new PR: no colour, so the queue only lights up for real problems.
+  return { label: 'Needs your review', tone: 'muted', bucket: 'needs', who: 'you', quiet: true };
 }
 
 export interface ReadinessItem {

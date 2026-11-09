@@ -6,7 +6,7 @@ import type { CommentAction, FromWebview, PrSummary } from './protocol';
 import { defaultRepository, githubRepos, parseRepositoryInput } from './repos';
 import { SampleSource } from './sample';
 import { needsYou, queueGroups, type QueueGroup } from './sidebar';
-import { prStatus, type Tone } from './status';
+import { bulkMergeable, prStatus, type Tone } from './status';
 import type { DataSource } from './source';
 
 const SCOPES = ['repo'];
@@ -33,6 +33,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     command('reviewDesk.openOnGitHub', async (item: unknown) => {
       if (item instanceof PrItem) await vscode.env.openExternal(vscode.Uri.parse(item.pr.url));
+    }),
+    command('reviewDesk.mergeDependabot', async () => {
+      if (!(await ensureSource(context))) return;
+      open(context);
+      await controller?.handle({ type: 'mergeDependabot' });
     }),
     command('reviewDesk.refresh', async () => {
       await tree.refresh();
@@ -189,8 +194,13 @@ function open(context: vscode.ExtensionContext, number?: number): void {
   const host: Host = {
     post: (msg) => {
       void webview.postMessage(msg);
+      if (msg.type !== 'state') return;
+      const st = msg.state;
       // Whatever the panel learns about the queue (after a refresh, approve or merge) updates the sidebar too.
-      if (msg.type === 'state' && !msg.state.loading && msg.state.view === 'queue') tree.setQueue(msg.state.queue);
+      if (!st.loading && st.view === 'queue') tree.setQueue(st.queue);
+      // The tab says what's open, like any editor tab; the sidebar marks the open PR.
+      if (panel) panel.title = st.view === 'pr' && st.pr ? `#${st.pr.number} ${st.pr.title}` : 'Review queue';
+      if (st.view === 'pr' && st.pr) tree.reveal(st.pr.number);
     },
     openFile: async (path, line) => {
       const folder = vscode.workspace.workspaceFolders?.[0];
@@ -203,6 +213,7 @@ function open(context: vscode.ExtensionContext, number?: number): void {
     confirm: async (question, action) => (await vscode.window.showWarningMessage(question, { modal: true }, action)) === action,
     askAgent,
     choose: async (title, options) => vscode.window.showQuickPick(options, { title, placeHolder: 'Pick one' }),
+    switchRepository: () => { void vscode.commands.executeCommand('reviewDesk.switchRepository'); },
   };
   const store = { get: <T>(key: string) => context.workspaceState.get<T>(key), set: (key: string, value: unknown) => context.workspaceState.update(key, value) };
   const actions = vscode.workspace.getConfiguration('reviewDesk').get<CommentAction[]>('commentActions') ?? [];
@@ -232,6 +243,8 @@ class GroupItem extends vscode.TreeItem {
     super(group.label, group.bucket === 'merged' ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded);
     this.description = String(group.prs.length);
     this.id = `group:${group.bucket}`;
+    // "Needs you" offers the one-click Dependabot merge when any update qualifies.
+    this.contextValue = group.bucket === 'needs' && bulkMergeable(group.prs).length ? 'group-bulk' : 'group';
   }
 }
 
@@ -240,7 +253,8 @@ class PrItem extends vscode.TreeItem {
     super(pr.title, vscode.TreeItemCollapsibleState.None);
     const status = prStatus(pr);
     this.id = `pr:${pr.number}`;
-    this.description = `#${pr.number} · ${status.label}`;
+    // Say the status only when it adds to the group's name ("Needs you" already means needs your review).
+    this.description = status.quiet ? `#${pr.number}` : `#${pr.number} · ${status.label}`;
     this.tooltip = new vscode.MarkdownString(`**#${pr.number} ${pr.title}**\n\n${status.label} · by ${pr.author} · +${pr.additions} −${pr.deletions}`);
     const t = TONE[status.tone];
     this.iconPath = pr.state === 'merged' ? new vscode.ThemeIcon('git-merge') : new vscode.ThemeIcon(t.icon, t.color ? new vscode.ThemeColor(t.color) : undefined);
@@ -259,6 +273,19 @@ class QueueTree implements vscode.TreeDataProvider<vscode.TreeItem> {
   private loadedAt = 0;
 
   attach(view: vscode.TreeView<vscode.TreeItem>): void { this.view = view; }
+
+  /** Marks the PR open in the panel, without taking focus from it. */
+  reveal(number: number): void {
+    const pr = this.queue?.find((p) => p.number === number);
+    if (!pr || !this.view?.visible) return;
+    void this.view.reveal(new PrItem(pr), { select: true, focus: false, expand: true }).then(undefined, () => {});
+  }
+
+  getParent(item: vscode.TreeItem): vscode.TreeItem | undefined {
+    if (!(item instanceof PrItem) || !this.queue) return undefined;
+    const group = queueGroups(this.queue).find((g) => g.prs.some((p) => p.number === item.pr.number));
+    return group ? new GroupItem(group) : undefined;
+  }
 
   /** Switches to a source (or none: then the welcome view offers sign-in) and loads it. */
   show(next: DataSource | undefined): void {

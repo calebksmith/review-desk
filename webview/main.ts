@@ -11,12 +11,13 @@ declare function acquireVsCodeApi(): VsCodeApi;
 const vscode = acquireVsCodeApi();
 
 type Filter = 'all' | Bucket;
-type Sort = 'needs' | 'updated';
 type Step = 'overview' | 'checks' | 'files';
-interface View { filter: Filter; sort: Sort; step: Step; file: string | null; onlyNew: boolean; pr: number | null; sel: number; method: MergeMethod | null; keys: boolean; menu: 'checklist' | 'methods' | null }
+interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: number | null; sel: number; method: MergeMethod | null; keys: boolean; showPassed: boolean; menu: 'checklist' | 'methods' | null }
 
 let host: HostState | null = null;
-let view: View = { filter: 'all', sort: 'needs', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
+/** True while the reviewer moves through the queue with j/k; a mouse move hides the cursor again. */
+let kbd = false;
+let view: View = { filter: 'all', showPassed: false, step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
 // State saved by older versions named the files page "review".
 if (!['overview', 'checks', 'files'].includes(view.step)) view.step = 'files';
 const send = (msg: FromWebview) => vscode.postMessage(msg);
@@ -29,7 +30,7 @@ const I = {
   x: svg('M6 6l12 12M18 6L6 18'),
   dot: '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/></svg>',
   chev: svg('M9 6l6 6-6 6'),
-  back: svg('M15 6l-6 6 6 6'),
+  back: svg('M19 12H5M11 6l-6 6 6 6'),
   inbox: svg('M3 13h5l2 3h4l2-3h5M5 5h14l2 8v6H3v-6z'),
   rerun: svg('M4 12a8 8 0 1 0 2.3-5.7M4 4v4h4'),
   ext: svg('M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5'),
@@ -67,12 +68,13 @@ function urgency(p: PrSummary): number {
 }
 const PILL: Record<Tone, string> = { ok: 'ok', warn: 'need', bad: 'bad', run: 'run', muted: '' };
 
-function checksGlyph(p: PrSummary): string {
+/** Checks as a small icon by the title, like GitHub's list; the count is in the tooltip. */
+function checksIcon(p: PrSummary): string {
   const c = p.checks;
-  if (!c.total) return '<span class="cs none">No checks</span>';
-  if (c.failed) return `<span class="cs bad">${I.x}${c.failed} failed</span>`;
-  if (c.pending) return `<span class="cs run">${I.clock}${c.pending} running</span>`;
-  return `<span class="cs ok">${I.check}${c.passed}/${c.total}</span>`;
+  if (!c.total) return '';
+  if (c.failed) return `<span class="ci-ico bad" title="${c.failed} of ${c.total} checks failing">${I.x}</span>`;
+  if (c.pending) return `<span class="ci-ico run" title="${c.pending} of ${c.total} checks running">${I.clock}</span>`;
+  return `<span class="ci-ico ok" title="All ${c.total} checks passed">${I.check}</span>`;
 }
 
 /** The one status label for a PR. The queue, the header and the sidebar all use it. */
@@ -81,30 +83,46 @@ function statusPill(p: PrSummary): string {
   return `<span class="pill ${PILL[s.tone]}">${esc(s.label)}</span>`;
 }
 
+/** In lists, the usual state ("Needs your review") goes unsaid; merged reads as plain text. */
+function listStatus(p: PrSummary): string {
+  const s = prStatus(p);
+  if (s.quiet) return s.bucket === 'merged' ? '<span class="stx">Merged</span>' : '';
+  return statusPill(p);
+}
+
 function visibleQueue(h: HostState): PrSummary[] {
   return h.queue
     .filter((p) => view.filter === 'all' || bucket(p) === view.filter)
-    .sort(view.sort === 'needs' ? (a, b) => urgency(a) - urgency(b) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt) : (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    .sort((a, b) => urgency(a) - urgency(b) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
+
+const EMPTY: Record<Filter, string> = {
+  all: 'No open pull requests.',
+  needs: 'You’re all caught up.',
+  waiting: 'Nothing is waiting on an author.',
+  approved: 'Nothing approved and waiting to merge.',
+  merged: 'Nothing merged recently.',
+};
 
 function queue(h: HostState): string {
   const counts: Record<Filter, number> = { all: h.queue.length, needs: 0, waiting: 0, approved: 0, merged: 0 };
   h.queue.forEach((p) => counts[bucket(p)]++);
   const rows = visibleQueue(h);
   if (view.sel >= rows.length) view.sel = Math.max(0, rows.length - 1);
-  const f = (k: Filter, label: string) => `<button data-filter="${k}" aria-pressed="${view.filter === k}">${label} <span class="n">${counts[k]}</span></button>`;
-  const list = rows.map((p, i) => `<button class="qrow ${i === view.sel ? 'sel' : ''}" data-open="${p.number}">
+  const f = (k: Filter, label: string) => `<button data-filter="${k}" aria-pressed="${view.filter === k}" ${!counts[k] && view.filter !== k ? 'disabled' : ''}>${label} <span class="n">${counts[k]}</span></button>`;
+  // The keyboard cursor only shows while the keyboard is in use, so the first row doesn't look special.
+  const list = rows.map((p, i) => `<button class="qrow ${kbd && i === view.sel ? 'sel' : ''}" data-open="${p.number}">
       <span class="num">#${p.number}</span>
-      <span class="t"><b>${esc(p.title)}</b><span class="sub"><span class="diffstat"><span class="a">+${p.additions}</span> <span class="d">−${p.deletions}</span></span><span>${esc(p.author)}</span></span></span>
-      ${checksGlyph(p)}<span class="st">${statusPill(p)}</span><span class="when">${ago(p.updatedAt)}</span>${I.chev}</button>`).join('');
-  const empty = h.loading ? '<div class="empty"><span class="spin"></span>Loading pull requests</div>' : `<div class="empty">${I.check}No pull requests here</div>`;
-  return `<div class="crumb"><span class="home cur">${I.inbox}Review queue</span><span class="repo">${esc(h.repo)}</span>${h.sample ? '<span class="chip">Sample data</span>' : ''}<div class="end">${bulkButton(h)}<button class="btn" data-do="refresh" aria-label="Refresh">${I.rerun}Refresh</button></div></div>
+      <span class="t"><span class="tl"><b>${esc(p.title)}</b>${checksIcon(p)}</span><span class="sub"><span class="diffstat"><span class="a">+${p.additions}</span> <span class="d">−${p.deletions}</span></span><span>${esc(p.author)}</span></span></span>
+      <span class="st">${listStatus(p)}</span><span class="when" title="Updated ${ago(p.updatedAt)} ago">${ago(p.updatedAt)}</span></button>`).join('');
+  const empty = h.loading ? '<div class="empty"><span class="spin"></span>Loading pull requests</div>' : `<div class="empty">${view.filter === 'needs' ? I.check : ''}${EMPTY[view.filter]}</div>`;
+  return `<div class="crumb"><span class="home cur">${I.inbox}Review queue</span>
+      <button class="reposw" data-do="switchRepo" title="Switch repository">${esc(h.repo)}${I.down}</button>${h.sample ? '<span class="chip">Sample data</span>' : ''}
+      <div class="end">${bulkButton(h)}<button class="btn icon" data-do="refresh" aria-label="Refresh" title="Refresh (r)">${I.rerun}</button><button class="btn icon" data-do="keys" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button></div></div>
     ${h.notice ? `<div class="note" role="status">${I.check}<span>${esc(h.notice)}</span><button class="btn sm" data-do="dismissNotice">Dismiss</button></div>` : ''}
     <div class="pad">
-      <div class="toolbar"><div class="seg" role="group" aria-label="Filter">${f('all', 'All')}${f('needs', 'Needs you')}${f('waiting', 'Waiting on author')}${f('approved', 'Approved')}${f('merged', 'Merged')}</div>
-        <label class="sort"><span class="lbl">Sort</span><select id="sort" aria-label="Sort"><option value="needs" ${view.sort === 'needs' ? 'selected' : ''}>Needs you first</option><option value="updated" ${view.sort === 'updated' ? 'selected' : ''}>Recently updated</option></select></label></div>
+      <div class="toolbar"><div class="seg filters" role="group" aria-label="Filter">${f('all', 'All')}${f('needs', 'Needs you')}${f('waiting', 'Waiting on author')}${f('approved', 'Approved')}${f('merged', 'Merged')}</div></div>
       <div class="list">${list || empty}</div>
-      <span class="hint"><kbd>j</kbd><kbd>k</kbd> move <kbd>Enter</kbd> open <kbd>?</kbd> all shortcuts</span>
     </div>`;
 }
 
@@ -115,15 +133,16 @@ function bulkButton(h: HostState): string {
   if (!ready.length) return '';
   const held = h.queue.filter((p) => isDependabot(p) && p.state === 'open' && !ready.includes(p)).length;
   const tip = `Approves and merges ${ready.map((p) => `#${p.number}`).join(', ')}, one at a time.${held ? ` ${count(held, 'other Dependabot update')} ${held === 1 ? 'has' : 'have'} conflicts or failing checks; open ${held === 1 ? 'it' : 'them'} to review.` : ''}`;
-  return `<button class="btn pri" data-do="mergeDependabot" title="${esc(tip)}" ${h.busy ? 'disabled' : ''}>${I.merge}Merge ${count(ready.length, 'Dependabot update')}</button>`;
+  return `<button class="btn pri" data-do="mergeDependabot" title="${esc(tip)}" ${h.busy ? 'disabled' : ''}>${I.merge}<span class="long">Merge ${count(ready.length, 'Dependabot update')}</span><span class="short">Merge ${count(ready.length, 'update')}</span></button>`;
 }
 
 /* ---------- PR ---------- */
 function crumb(pr: PrDetail, h: HostState): string {
-  // One line: identity on the left, the decision on the right. The title truncates first; it's the GitHub link.
-  return `<div class="crumb prc"><button class="home" data-do="back" aria-label="Back to the review queue">${I.inbox}<span class="hl">Review queue</span></button><span class="sep" aria-hidden="true">/</span>
-    <div class="pt"><span class="num">#${pr.number}</span><button class="ttl" data-ext="${esc(pr.url)}" title="${esc(pr.title)} (open on GitHub)"><b>${esc(pr.title)}</b>${I.ext}</button><span class="diffstat"><span class="a">+${pr.additions}</span> <span class="d">−${pr.deletions}</span></span></div>
-    <div class="end">${pr.state === 'merged' ? `<span role="status">${statusPill(pr)}</span>` : `${summary(pr, h)}${decision(pr, h)}`}</div></div>${pr.state === 'merged' ? '' : blockBar(pr)}`;
+  // Two rows, like GitHub: the title gets its own line (wrapping to two), the details and the decision share the next.
+  const meta = `<span class="who">${esc(pr.author)}</span> wants to merge <span class="br head" title="${esc(pr.headRef)}">${esc(pr.headRef)}</span> into <span class="br">${esc(pr.baseRef)}</span><span class="diffstat"><span class="a">+${pr.additions}</span> <span class="d">−${pr.deletions}</span></span>`;
+  return `<div class="crumb prh"><button class="back" data-do="back" aria-label="Back to the review queue" title="Back to the review queue (Esc)">${I.back}</button>
+    <div class="hd"><div class="r1"><button class="ttl" data-ext="${esc(pr.url)}" title="Open on GitHub"><b>${esc(pr.title)}</b> <span class="num">#${pr.number}</span>${I.ext}</button></div>
+      <div class="r2"><span class="meta">${meta}</span><div class="end">${pr.state === 'merged' ? `<span role="status">${statusPill(pr)}</span>` : `${summary(pr, h)}${decision(pr, h)}`}</div></div></div></div>${pr.state === 'merged' ? '' : blockBar(pr)}`;
 }
 
 const TONE_ICON: Record<Tone, string> = { ok: I.check, bad: I.x, warn: I.alert, run: '<span class="spin sm"></span>', muted: I.minus };
@@ -135,7 +154,9 @@ const TONE_ICON: Record<Tone, string> = { ok: I.check, bad: I.x, warn: I.alert, 
 function summary(pr: PrDetail, h: HostState): string {
   const s = mergeSummary(pr);
   const open = view.menu === 'checklist';
-  return `<div class="dz"><button class="sumline ${s.tone}" data-menu="checklist" aria-expanded="${open}" aria-haspopup="dialog" title="Merge checklist">${TONE_ICON[s.tone]}<span class="sumtext">${esc(s.text)}${s.more ? ` <span class="more">+${s.more}</span>` : ''}</span>${I.down}</button>${open ? checklist(pr, h) : ''}</div>`;
+  // When nothing needs attention the button already says so; the line shrinks to a quiet check.
+  const quiet = s.tone === 'ok';
+  return `<div class="dz"><button class="sumline ${s.tone} ${quiet ? 'quiet' : ''}" data-menu="checklist" aria-expanded="${open}" aria-haspopup="dialog" aria-label="${esc(s.text)}: merge checklist" title="${quiet ? `${esc(s.text)}. Open the merge checklist.` : 'Merge checklist'}">${TONE_ICON[s.tone]}${quiet ? '' : `<span class="sumtext">${esc(s.text)}${s.more ? ` <span class="more">+${s.more}</span>` : ''}</span>`}${I.down}</button>${open ? checklist(pr, h) : ''}</div>`;
 }
 
 /** GitHub's merge box, on demand: every condition, each with its fix. */
@@ -207,26 +228,35 @@ function sidebar(pr: PrDetail): string {
   const glyph = { done: I.check, fail: I.x, run: '', now: '', info: I.doc } as const;
   const step = (k: Step, label: string, cls: keyof typeof glyph, sub: string, key: number) =>
     `<li class="step ${cls}"><button class="stepbtn" data-step="${k}" aria-current="${view.step === k ? 'page' : 'false'}" title="${label} (${key})"><span class="sd" aria-hidden="true">${glyph[cls]}</span><span class="sl"><span>${label}</span><span class="sub ${k === 'overview' && n.fresh ? 'fresh' : ''}">${sub}</span></span></button></li>`;
-  const overviewSub = n.fresh ? `${plural(n.fresh, 'new comment')}` : n.comments ? plural(n.comments, 'comment') : 'Description';
+  const overviewSub = n.fresh ? `${plural(n.fresh, 'new comment')}` : n.comments ? plural(n.comments, 'comment') : 'No comments';
   const filesSub = pr.myReview === 'approved' ? `Approved · ${seen} of ${pr.files.length} viewed` : `${seen} of ${plural(pr.files.length, 'file')} viewed`;
   return `<aside class="side" aria-label="Pull request pages"><ol class="steps">
-    ${step('overview', 'Overview', 'info', overviewSub, 1)}${step('checks', 'Checks', c.cls, c.sub, 2)}${step('files', 'Files changed', filesDone ? 'done' : 'now', filesSub, 3)}</ol></aside>`;
+    ${step('overview', 'Overview', 'info', overviewSub, 1)}${step('checks', 'Checks', c.cls, c.sub, 2)}${step('files', 'Files changed', filesDone ? 'done' : 'now', filesSub, 3)}</ol>
+    <button class="link keyslink" data-do="keys">Keyboard shortcuts <kbd>?</kbd></button></aside>`;
 }
 
+function checkRow(r: CheckRun): string {
+  const fail = isFail(r);
+  const g = fail ? `<span class="g bad">${I.x}</span>` : r.status !== 'completed' ? '<span class="g run"><span class="spin sm"></span></span>' : `<span class="g ok">${I.check}</span>`;
+  const why = fail && (r.failedStep || r.excerpt) ? `<div class="cgb">${r.failedStep ? `<span class="fstep">Failed at <b>${esc(r.failedStep)}</b></span>` : ''}${r.excerpt ? `<pre class="log">${r.excerpt.map(esc).join('\n')}</pre>` : ''}</div>` : '';
+  if (!fail && r.status === 'completed') {
+    // A passing check is one compact line; Details shows on hover.
+    return `<div class="crow">${g}<span class="nm">${esc(r.name)}</span><span class="tool">${esc(r.app)}</span>${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ''}${r.url ? `<button class="link det" data-ext="${esc(r.url)}">Details${I.ext}</button>` : ''}</div>`;
+  }
+  return `<div class="cg ${fail ? 'bad' : ''}"><div class="cgh">${g}<span class="nm">${esc(r.name)}</span><span class="tool">${esc(r.app)}</span>
+    <span class="res">${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ''}${fail ? `<button class="btn sm fix" data-fix="${esc(r.name)}" title="Send the failure to your AI agent to diagnose and fix">${I.spark}Fix with agent</button>` : ''}${r.url ? `<button class="btn sm" data-ext="${esc(r.url)}">${fail ? 'Open log' : 'Details'}${I.ext}</button>` : ''}</span></div>${why}</div>`;
+}
+
+/** Failures and running checks in full; passing ones folded into one line, like GitHub's merge box. */
 function stepChecks(pr: PrDetail): string {
-  const c = checksState(pr);
-  const order = (r: CheckRun) => (isFail(r) ? 0 : r.status !== 'completed' ? 1 : 2);
-  const runs = [...pr.checkRuns].sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name));
-  const pill = c.cls === 'fail' ? `<span class="oc bad">${c.sub}</span>` : c.cls === 'run' ? `<span class="oc run">${c.sub}</span>` : '<span class="oc ok">All passed</span>';
-  const line = c.cls === 'fail' ? 'Read what failed before you approve. You can still merge anyway; Review Desk asks first.' : c.cls === 'run' ? 'Some checks are still running. This updates when you refresh.' : 'Every check passed on the latest commit.';
-  const rows = runs.map((r) => {
-    const g = isFail(r) ? `<span class="g bad">${I.x}</span>` : r.status !== 'completed' ? '<span class="g run"><span class="spin sm"></span></span>' : `<span class="g ok">${I.check}</span>`;
-    const why = isFail(r) && (r.failedStep || r.excerpt) ? `<div class="cgb">${r.failedStep ? `<span class="fstep">Failed at <b>${esc(r.failedStep)}</b></span>` : ''}${r.excerpt ? `<pre class="log">${r.excerpt.map(esc).join('\n')}</pre>` : ''}</div>` : '';
-    return `<div class="cg ${isFail(r) ? 'bad' : ''}"><div class="cgh">${g}<span class="nm">${esc(r.name)}</span><span class="tool">${esc(r.app)}</span>
-      <span class="res">${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ''}${isFail(r) ? `<button class="btn sm fix" data-fix="${esc(r.name)}" title="Send the failure to your AI agent to diagnose and fix">${I.spark}Fix with agent</button>` : ''}${r.url ? `<button class="btn sm" data-ext="${esc(r.url)}">${isFail(r) ? 'Open log' : 'Details'}${I.ext}</button>` : ''}</span></div>${why}</div>`;
-  }).join('');
-  return `<div class="sh"><div class="tx"><h2>Checks${pill}</h2><p>${line}</p><div class="prov"><span>${esc(pr.headSha.slice(0, 7))}</span><span>${esc(pr.headRef)} → ${esc(pr.baseRef)}</span></div></div>${closeButton(pr) ? `<div class="shx">${closeButton(pr)}</div>` : ''}</div>
-    <div class="pad">${rows || '<div class="empty">This repo runs no checks on pull requests.</div>'}</div>`;
+  const byName = (a: CheckRun, b: CheckRun) => a.name.localeCompare(b.name);
+  const failing = pr.checkRuns.filter(isFail).sort(byName);
+  const running = pr.checkRuns.filter((r) => r.status !== 'completed').sort(byName);
+  const passed = pr.checkRuns.filter((r) => !isFail(r) && r.status === 'completed').sort(byName);
+  const line = `<div class="chkbar"><span class="mono">${esc(pr.headSha.slice(0, 7))}</span><span class="mono">${esc(pr.headRef)} → ${esc(pr.baseRef)}</span>${closeButton(pr) ? `<span class="end">${closeButton(pr)}</span>` : ''}</div>`;
+  if (!pr.checkRuns.length) return `${line}<div class="pad"><div class="empty">This repo runs no checks on pull requests.</div></div>`;
+  const fold = passed.length ? `<div class="passed"><button class="link" data-do="togglePassed" aria-expanded="${view.showPassed}"><span class="g ok">${I.check}</span>${failing.length || running.length ? plural(passed.length, 'check') + ' passed' : `All ${plural(passed.length, 'check')} passed`}${I.down}</button>${view.showPassed ? `<div class="crows">${passed.map(checkRow).join('')}</div>` : ''}</div>` : '';
+  return `${line}<div class="pad">${failing.map(checkRow).join('')}${running.map(checkRow).join('')}${fold}</div>`;
 }
 
 function stepFiles(pr: PrDetail): string {
@@ -241,7 +271,7 @@ function stepFiles(pr: PrDetail): string {
     const isNew = changedSince.has(f.path) || f.viewed === 'changed';
     return `<div class="frow" aria-current="${view.file === f.path}">
       <input type="checkbox" class="vbox" data-viewed="${esc(f.path)}" ${f.viewed === 'viewed' ? 'checked' : ''} aria-label="Viewed ${esc(f.path)}">
-      <button class="fn" data-file="${esc(f.path)}" title="${esc(f.path)}"><span class="dir">${esc(dir(f.path))}</span>${esc(base(f.path))}</button>
+      <button class="fn" data-file="${esc(f.path)}" title="${esc(f.path)}"><span class="bn">${esc(base(f.path))}</span><span class="dir">${esc(dir(f.path).replace(/\/$/, ''))}</span></button>
       ${isNew ? '<span class="newdot" title="Changed since you looked"></span>' : ''}<span class="diffstat"><span class="a">+${f.additions}</span> <span class="d">−${f.deletions}</span></span></div>`;
   }).join('');
 
@@ -252,7 +282,7 @@ function stepFiles(pr: PrDetail): string {
     ${fileSince ? `<div class="seg"><button data-onlynew="0" aria-pressed="${!view.onlyNew}">Whole change</button><button data-onlynew="1" aria-pressed="${view.onlyNew}">Since you looked</button></div>` : since.files[0] ? `<button class="btn sm" data-file="${esc(since.files[0].path)}" data-onlynew="1">Show it${I.chev}</button>` : ''}</div>` : '';
 
   return `${banner}
-    <div class="split"><nav class="files" aria-label="Changed files"><div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}<span class="hint"><kbd>n</kbd><kbd>p</kbd> next file <kbd>v</kbd> viewed</span></nav>
+    <div class="split"><nav class="files" aria-label="Changed files"><div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}</nav>
       <section class="diffpane" aria-label="Diff">${file ? `<div class="dh"><span class="mono">${esc(file.path)}</span><label class="vt"><input type="checkbox" data-viewed="${esc(file.path)}" ${file.viewed === 'viewed' ? 'checked' : ''}> Viewed</label></div>
         <div class="code">${lines ? lines.map(diffLine).join('') : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>'}</section></div>`;
 }
@@ -275,10 +305,9 @@ const dir = (p: string) => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p
  */
 function stepOverview(pr: PrDetail): string {
   const n = conversationCounts(pr.conversation);
-  const meta = `<span>${esc(pr.author)} wants to merge <span class="mono">${esc(pr.headRef)}</span> into <span class="mono">${esc(pr.baseRef)}</span></span>`;
-  const jump = n.fresh ? `<button class="link" data-do="jumpNew">${plural(n.fresh, 'new comment')}${I.down}</button>` : '';
+  const jump = n.fresh ? `<div class="ovmeta"><button class="link" data-do="jumpNew">Jump to ${plural(n.fresh, 'new comment')}${I.down}</button></div>` : '';
   return `<div class="ov">
-    <div class="ovmeta">${meta}${jump}</div>
+    ${jump}
     <section class="ovdesc" aria-label="Description">${description(pr)}</section>
     <section class="ovconv" aria-label="Conversation"><h3 class="lbl">Conversation${n.comments ? ` · ${n.comments}` : ''}${n.unresolved ? ` <span class="warnc">${I.alert}${plural(n.unresolved, 'unresolved thread')}</span>` : ''}</h3>
       ${conversation(pr.conversation)}</section>
@@ -289,13 +318,29 @@ function stepOverview(pr: PrDetail): string {
 function compose(pr: PrDetail): string {
   const h = host!;
   const busy = h.busy === 'comment';
-  const acts = h.actions.map((a, i) => {
-    const reply = a.reviewer ? lastReplyFrom(pr.conversation, a.reviewer) : null;
-    return `<span class="act"><button class="btn sm ${reply ? '' : 'fix'}" data-action="${i}" ${h.busy ? 'disabled' : ''} title="Posts “${esc(a.comment)}”">${esc(a.label)}</button>${reply ? `<span class="sub">${esc(reply.author)} replied ${ago(reply.createdAt)} ago</span>` : a.reviewer ? '<span class="sub">No reply yet</span>' : ''}</span>`;
-  }).join('');
+  const acts = pr.state === 'merged' ? '' : h.actions.map((a, i) => actionState(pr, a, i, h)).join('');
   return `<div class="compose">${acts ? `<div class="acts">${acts}</div>` : ''}
     <div class="box"><textarea id="cbox" rows="1" placeholder="Leave a comment" aria-label="Leave a comment" ${busy ? 'disabled' : ''}></textarea>
     <button class="btn" data-do="comment" ${h.busy ? 'disabled' : ''}>${busy ? '<span class="spin sm"></span>' : ''}Comment</button></div></div>`;
+}
+
+/**
+ * A one-click comment, shown by what has happened: not asked yet (the suggested button), asked and waiting,
+ * or answered (with Ask again).
+ */
+function actionState(pr: PrDetail, a: CommentAction, i: number, h: HostState): string {
+  const asked = lastComment(pr.conversation, (c) => c.author === h.user && c.text.trim() === a.comment.trim());
+  const reply = a.reviewer ? lastReplyFrom(pr.conversation, a.reviewer) : null;
+  const replied = reply && (!asked || Date.parse(reply.createdAt) >= Date.parse(asked.createdAt));
+  const btn = (label: string, cls: string) => `<button class="btn sm ${cls}" data-action="${i}" ${h.busy ? 'disabled' : ''} title="Posts “${esc(a.comment)}”">${esc(label)}</button>`;
+  if (replied) return `<span class="act"><span class="sub">${I.check}${esc(reply!.author.replace(/\[bot\]$/, ''))} replied ${ago(reply!.createdAt)} ago</span>${btn('Ask again', 'link-ish')}</span>`;
+  if (asked && a.reviewer) return `<span class="act"><span class="sub"><span class="spin sm"></span>Asked ${ago(asked.createdAt)} ago · waiting for a reply</span></span>`;
+  return `<span class="act">${btn(a.label, 'fix')}</span>`;
+}
+
+function lastComment(items: ConversationItem[], match: (c: Comment) => boolean): Comment | null {
+  const all = items.flatMap((it) => (it.kind === 'thread' ? it.comments : [it.comment])).filter(match);
+  return all.sort((x, y) => Date.parse(y.createdAt) - Date.parse(x.createdAt))[0] ?? null;
 }
 
 /** The latest comment from an account; "chatgpt-codex-connector" matches its bot login too. */
@@ -395,7 +440,8 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
     t.textContent = msg.text;
     t.classList.add('show');
     clearTimeout((t as unknown as { timer?: number }).timer);
-    (t as unknown as { timer?: number }).timer = window.setTimeout(() => t.classList.remove('show'), 2600);
+    // Long enough to read: about a second per 20 characters, between 2.5 and 8 seconds.
+    (t as unknown as { timer?: number }).timer = window.setTimeout(() => t.classList.remove('show'), Math.min(8000, Math.max(2500, msg.text.length * 50)));
   }
 });
 
@@ -409,8 +455,7 @@ document.addEventListener('input', (e) => {
 
 document.addEventListener('change', (e) => {
   const t = e.target as HTMLInputElement | HTMLSelectElement;
-  if (t.id === 'sort') save({ sort: t.value as Sort });
-  else if (t.id === 'method') save({ method: t.value as MergeMethod });
+  if (t.id === 'method') save({ method: t.value as MergeMethod });
   else if (t instanceof HTMLInputElement && t.dataset.viewed) send({ type: 'setViewed', path: t.dataset.viewed, viewed: t.checked });
 });
 
@@ -449,7 +494,9 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'approve') send({ type: 'approve' });
   else if (d.do === 'merge') send({ type: 'merge', method: (d.method as MergeMethod | undefined) ?? 'merge' });
   else if (d.do === 'updateBranch') send({ type: 'updateBranch' });
-  else if (d.do === 'keys') save({ keys: false });
+  else if (d.do === 'keys') save({ keys: !view.keys });
+  else if (d.do === 'switchRepo') send({ type: 'switchRepository' });
+  else if (d.do === 'togglePassed') save({ showPassed: !view.showPassed });
   else if (d.do === 'jumpNew') document.getElementById('firstnew')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
   else if (d.do === 'fixConflicts') send({ type: 'fixConflicts' });
   else if (d.do === 'mergeDependabot') send({ type: 'mergeDependabot' });
@@ -471,6 +518,12 @@ function postComment(): void {
   box.value = '';
 }
 
+document.addEventListener('mousemove', () => {
+  if (!kbd) return;
+  kbd = false;
+  document.querySelector('.qrow.sel')?.classList.remove('sel');
+});
+
 /* ---------- Keyboard ---------- */
 document.addEventListener('keydown', (e) => {
   // ⌘/Ctrl+Enter posts the comment being typed.
@@ -484,9 +537,15 @@ document.addEventListener('keydown', (e) => {
   if (view.menu && k === 'Escape') { save({ menu: null }); return; }
   const rows = visibleQueue(host);
   if (host.view === 'queue') {
-    if (k === 'j' || k === 'ArrowDown') { save({ sel: Math.min(rows.length - 1, view.sel + 1) }); e.preventDefault(); }
-    else if (k === 'k' || k === 'ArrowUp') { save({ sel: Math.max(0, view.sel - 1) }); e.preventDefault(); }
-    else if (k === 'Enter' && rows[view.sel] && !(e.target as HTMLElement).closest('button')) send({ type: 'openPr', number: rows[view.sel]!.number });
+    // The first press shows the cursor where it is; later presses move it.
+    if (k === 'j' || k === 'ArrowDown' || k === 'k' || k === 'ArrowUp') {
+      const shown = kbd;
+      kbd = true;
+      const step = k === 'j' || k === 'ArrowDown' ? 1 : -1;
+      save({ sel: shown ? Math.min(rows.length - 1, Math.max(0, view.sel + step)) : view.sel });
+      e.preventDefault();
+    }
+    else if (k === 'Enter' && kbd && rows[view.sel] && !(e.target as HTMLElement).closest('button')) send({ type: 'openPr', number: rows[view.sel]!.number });
     else if (k === 'r') send({ type: 'refresh' });
     return;
   }

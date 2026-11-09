@@ -151,4 +151,5 @@ export type FromWebview =
   | { type: 'fixConflicts' }
   | { type: 'comment'; body: string }
   | { type: 'closeDependabot' }
+  | { type: 'switchRepository' }
   | { type: 'dismissNotice' };

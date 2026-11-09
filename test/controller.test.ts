@@ -9,10 +9,11 @@ function setup(label = '', onConfirm: (question: string, action: string) => void
   let confirmed = true;
   const prompts: string[] = [];
   let pick = 0;
-  const host: Host = { post: (m) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async (q, a) => { onConfirm(q, a); return confirmed; }, askAgent: async (p) => { prompts.push(p); return 'clipboard'; }, choose: async (_t, options) => options[pick] };
+  let switched = 0;
+  const host: Host = { post: (m) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async (q, a) => { onConfirm(q, a); return confirmed; }, askAgent: async (p) => { prompts.push(p); return 'clipboard'; }, choose: async (_t, options) => options[pick], switchRepository: () => { switched++; } };
   const c = new Controller(new SampleSource(), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host, label);
   const last = (): HostState => (sent.filter((m) => m.type === 'state').at(-1) as { state: HostState }).state;
-  return { c, sent, store, last, prompts, refuse: () => { confirmed = false; }, choosePick: (i: number) => { pick = i; } };
+  return { c, sent, store, last, prompts, refuse: () => { confirmed = false; }, choosePick: (i: number) => { pick = i; }, switched: () => switched };
 }
 
 describe('Controller', () => {
@@ -200,5 +201,17 @@ describe('Controller', () => {
     expect(last().pr!.seenBefore).toBe(false);
     await c.handle({ type: 'openPr', number: 57 });
     expect(last().pr!.seenBefore).toBe(true);
+  });
+
+  it('passes the repo switcher on to VS Code', async () => {
+    const { c, switched } = setup();
+    await c.handle({ type: 'switchRepository' });
+    expect(switched()).toBe(1);
+  });
+
+  it('loads the queue first when the bulk merge starts from the sidebar', async () => {
+    const { c, last } = setup();
+    await c.handle({ type: 'mergeDependabot' });
+    expect(last().queue.find((p) => p.number === 60)?.state).toBe('merged');
   });
 });

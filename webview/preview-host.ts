@@ -16,6 +16,7 @@ const controller = new Controller(new SampleSource(), { get: <T>(k: string) => s
   confirm: async () => true,
   askAgent: async (prompt) => { console.log(prompt); return 'clipboard'; },
   choose: async (title, options) => { console.log(title, options); return options[0]; },
+  switchRepository: () => console.log('switchRepository'),
 }, '', [{ label: 'Ask Codex to review', comment: '@codex review', reviewer: 'chatgpt-codex-connector' }]);
 
 (window as unknown as { acquireVsCodeApi: () => unknown }).acquireVsCodeApi = () => ({
