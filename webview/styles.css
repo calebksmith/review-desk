@@ -130,7 +130,9 @@ main { flex: 1; min-width: 0; overflow: auto; display: flex; flex-direction: col
 .sl .sub { font-size: 12px; color: var(--fg-3) }
 .step.fail .sub { color: var(--bad) }
 
-.sh { padding: 18px 20px 12px; border-bottom: 1px solid var(--line-soft) }
+.sh { padding: 18px 20px 12px; border-bottom: 1px solid var(--line-soft); display: flex; gap: 16px; align-items: flex-start }
+.sh .tx { flex: 1; min-width: 0 }
+.shx { flex-shrink: 0 }
 .sh .tx { display: flex; flex-direction: column; gap: 4px }
 .sh h2 { margin: 0; font-size: 16px; line-height: 22px; display: flex; gap: 10px; align-items: center }
 .sh p { margin: 0; color: var(--fg-2) }

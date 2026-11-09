@@ -118,7 +118,7 @@ function bulkButton(h: HostState): string {
 function crumb(pr: PrDetail, h: HostState): string {
   let act: string;
   if (pr.state === 'merged') act = `<span role="status">${statusPill(pr)}</span>`;
-  else if (pr.myReview !== 'approved') act = `${closeButton(pr)}<button class="btn pri" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
+  else if (pr.myReview !== 'approved') act = `<button class="btn pri" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
   else {
     const blocker = mergeBlocker(pr);
     const method = view.method && pr.mergeMethods.includes(view.method) ? view.method : pr.mergeMethods[0]!;
@@ -126,7 +126,7 @@ function crumb(pr: PrDetail, h: HostState): string {
     const pick = pr.mergeMethods.length > 1 ? `<select id="method" aria-label="Merge method">${pr.mergeMethods.map((m) => `<option value="${m}" ${m === method ? 'selected' : ''}>${{ squash: 'Squash', merge: 'Merge commit', rebase: 'Rebase' }[m]}</option>`).join('')}</select>` : '';
     // With a check failing, Merge stays available but stops being the primary action and says "anyway".
     const warning = !blocker && mergeWarning(pr);
-    act = `${closeButton(pr)}${pick}<button class="btn ${warning ? '' : 'pri'}" data-do="merge" data-method="${method}" ${h.busy || blocker ? 'disabled' : ''} ${blocker || warning ? `title="${esc(blocker || `${warning}. You'll be asked to confirm.`)}"` : ''}>${h.busy === 'merge' ? '<span class="spin"></span>' : I.merge}${verb}${warning ? ' anyway' : ''}</button>`;
+    act = `${pick}<button class="btn ${warning ? '' : 'pri'}" data-do="merge" data-method="${method}" ${h.busy || blocker ? 'disabled' : ''} ${blocker || warning ? `title="${esc(blocker || `${warning}. You'll be asked to confirm.`)}"` : ''}>${h.busy === 'merge' ? '<span class="spin"></span>' : I.merge}${verb}${warning ? ' anyway' : ''}</button>`;
   }
   // One line: the title truncates before anything else gives way. It's the link to GitHub.
   return `<div class="crumb prc"><button class="home" data-do="back" aria-label="Back to the review queue">${I.inbox}<span class="hl">Review queue</span></button><span class="sep" aria-hidden="true">/</span>
@@ -134,7 +134,10 @@ function crumb(pr: PrDetail, h: HostState): string {
     <div class="end">${act}</div></div>${pr.state === 'merged' ? '' : readiness(pr, h)}`;
 }
 
-/** Dependabot PRs can be closed, or their update ignored, with a comment Dependabot reads. */
+/**
+ * Dependabot PRs can be closed, or their update ignored, with a comment Dependabot reads. It lives on the
+ * Checks page, where a broken update shows up, not beside Merge where it would be one slip away.
+ */
 function closeButton(pr: PrDetail): string {
   return isDependabot(pr) && pr.state === 'open' ? `<button class="btn" data-do="closeDependabot" title="Close this PR, or tell Dependabot to skip this update">Close or ignore…</button>` : '';
 }
@@ -186,9 +189,9 @@ function stepChecks(pr: PrDetail): string {
     const g = isFail(r) ? `<span class="g bad">${I.x}</span>` : r.status !== 'completed' ? '<span class="g run"><span class="spin sm"></span></span>' : `<span class="g ok">${I.check}</span>`;
     const why = isFail(r) && (r.failedStep || r.excerpt) ? `<div class="cgb">${r.failedStep ? `<span class="fstep">Failed at <b>${esc(r.failedStep)}</b></span>` : ''}${r.excerpt ? `<pre class="log">${r.excerpt.map(esc).join('\n')}</pre>` : ''}</div>` : '';
     return `<div class="cg ${isFail(r) ? 'bad' : ''}"><div class="cgh">${g}<span class="nm">${esc(r.name)}</span><span class="tool">${esc(r.app)}</span>
-      <span class="res">${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ''}${isFail(r) ? `<button class="btn sm fix" data-fix=""${esc(r.name)}" title="Send the failure to your AI agent to diagnose and fix">${I.spark}Fix with agent</button>` : ''}${r.url ? `<button class="btn sm" data-ext="${esc(r.url)}">${isFail(r) ? 'Open log' : 'Details'}${I.ext}</button>` : ''}</span></div>${why}</div>`;
+      <span class="res">${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ''}${isFail(r) ? `<button class="btn sm fix" data-fix="${esc(r.name)}" title="Send the failure to your AI agent to diagnose and fix">${I.spark}Fix with agent</button>` : ''}${r.url ? `<button class="btn sm" data-ext="${esc(r.url)}">${isFail(r) ? 'Open log' : 'Details'}${I.ext}</button>` : ''}</span></div>${why}</div>`;
   }).join('');
-  return `<div class="sh"><div class="tx"><h2>Checks${pill}</h2><p>${line}</p><div class="prov"><span>${esc(pr.headSha.slice(0, 7))}</span><span>${esc(pr.headRef)} → ${esc(pr.baseRef)}</span></div></div></div>
+  return `<div class="sh"><div class="tx"><h2>Checks${pill}</h2><p>${line}</p><div class="prov"><span>${esc(pr.headSha.slice(0, 7))}</span><span>${esc(pr.headRef)} → ${esc(pr.baseRef)}</span></div></div>${closeButton(pr) ? `<div class="shx">${closeButton(pr)}</div>` : ''}</div>
     <div class="pad">${rows || '<div class="empty">This repo runs no checks on pull requests.</div>'}</div>`;
 }
 
@@ -199,7 +202,6 @@ function stepReview(pr: PrDetail): string {
   const seen = files.filter((f) => f.viewed === 'viewed').length;
   const since = pr.sinceLastLook;
   const changedSince = new Set(since?.files.map((f) => f.path) ?? []);
-  const line = pr.state === 'merged' ? 'Merged.' : pr.myReview === 'approved' ? 'Approved. Merge from the header.' : seen < files.length ? `Read the ${plural(files.length, 'changed file')} and tick each one viewed, then approve.` : 'You’ve read every file. Approve from the header.';
 
   const flist = files.map((f) => {
     const isNew = changedSince.has(f.path) || f.viewed === 'changed';
@@ -215,7 +217,8 @@ function stepReview(pr: PrDetail): string {
   const banner = since && pr.state !== 'merged' ? `<div class="newbar">${I.rerun}<b>${plural(since.commits, 'new commit')} since you looked</b><span class="chip">${esc(since.fromSha.slice(0, 7))}…${esc(since.toSha.slice(0, 7))}</span><span>${since.files.map((f) => esc(base(f.path))).join(', ')}</span>
     ${fileSince ? `<div class="seg"><button data-onlynew="0" aria-pressed="${!view.onlyNew}">Whole change</button><button data-onlynew="1" aria-pressed="${view.onlyNew}">Since you looked</button></div>` : since.files[0] ? `<button class="btn sm" data-file="${esc(since.files[0].path)}" data-onlynew="1">Show it${I.chev}</button>` : ''}</div>` : '';
 
-  return `<div class="sh"><div class="tx"><h2>Your review</h2><p>${line}</p></div></div>${banner}
+  // No page title: the header's button and the "Can it merge" strip already say what's next.
+  return `${banner}
     ${about(pr)}
     <div class="split"><nav class="files" aria-label="Changed files"><div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}<span class="hint"><kbd>n</kbd><kbd>p</kbd> next file <kbd>v</kbd> viewed</span></nav>
       <section class="diffpane" aria-label="Diff">${file ? `<div class="dh"><span class="mono">${esc(file.path)}</span><label class="vt"><input type="checkbox" data-viewed="${esc(file.path)}" ${file.viewed === 'viewed' ? 'checked' : ''}> Viewed</label></div>

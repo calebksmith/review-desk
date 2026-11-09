@@ -13,7 +13,7 @@ This is phase 1 of five: a read-only review panel on GitHub data. The agent step
 - **Your review:** the PR's description and conversation above its changed files, with a Viewed checkbox for each file, and the diff. Viewed state is GitHub's own, so it matches github.com.
 - **Description and conversation:** the start of the description, formatted as on GitHub, with **Show full description** for the rest. The Conversation tab lists comments, reviews and comments on lines of code, newest first, marking what's new since you last looked. A comment on a line of code opens that file, and an unresolved one has **Fix with agent**, so review findings (Codex's included) go to your agent like a failing check.
 - **Comments:** post a comment from the Conversation tab (⌘Enter sends). Comments you post often, like `@codex review`, can be one-click buttons that show when that reviewer last replied; see `reviewDesk.commentActions`.
-- **Close or ignore** a Dependabot PR: posts the Dependabot command you pick, such as ignoring the new major version, and Dependabot closes the PR.
+- **Close or ignore** a Dependabot PR from its Checks page: posts the Dependabot command you pick, such as ignoring the new major version, and Dependabot closes the PR.
 - **New commits since you looked:** when the agent pushes after you opened a PR, a banner names the files and shows only what changed since.
 - **Approve and Merge** from the header. Merge asks before it runs, uses the repo's allowed merge method, and takes you back to the queue when it's done. While a check fails, the button reads **Merge anyway** and asks first, naming the failing checks. Conflicts block a merge.
 
