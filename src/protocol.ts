@@ -134,6 +134,8 @@ export interface PrDetail extends PrSummary {
   mergeMethods: MergeMethod[];
   files: FileDiff[];
   checkRuns: CheckRun[];
+  /** A review of yours started elsewhere (github.com) and not sent yet; its comments go with your next review. */
+  pendingReview?: { comments: number } | null;
   /** Dependabot's compatibility score: the share of other repos where this update passed CI. */
   compatibility?: number | null;
   /** Changes pushed since the reviewer last opened this PR, when there are any. */

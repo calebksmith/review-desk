@@ -390,6 +390,7 @@ function reviewPanel(pr: PrDetail, h: HostState): string {
   return `<div class="pop review" role="dialog" aria-label="Finish your review"><span class="lbl">Finish your review</span>
     <textarea id="rbody" rows="3" placeholder="${event === 'REQUEST_CHANGES' ? 'Say what needs to change (required)' : 'Leave a summary (optional)'}" aria-label="Review summary"></textarea>
     <div class="rv-opts">${radios}</div>
+    ${pr.pendingReview?.comments ? `<p class="rnote">You have a review in progress on GitHub with ${plural(pr.pendingReview.comments, 'comment')}; ${pr.pendingReview.comments === 1 ? 'it goes' : 'they go'} with this one.</p>` : ''}
     ${held || agent ? `<p class="rnote">${held ? `${plural(held, 'comment')} will be sent with it.` : ''}${agent ? ` ${plural(agent, 'suggestion')} from your agent stay${agent === 1 ? 's' : ''} as drafts until you keep ${agent === 1 ? 'it' : 'them'}.` : ''}</p>` : ''}
     ${warn}<div class="ract"><button class="btn pri" data-do="submitReview" ${h.busy ? 'disabled' : ''}>Submit review</button></div></div>`;
 }
@@ -626,7 +627,7 @@ function composerBox(c: Composer): string {
   return `<div class="composer"><span class="lbl">${editing ? 'Edit comment' : what}</span>
     <textarea id="lbox" rows="3" placeholder="${c.replyTo ? 'Reply…' : 'Leave a comment'}" aria-label="${esc(what)}">${esc(c.prefill ?? '')}</textarea>
     <div class="cacts"><button class="link" data-do="composeCancel">Cancel</button>
-      ${editing ? '<button class="btn sm pri" data-do="composeSave">Save</button>' : `<button class="btn sm" data-do="composeNow" title="Post it right away, outside a review">${c.replyTo ? 'Reply now' : 'Comment now'}</button><button class="btn sm pri" data-do="composeAdd" title="Hold it back and send it with your review">Add to review</button>`}</div></div>`;
+      ${editing ? '<button class="btn sm pri" data-do="composeSave">Save</button>' : `<button class="btn sm" data-do="composeNow" ${host?.pr?.pendingReview ? 'disabled title="You have a review in progress on GitHub; add this to it instead"' : 'title="Post it right away, outside a review"'}>${c.replyTo ? 'Reply now' : 'Comment now'}</button><button class="btn sm pri" data-do="composeAdd" title="Hold it back and send it with your review">Add to review</button>`}</div></div>`;
 }
 
 function diffLine(l: DiffLine): string {

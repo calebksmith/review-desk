@@ -108,6 +108,7 @@ export class GitHubSource implements DataSource {
       files: { nodes: { path: string; viewerViewedState: 'VIEWED' | 'UNVIEWED' | 'DISMISSED' }[] };
       comments: { nodes: RawComment[] };
       reviews: { nodes: RawReview[] };
+      pending: { nodes: { author: { login: string } | null; comments: { totalCount: number } }[] };
       threads: { nodes: RawThread[] };
     } } }>(
       `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) {
@@ -116,6 +117,7 @@ export class GitHubSource implements DataSource {
           files(first: 100) { nodes { path viewerViewedState } }
           comments(last: 50) { nodes { ${COMMENT_FIELDS} } }
           reviews(last: 50) { nodes { author { login } state submittedAt body bodyHTML url } }
+          pending: reviews(states: PENDING, first: 1) { nodes { author { login } comments { totalCount } } }
           threads: reviewThreads(first: 50) { nodes { id isResolved isOutdated path line originalLine comments(first: 30) { nodes { ${COMMENT_FIELDS} } } } } }
       } }`,
       { owner, name, number },
@@ -196,6 +198,7 @@ export class GitHubSource implements DataSource {
       conversation: toConversation(raw.comments.nodes, raw.reviews.nodes, raw.threads.nodes),
       mergeMethods: mergeMethods(data.repository),
       compatibility,
+      pendingReview: raw.pending.nodes.filter((r) => r.author?.login === me).map((r) => ({ comments: r.comments.totalCount }))[0] ?? null,
       files,
       checkRuns,
       sinceLastLook,
@@ -253,29 +256,77 @@ export class GitHubSource implements DataSource {
     await this.octokit.issues.createComment({ ...at(pr.repo), issue_number: pr.number, body });
   }
 
+  /**
+   * Sends a review the way github.com does: into your pending review (the one you may have started in the
+   * browser, or a new one), with each held-back comment and reply, then submitted with the verdict. GitHub allows
+   * one pending review per person per PR, so starting a second would fail. Resolves follow the submit.
+   */
   async submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<void> {
-    const lines = drafts.filter((d) => !d.replyTo && d.line != null);
-    await this.octokit.pulls.createReview({
-      ...at(pr.repo), pull_number: pr.number, commit_id: pr.headSha, event, body: body || undefined,
-      comments: lines.map((d) => ({ path: d.path, line: d.line!, side: d.side, body: d.body, ...(d.startLine && d.startLine !== d.line ? { start_line: d.startLine, start_side: d.side } : {}) })),
-    });
-    // GitHub's review call can't hold replies to existing threads; they follow right after, then any resolves.
-    for (const d of drafts.filter((x) => x.replyTo)) {
-      await this.octokit.graphql('mutation($id: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) { clientMutationId } }', { id: d.replyTo, body: d.body });
-      if (d.resolve) await this.octokit.graphql('mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { clientMutationId } }', { id: d.replyTo });
+    const existing = await this.pendingReviewId(pr);
+    const id = existing ?? (await this.startReview(pr));
+    try {
+      await this.addToReview(id, pr, drafts);
+      await this.octokit.graphql('mutation($id: ID!, $event: PullRequestReviewEvent!, $body: String) { submitPullRequestReview(input: { pullRequestReviewId: $id, event: $event, body: $body }) { clientMutationId } }', { id, event, body: body || null });
+    } catch (err) {
+      // A review this call started and couldn't finish would block the next one; one you started stays yours.
+      if (!existing) await this.discardReview(id);
+      throw err;
+    }
+    for (const d of drafts.filter((x) => x.replyTo && x.resolve)) await this.resolve(d.replyTo!);
+  }
+
+  /**
+   * One comment or reply, posted now: a review with just that comment, submitted as a comment, which is what
+   * GitHub's "Add single comment" does. Not while a review of yours is in progress: GitHub doesn't allow it either.
+   */
+  async commentNow(pr: PrDetail, d: Draft): Promise<void> {
+    if (await this.pendingReviewId(pr)) throw new Error('You have a review in progress on this PR. Add this comment to your review and submit it, or finish that review first.');
+    const id = await this.startReview(pr);
+    try {
+      await this.addToReview(id, pr, [d]);
+      await this.octokit.graphql('mutation($id: ID!) { submitPullRequestReview(input: { pullRequestReviewId: $id, event: COMMENT }) { clientMutationId } }', { id });
+    } catch (err) {
+      await this.discardReview(id);
+      throw err;
+    }
+    if (d.replyTo && d.resolve) await this.resolve(d.replyTo);
+  }
+
+  /** Your pending review on this PR, if you have one. GitHub only shows a pending review to its author. */
+  private async pendingReviewId(pr: PrDetail): Promise<string | null> {
+    const me = await this.viewer();
+    const d = await this.octokit.graphql<{ node: { reviews: { nodes: { id: string; author: { login: string } | null }[] } } }>(
+      'query($id: ID!) { node(id: $id) { ... on PullRequest { reviews(states: PENDING, first: 5) { nodes { id author { login } } } } } }', { id: pr.nodeId },
+    );
+    return d.node.reviews.nodes.find((r) => r.author?.login === me)?.id ?? null;
+  }
+
+  private async startReview(pr: PrDetail): Promise<string> {
+    const d = await this.octokit.graphql<{ addPullRequestReview: { pullRequestReview: { id: string } } }>(
+      'mutation($pr: ID!, $sha: GitObjectID!) { addPullRequestReview(input: { pullRequestId: $pr, commitOID: $sha }) { pullRequestReview { id } } }', { pr: pr.nodeId, sha: pr.headSha },
+    );
+    return d.addPullRequestReview.pullRequestReview.id;
+  }
+
+  /** New comments on lines become threads in the review; replies join their threads, as part of the same review. */
+  private async addToReview(id: string, pr: PrDetail, drafts: Draft[]): Promise<void> {
+    for (const d of drafts) {
+      if (d.replyTo) {
+        await this.octokit.graphql('mutation($id: ID!, $thread: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewId: $id, pullRequestReviewThreadId: $thread, body: $body }) { clientMutationId } }', { id, thread: d.replyTo, body: d.body });
+      } else if (d.line != null) {
+        const range = d.startLine && d.startLine !== d.line ? { startLine: d.startLine, startSide: d.side } : {};
+        await this.octokit.graphql('mutation($id: ID!, $path: String!, $line: Int!, $side: DiffSide!, $startLine: Int, $startSide: DiffSide, $body: String!) { addPullRequestReviewThread(input: { pullRequestReviewId: $id, path: $path, line: $line, side: $side, startLine: $startLine, startSide: $startSide, body: $body }) { clientMutationId } }',
+          { id, path: d.path, line: d.line, side: d.side, body: d.body, startLine: null, startSide: null, ...range });
+      }
     }
   }
 
-  async commentNow(pr: PrDetail, d: Draft): Promise<void> {
-    if (d.replyTo) {
-      await this.octokit.graphql('mutation($id: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) { clientMutationId } }', { id: d.replyTo, body: d.body });
-      if (d.resolve) await this.octokit.graphql('mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { clientMutationId } }', { id: d.replyTo });
-      return;
-    }
-    await this.octokit.pulls.createReviewComment({
-      ...at(pr.repo), pull_number: pr.number, commit_id: pr.headSha, path: d.path, line: d.line!, side: d.side, body: d.body,
-      ...(d.startLine && d.startLine !== d.line ? { start_line: d.startLine, start_side: d.side } : {}),
-    });
+  private async discardReview(id: string): Promise<void> {
+    await this.octokit.graphql('mutation($id: ID!) { deletePullRequestReview(input: { pullRequestReviewId: $id }) { clientMutationId } }', { id }).catch(() => {});
+  }
+
+  private async resolve(threadId: string): Promise<void> {
+    await this.octokit.graphql('mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { clientMutationId } }', { id: threadId });
   }
 
   async updateBranch(pr: PrDetail): Promise<void> {
