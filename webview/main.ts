@@ -399,7 +399,7 @@ function verdict(pr: PrDetail): ReviewEvent {
 function reviewPanel(pr: PrDetail, h: HostState): string {
   const own = pr.mine;
   const event = verdict(pr);
-  const held = h.drafts.filter((d) => d.from === 'you').length;
+  const held = h.drafts.filter((d) => d.from === 'you' && !d.sent).length;
   const agent = h.drafts.filter((d) => d.from === 'agent').length;
   const f = openFindings(pr);
   const warn = event === 'APPROVE' && (f.p0 || f.p1) ? `<p class="rwarn">${I.alert}${stillOpen(f)}.</p>` : '';
@@ -676,8 +676,8 @@ function threadCard(t: Thread, pr: PrDetail): string {
 function draftCard(d: Draft): string {
   const c = view.composer;
   if (c?.editId === d.id) return composerBox(c);
-  return `<div class="drf ${d.from} ${view.finding === d.id ? 'current' : ''}" data-draft-id="${esc(d.id)}"><div class="drh"><span class="chip pend">Pending</span>${d.from === 'agent' ? `<span class="chip agent">${I.spark}From your agent</span>` : ''}${sevChip(d.severity)}${d.resolve ? '<span class="chip">Resolves the thread</span>' : ''}
-    <span class="end"><button class="link" data-edit="${esc(d.id)}">Edit</button><button class="link" data-del="${esc(d.id)}">Delete</button>${d.from === 'agent' ? `<button class="btn sm" data-keep="${esc(d.id)}">Keep</button>` : ''}</span></div>
+  return `<div class="drf ${d.from} ${view.finding === d.id ? 'current' : ''}" data-draft-id="${esc(d.id)}"><div class="drh"><span class="chip pend">${d.sent ? 'In your review on GitHub' : 'Pending'}</span>${d.from === 'agent' ? `<span class="chip agent">${I.spark}From your agent</span>` : ''}${sevChip(d.severity)}${d.resolve ? '<span class="chip">Resolves the thread</span>' : ''}
+    <span class="end">${d.sent ? '' : `<button class="link" data-edit="${esc(d.id)}">Edit</button>`}<button class="link" data-del="${esc(d.id)}">Delete</button>${d.from === 'agent' ? `<button class="btn sm" data-keep="${esc(d.id)}">Keep</button>` : ''}</span></div>
     <div class="drb">${esc(d.body.replace(/^\*\*P[0-3]\*\*\s*/, ''))}</div></div>`;
 }
 

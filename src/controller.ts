@@ -88,8 +88,9 @@ export class Controller {
       }
     } catch (err) {
       this.set({ loading: false, busy: null, error: message(err) });
-      // The panel cleared the box when it sent; what was typed goes back so it isn't lost.
-      if (msg.type === 'comment' || msg.type === 'submitReview' || msg.type === 'commentNow') this.host.post({ type: 'unsent', msg });
+      // The panel cleared the box when it sent; what was typed goes back so it isn't lost. Only when the send
+      // itself failed: after a post that worked (the reload failing, say), handing it back would invite posting twice.
+      if ((msg.type === 'comment' || msg.type === 'submitReview' || msg.type === 'commentNow') && err instanceof Object && notPosted.has(err)) this.host.post({ type: 'unsent', msg });
     }
   }
 
@@ -283,19 +284,21 @@ export class Controller {
       sent = await this.source.submitReview(pr, event, summary, send.filter((d) => !loose.includes(d)));
       this.source.invalidate?.();
     } catch (err) {
-      // Comments that reached your review on GitHub before it failed stay there: sending them again would post them twice.
+      // Comments that reached your review on GitHub before it failed stay there: sending them again would post them
+      // twice. A reply that resolves its thread is kept, marked sent, so the resolve still happens with the review.
       const added = (err as { added?: string[] } | null)?.added ?? [];
       if (added.length) {
-        await this.saveDrafts(this.state.drafts.filter((d) => !added.includes(d.id)));
+        await this.saveDrafts(this.state.drafts.filter((d) => !added.includes(d.id) || d.resolve).map((d) => (added.includes(d.id) ? { ...d, sent: true } : d)));
         this.host.post({ type: 'toast', text: `${plural(added.length, 'comment')} ${added.length === 1 ? 'is' : 'are'} already in your review on GitHub and won’t be sent twice.` });
       }
-      throw err;
+      throw failedSend(err);
     } finally {
       this.set({ busy: null });
     }
     await this.saveDrafts(this.state.drafts.filter((d) => d.from !== 'you'));
+    const posted = send.filter((d) => !d.sent).length;
     const said = { APPROVE: 'Approved', REQUEST_CHANGES: 'Requested changes on', COMMENT: 'Sent your review of' }[event];
-    this.host.post({ type: 'toast', text: `${said} ${this.ref(pr)}${send.length ? ` with ${plural(send.length, 'comment')}` : ''}.${notResolved(sent)}` });
+    this.host.post({ type: 'toast', text: `${said} ${this.ref(pr)}${posted ? ` with ${plural(posted, 'comment')}` : ''}.${notResolved(sent)}` });
     await this.loadPr(pr);
   }
 
@@ -307,6 +310,8 @@ export class Controller {
     try {
       sent = await this.source.commentNow(pr, { ...draft, id: newId(), from: 'you' });
       this.source.invalidate?.();
+    } catch (err) {
+      throw failedSend(err);
     } finally {
       this.set({ busy: null });
     }
@@ -389,6 +394,8 @@ export class Controller {
     try {
       await this.source.comment(pr, text);
       this.source.invalidate?.();
+    } catch (err) {
+      throw failedSend(err);
     } finally {
       this.set({ busy: null });
     }
@@ -449,6 +456,10 @@ export class Controller {
 
 /** After a send: the threads GitHub wouldn't resolve, so the reviewer resolves them there instead of sending again. */
 const notResolved = (s: { unresolved: number }) => (s.unresolved ? ` ${s.unresolved === 1 ? 'Its thread' : `${s.unresolved} threads`} couldn’t be resolved; resolve ${s.unresolved === 1 ? 'it' : 'them'} on GitHub.` : '');
+
+/** Errors from a send that posted nothing, as far as GitHub said. */
+const notPosted = new WeakSet<object>();
+const failedSend = (err: unknown) => { if (err instanceof Object) notPosted.add(err); return err; };
 
 function message(err: unknown): string {
   if (err && typeof err === 'object' && 'status' in err && (err as { status: number }).status === 401) return 'GitHub sign-in expired. Run “Review Desk: Use a different GitHub account”.';

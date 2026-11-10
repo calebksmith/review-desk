@@ -350,6 +350,7 @@ export class GitHubSource implements DataSource {
   /** New comments on lines become threads in the review; replies join their threads, as part of the same review. */
   private async addToReview(id: string, pr: PrDetail, drafts: Draft[], added: string[] = []): Promise<void> {
     for (const d of drafts) {
+      if (d.sent) { added.push(d.id); continue; }
       if (d.replyTo) {
         await this.octokit.graphql('mutation($id: ID!, $thread: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewId: $id, pullRequestReviewThreadId: $thread, body: $body }) { clientMutationId } }', { id, thread: d.replyTo, body: d.body });
       } else if (d.line != null) {

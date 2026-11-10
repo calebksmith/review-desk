@@ -51,6 +51,12 @@ describe('sending reviews to GitHub', () => {
     await expect(src.submitReview(pr, 'COMMENT', '', [line, reply])).rejects.toMatchObject({ added: ['a'] });
   });
 
+  it('doesn’t post a reply that’s already in your review again, but still resolves its thread', async () => {
+    const { src, calls } = fake('me');
+    await src.submitReview(pr, 'COMMENT', '', [{ ...reply, sent: true }]);
+    expect(calls).toEqual(['reviews(states: PENDING', 'submitPullRequestReview', 'resolveReviewThread']);
+  });
+
   it('posts a single comment as its own review, and refuses while a review is in progress', async () => {
     const free = fake(null);
     await free.src.commentNow(pr, reply);

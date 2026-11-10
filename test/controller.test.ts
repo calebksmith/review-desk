@@ -362,13 +362,27 @@ describe('Controller', () => {
       await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
       await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 1, side: 'RIGHT', body: 'One' } });
       await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 1, side: 'RIGHT', body: 'Two' } });
-      const [one] = c.snapshot.drafts;
-      c['source'].submitReview = async () => { throw Object.assign(new Error('GitHub said no'), { added: [one!.id] }); };
+      await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 1, side: 'RIGHT', body: 'Not an issue', replyTo: 'T_1', resolve: true } });
+      const [one, , reply] = c.snapshot.drafts;
+      c['source'].submitReview = async () => { throw Object.assign(new Error('GitHub said no'), { added: [one!.id, reply!.id] }); };
       const msg = { type: 'submitReview', event: 'COMMENT', body: 'My summary' } as const;
       await c.handle(msg);
       expect(c.snapshot.error).toBe('GitHub said no');
-      expect(c.snapshot.drafts.map((d) => d.body)).toEqual(['Two']);
+      // The reply is on GitHub too, but its thread is still to resolve: it stays, marked so it isn't posted again.
+      expect(c.snapshot.drafts.map((d) => [d.body, d.sent ?? false])).toEqual([['Two', false], ['Not an issue', true]]);
       expect(sent.at(-1)).toEqual({ type: 'unsent', msg });
+    });
+
+    it('doesn’t hand a comment back when it was posted and only the reload after it failed', async () => {
+      const { c, sent } = team();
+      await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
+      c['source'].getPr = async () => { throw new Error('GitHub is down'); };
+      await c.handle({ type: 'comment', body: 'Posted fine' });
+      expect(c.snapshot.error).toBe('GitHub is down');
+      expect(sent.some((m) => m.type === 'unsent')).toBe(false);
+      c['source'].comment = async () => { throw new Error('Not posted'); };
+      await c.handle({ type: 'comment', body: 'Try me' });
+      expect(sent.at(-1)).toEqual({ type: 'unsent', msg: { type: 'comment', body: 'Try me' } });
     });
 
     it('compares a re-review with the commit you reviewed', async () => {

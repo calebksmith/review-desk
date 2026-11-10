@@ -166,6 +166,11 @@ export interface Draft {
   body: string;
   /** Written by the reviewer, or suggested by their agent and not kept yet. */
   from: 'you' | 'agent';
+  /**
+   * Already in your pending review on GitHub: a send failed after this reply was added. It isn't posted again;
+   * it's kept only because its thread is still to be resolved when the review goes through.
+   */
+  sent?: boolean;
   severity?: number | null;
 }
 
