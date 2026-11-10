@@ -7,6 +7,7 @@ const base: PrSummary = {
   repo: 'acme/web', number: 1, title: 't', author: 'a', url: '', additions: 0, deletions: 0, updatedAt: '', headSha: 'abc', isDraft: false, state: 'open',
   labels: [], myReview: null, myReviewSha: null, checks: { passed: 3, failed: 0, pending: 0, total: 3 }, mergeable: true, mergeState: 'clean', unresolvedThreads: 0,
   headRef: 'h', baseRef: 'main', mine: false, reviewDecision: null, reviewers: [], reviewRequested: false,
+  createdAt: '2026-01-01T00:00:00Z', requestedAt: null, milestone: null, dependsOn: [], linear: null, findingCounts: { p0: 0, p1: 0 },
 };
 const pr = (p: Partial<PrSummary> = {}): PrSummary => ({ ...base, ...p });
 const detail = (p: Partial<PrDetail> = {}): PrDetail => ({ ...base, nodeId: '', body: '', bodyHtml: '', conversation: [], mergeMethods: ['squash'], files: [], checkRuns: [], sinceLastLook: null, ...p });

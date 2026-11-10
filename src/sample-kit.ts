@@ -18,7 +18,8 @@ export const running = (name: string, app: string, summary: string | null = null
 export const say = (author: string, min: number, html: string): Comment => ({ author, createdAt: ago(min), html, text: html.replace(/<[^>]+>/g, ''), url: 'https://github.com', isNew: false });
 
 /** What a seed spells out; the source works out the rest (branches, whose it is, the review decision). */
-export type SeedSummary = Omit<PrSummary, 'repo' | 'headRef' | 'baseRef' | 'mine' | 'reviewDecision' | 'reviewers' | 'reviewRequested' | 'myReviewSha'> & { myReviewSha?: string | null };
+export type SeedSummary = Omit<PrSummary, 'repo' | 'headRef' | 'baseRef' | 'mine' | 'reviewDecision' | 'reviewers' | 'reviewRequested' | 'myReviewSha' | 'createdAt' | 'requestedAt' | 'milestone' | 'dependsOn' | 'linear' | 'findingCounts'>
+  & { myReviewSha?: string | null; createdAt?: string; requestedAt?: string | null; milestone?: PrSummary['milestone'] };
 
 export interface SamplePr {
   /** owner/name; the set's repo when not given. */

@@ -33,6 +33,16 @@ export interface PrSummary {
   reviewers: Reviewer[];
   /** The signed-in reviewer has been asked to review it. */
   reviewRequested: boolean;
+  createdAt: string;
+  /** When the signed-in reviewer was last asked to review it. */
+  requestedAt: string | null;
+  milestone: { title: string; dueOn: string | null } | null;
+  /** PR numbers (same repo) its description says it depends on. */
+  dependsOn: number[];
+  /** The Linear issue it belongs to, when it says. */
+  linear: { key: string; url: string | null } | null;
+  /** Unresolved findings marked P0 and P1. */
+  findingCounts: { p0: number; p1: number };
   checks: ChecksTally;
   /** False when the PR conflicts with its base. Null while GitHub is still working it out. */
   mergeable: boolean | null;
@@ -180,6 +190,8 @@ export interface HostState {
   /** What the last bulk merge did, until the reviewer dismisses it. */
   notice: string | null;
   actions: CommentAction[];
+  /** Labels that mark a PR as blocking a release (reviewDesk.blockerLabels). */
+  blockerLabels: string[];
   /** The open PR's held-back comments, sent with the review. */
   drafts: Draft[];
   error: string | null;

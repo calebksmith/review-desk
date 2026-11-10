@@ -45,6 +45,12 @@ export function severityOf(text: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/** P0 and P1 counts among the first comments of unresolved threads. */
+export function countFindings(firstComments: string[]): { p0: number; p1: number } {
+  const sev = firstComments.map(severityOf);
+  return { p0: sev.filter((s) => s === 0).length, p1: sev.filter((s) => s === 1).length };
+}
+
 export function startedAt(item: ConversationItem): string {
   return item.kind === 'thread' ? item.comments[0]?.createdAt ?? '' : item.comment.createdAt;
 }

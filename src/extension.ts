@@ -238,7 +238,7 @@ function open(context: vscode.ExtensionContext, key?: string): void {
   };
   const store = { get: <T>(key: string) => context.workspaceState.get<T>(key), set: (key: string, value: unknown) => context.workspaceState.update(key, value) };
   const actions = vscode.workspace.getConfiguration('reviewDesk').get<CommentAction[]>('commentActions') ?? [];
-  const c = new Controller(source, store, host, label(), actions.filter((a) => a && typeof a.label === 'string' && typeof a.comment === 'string'));
+  const c = new Controller(source, store, host, label(), actions.filter((a) => a && typeof a.label === 'string' && typeof a.comment === 'string'), blockerLabels());
   controller = c;
   webview.onDidReceiveMessage((msg: FromWebview) => c.handle(msg), undefined, context.subscriptions);
   panel.onDidDispose(() => { panel = undefined; controller = undefined; }, undefined, context.subscriptions);
@@ -248,6 +248,7 @@ function open(context: vscode.ExtensionContext, key?: string): void {
 }
 
 const label = () => vscode.workspace.getConfiguration('reviewDesk').get<string>('label')?.trim() ?? '';
+const blockerLabels = () => (vscode.workspace.getConfiguration('reviewDesk').get<string[]>('blockerLabels') ?? []).filter((l) => typeof l === 'string' && l.trim());
 
 /* ---------- Sidebar ---------- */
 
@@ -362,7 +363,7 @@ class QueueTree implements vscode.TreeDataProvider<vscode.TreeItem> {
     if (!source) return [];
     if (!this.queue) return item ? [] : [Object.assign(new vscode.TreeItem('Loading pull requests…'), { iconPath: new vscode.ThemeIcon('loading~spin') })];
     if (item instanceof GroupItem) return item.group.prs.map((p) => new PrItem(p, this.queue ?? []));
-    return item ? [] : queueGroups(this.queue).map((g) => new GroupItem(g));
+    return item ? [] : queueGroups(this.queue, blockerLabels()).map((g) => new GroupItem(g));
   }
 }
 

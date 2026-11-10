@@ -2,6 +2,7 @@ import { parseKey, prKey, type CommentAction, type Draft, type FromWebview, type
 import { conflictPrompt, fixPrompt, threadPrompt, type AgentRoute } from './agent';
 import { closeOptions, type CloseOption } from './dependabot';
 import { markNew } from './conversation';
+import { DEFAULT_BLOCKER_LABELS } from './signals';
 import type { DataSource, Store } from './source';
 import { bulkMergeable, bulkSkipReason, isReReview, mergeBlocker, mergeWarning, openFindings, plural } from './status';
 
@@ -29,8 +30,8 @@ export class Controller {
   /** PRs closed from here this session (by key); GitHub can list them as open for a few seconds after. */
   private readonly closed = new Set<string>();
 
-  constructor(private readonly source: DataSource, private readonly store: Store, private readonly host: Host, private readonly label = '', actions: CommentAction[] = []) {
-    this.state = { scope: source.scope, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, bulk: null, notice: null, actions, drafts: [], error: null };
+  constructor(private readonly source: DataSource, private readonly store: Store, private readonly host: Host, private readonly label = '', actions: CommentAction[] = [], blockerLabels: string[] = DEFAULT_BLOCKER_LABELS) {
+    this.state = { scope: source.scope, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, bulk: null, notice: null, actions, blockerLabels, drafts: [], error: null };
   }
 
   get snapshot(): HostState { return this.state; }

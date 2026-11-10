@@ -1,4 +1,5 @@
 import { prKey, type PrDetail, type PrSummary, type Reviewer } from './protocol';
+import { DEFAULT_BLOCKER_LABELS, signals, tier, type Signals } from './signals';
 import { parentOf } from './stacks';
 
 // One vocabulary for a PR's state. The queue row, the PR header and the sidebar all
@@ -75,19 +76,34 @@ function approved(p: PrSummary): PrStatus {
  * that need them, then PRs nobody was assigned), then what's waiting on someone else, then merged.
  * Within a rank, what blocks a merge comes first.
  */
-export function priority(p: PrSummary): { section: 'you' | 'others' | 'merged'; rank: number } {
+export function priority(p: PrSummary, ctx?: PriorityContext): { section: 'you' | 'others' | 'merged'; rank: number; signals?: Signals } {
   const s = prStatus(p);
-  if (p.state === 'merged') return { section: 'merged', rank: 9 };
+  if (p.state === 'merged') return { section: 'merged', rank: 99 };
   const blocking = s.tone === 'bad' ? 0 : 0.5;
-  if (s.who !== 'you') return { section: 'others', rank: 5 + blocking };
-  if ((p.reviewRequested && !p.myReview) || isReReview(p)) return { section: 'you', rank: 0 + blocking };
-  if (p.mine) return { section: 'you', rank: 1 + blocking };
-  return { section: 'you', rank: 2 + blocking };
+  if (s.who !== 'you') return { section: 'others', rank: 50 + blocking };
+  const role = (p.reviewRequested && !p.myReview) || isReReview(p) ? 0 : p.mine ? 1 : 2;
+  if (!ctx) return { section: 'you', rank: role + blocking };
+  // With the queue at hand, what else waits on it (releases, other PRs) comes before whose ask it was.
+  const sig = signals(p, ctx.queue, ctx.blockerLabels, ctx.now);
+  return { section: 'you', rank: tier(sig) * 10 + role + blocking, signals: sig };
 }
+
+export interface PriorityContext { queue: readonly PrSummary[]; blockerLabels: readonly string[]; now?: number }
 
 /** Sorts PRs by priority, then most recently updated. */
 export function byPriority(a: PrSummary, b: PrSummary): number {
   return priority(a).rank - priority(b).rank || Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+}
+
+/** Sorts with the queue's signals: in Your turn, whoever has waited longest goes first among equals. */
+export function priorityOrder(ctx: PriorityContext = { queue: [], blockerLabels: DEFAULT_BLOCKER_LABELS }): (a: PrSummary, b: PrSummary) => number {
+  return (a, b) => {
+    const pa = priority(a, ctx);
+    const pb = priority(b, ctx);
+    if (pa.rank !== pb.rank) return pa.rank - pb.rank;
+    if (pa.section === 'you' && pa.signals && pb.signals) return Date.parse(pa.signals.waitingSince) - Date.parse(pb.signals.waitingSince);
+    return Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+  };
 }
 
 /** "Waiting on priya" or "Waiting on priya, sam"; "Waiting on review" when nobody's been asked by name. */

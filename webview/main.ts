@@ -3,7 +3,8 @@ import { conversationCounts, startedAt } from '../src/conversation';
 import { mergeTree, parentOf, stackOf, stacks, type StackRow, type TreeRow } from '../src/stacks';
 import { parseKey, prKey } from '../src/protocol';
 import type { CheckRun, Comment, CommentAction, ConversationItem, Draft, ReviewEvent, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
-import { bulkMergeable, byPriority, isDependabot, isReReview, openFindings, priority, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
+import { reasons } from '../src/signals';
+import { bulkMergeable, isDependabot, isReReview, openFindings, priority, priorityOrder, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
 
 // The webview only renders. Everything it knows comes from the host's state messages;
 // what it remembers on its own is view state (filter, step, open file).
@@ -101,7 +102,7 @@ function listStatus(p: PrSummary): string {
 
 /** The rows in the order they're shown, so j/k and Enter follow the screen in either layout. */
 function visibleQueue(h: HostState): PrSummary[] {
-  const byNeed = byPriority;
+  const byNeed = priorityOrder({ queue: h.queue, blockerLabels: h.blockerLabels });
   if (view.layout === 'stacks') {
     const s = stacks(h.queue);
     return [...s.stacks.flatMap((rows) => mergeTree(rows, h.queue).rows.map((r) => r.pr)), ...s.alone.sort(byNeed)].filter((p) => !view.repo || p.repo === view.repo);
@@ -128,13 +129,28 @@ function reviewNote(p: PrSummary): string {
   return '';
 }
 
+/**
+ * Why a Your-turn row sits where it does: releases, PRs waiting on it, open P0/P1s, how long it's waited, and
+ * (when the team uses Codex) whether Codex has reviewed it yet. Only on rows that are your turn.
+ */
+function whyNow(p: PrSummary, h: HostState): string {
+  const pr = priority(p, { queue: h.queue, blockerLabels: h.blockerLabels });
+  if (pr.section !== 'you' || !pr.signals) return '';
+  const chips = reasons(p, pr.signals).map((r) => `<span class="why ${r.tone}" ${r.title ? `title="${esc(r.title)}"` : ''}>${esc(r.text)}</span>`);
+  const teamUsesCodex = h.queue.some((q) => q.reviewers.some((r) => /codex/i.test(r.login)));
+  if (teamUsesCodex && !p.mine && !isDependabot(p) && !p.reviewers.some((r) => /codex/i.test(r.login))) chips.push('<span class="why muted" title="Codex usually reviews first">No Codex review yet</span>');
+  return chips.length ? `<span class="whys">${chips.slice(0, 3).join('')}</span>` : '';
+}
+
 /** One PR row. In the Stacks layout it's indented under the PR it's stacked on. */
 function row(p: PrSummary, i: number, h: HostState, depth = 0, inStack = false, graph = '', chip = ''): string {
   const parent = view.layout === 'list' ? parentOf(p, h.queue) : null;
   const asked = p.reviewRequested && !p.myReview ? '<span class="chip ask">Review requested</span>' : '';
+  const why = whyNow(p, h);
+  const linear = p.linear ? (p.linear.url ? `<a class="lin" href="${esc(p.linear.url)}" title="Open in Linear">${esc(p.linear.key)}</a>` : `<span class="lin" title="Linear issue">${esc(p.linear.key)}</span>`) : '';
   return `<button class="qrow ${kbd && i === view.sel ? 'sel' : ''} ${depth ? 'nested' : ''}" data-open="${esc(prKey(p))}" style="--depth:${depth}">
       ${graph}<span class="num">#${p.number}</span>
-      <span class="t"><span class="tl"><b>${esc(p.title)}</b>${checksIcon(p)}</span><span class="sub">${multi(h) && !inStack ? `<span class="rp" title="${esc(p.repo)}">${esc(short(p.repo))}</span>` : ''}<span class="diffstat"><span class="a">+${p.additions}</span> <span class="d">−${p.deletions}</span></span><span class="${p.mine ? 'you' : ''}">${p.mine ? 'you' : esc(p.author)}</span>${parent ? `<span class="on">on #${parent.number}</span>` : ''}${reviewNote(p)}</span></span>
+      <span class="t"><span class="tl"><b>${esc(p.title)}</b>${checksIcon(p)}</span><span class="sub">${multi(h) && !inStack ? `<span class="rp" title="${esc(p.repo)}">${esc(short(p.repo))}</span>` : ''}<span class="diffstat"><span class="a">+${p.additions}</span> <span class="d">−${p.deletions}</span></span><span class="${p.mine ? 'you' : ''}">${p.mine ? 'you' : esc(p.author)}</span>${parent ? `<span class="on">on #${parent.number}</span>` : ''}${linear}${reviewNote(p)}</span>${why}</span>
       ${chip}${asked}<span class="st">${listStatus(p)}</span><span class="when" title="Updated ${ago(p.updatedAt)} ago">${ago(p.updatedAt)}</span></button>`;
 }
 
@@ -718,7 +734,7 @@ document.addEventListener('click', (e) => {
   if (pick) { save({ method: pick.dataset.methodPick as MergeMethod, menu: null }); return; }
   if (view.menu && !target.closest('.pop')) { view.menu = null; vscode.setState(view); if (!target.closest('[data-do],[data-step],[data-ext],[data-open]')) { render(); return; } }
   // Links inside descriptions and comments open in the browser, never inside the panel.
-  const a = (e.target as HTMLElement).closest<HTMLAnchorElement>('.md a[href]');
+  const a = (e.target as HTMLElement).closest<HTMLAnchorElement>('.md a[href], a.lin[href]');
   if (a) {
     e.preventDefault();
     if (/^https?:/.test(a.href)) send({ type: 'openExternal', url: a.href });

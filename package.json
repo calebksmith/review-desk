@@ -66,6 +66,12 @@
           "default": [],
           "markdownDescription": "Repositories to always show in full, as `owner/name`. **Everything involving you** lists every open PR in these, not just the ones that involve you."
         },
+        "reviewDesk.blockerLabels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["release-blocker", "hotfix", "blocker", "urgent"],
+          "markdownDescription": "Labels that mean a PR blocks a release. Those PRs go to the top of **Your turn**, marked **Release blocker**."
+        },
         "reviewDesk.label": {
           "type": "string",
           "default": "",

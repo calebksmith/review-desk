@@ -1,6 +1,8 @@
 import type { Draft, MergeMethod, PrDetail, PrSummary, ReviewEvent, Reviewer } from './protocol';
 import { ago, decide, file, pass, say, sized, type SamplePr } from './sample-kit';
+import { countFindings } from './conversation';
 import { EVERYTHING } from './scope';
+import { parseDependsOn, parseLinear } from './signals';
 import { teamSeed } from './sample-team';
 import type { DataSource } from './source';
 
@@ -272,8 +274,15 @@ export class SampleSource implements DataSource {
     const s = p.summary;
     const others = (p.reviewers ?? []).filter((r) => r.login !== this.me || !s.myReview);
     const reviewers: Reviewer[] = s.myReview ? [...others, { login: this.me, state: s.myReview }] : others;
+    const open = p.conversation.filter((it) => it.kind === 'thread' && !it.resolved).map((it) => (it.kind === 'thread' ? it.comments[0]?.text ?? '' : ''));
     return {
       ...s,
+      createdAt: s.createdAt ?? s.updatedAt,
+      requestedAt: s.requestedAt ?? null,
+      milestone: s.milestone ?? null,
+      dependsOn: parseDependsOn(p.body),
+      linear: parseLinear({ title: s.title, headRef: p.headRef, body: p.body }),
+      findingCounts: countFindings(open),
       myReviewSha: s.myReviewSha ?? (s.myReview ? s.headSha : null),
       repo: this.repoOf(p),
       headRef: p.headRef,

@@ -1,17 +1,20 @@
 import { Octokit } from '@octokit/rest';
-import { COMMENT_FIELDS, toConversation, type RawComment, type RawReview, type RawThread } from './conversation';
+import { COMMENT_FIELDS, countFindings, toConversation, type RawComment, type RawReview, type RawThread } from './conversation';
 import { logExcerpt } from './logs';
 import { parsePatch } from './patch';
 import type { CheckConclusion, CheckRun, ChecksTally, Draft, FileDiff, MergeMethod, MergeState, PrDetail, PrSummary, ReviewEvent, Reviewer, ViewedState } from './protocol';
 import { combine, scopeLabel, searchQueries, type Scope } from './scope';
+import { parseDependsOn, parseLinear } from './signals';
 import type { DataSource } from './source';
 
 const PR_FIELDS = `
   number title url additions deletions updatedAt isDraft state headRefOid mergeable mergeStateStatus
   repository { nameWithOwner }
-  headRefName baseRefName reviewDecision
+  headRefName baseRefName reviewDecision createdAt body
+  milestone { title dueOn }
+  timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 10) { nodes { ... on ReviewRequestedEvent { createdAt requestedReviewer { ... on User { login } } } } }
   reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug } ... on Bot { login } } } }
-  reviewThreads(first: 100) { nodes { isResolved } }
+  reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { body } } } }
   author { login }
   labels(first: 10) { nodes { name } }
   latestReviews(first: 20) { nodes { author { login } state commit { oid } } }
@@ -26,10 +29,12 @@ interface RawPr {
   repository: { nameWithOwner: string };
   number: number; title: string; url: string; additions: number; deletions: number; updatedAt: string;
   isDraft: boolean; state: 'OPEN' | 'MERGED' | 'CLOSED'; headRefOid: string;
+  createdAt: string; body: string; milestone: { title: string; dueOn: string | null } | null;
+  timelineItems: { nodes: { createdAt?: string; requestedReviewer?: { login?: string } | null }[] };
   headRefName: string; baseRefName: string; reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null;
   reviewRequests: { nodes: { requestedReviewer: { __typename: string; login?: string; slug?: string } | null }[] };
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN'; mergeStateStatus: string;
-  reviewThreads: { nodes: { isResolved: boolean }[] };
+  reviewThreads: { nodes: { isResolved: boolean; comments: { nodes: { body: string }[] } }[] };
   author: { login: string } | null;
   labels: { nodes: { name: string }[] };
   latestReviews: { nodes: { author: { login: string } | null; state: string; commit: { oid: string } | null }[] };
@@ -276,6 +281,12 @@ function toSummary(p: RawPr, me: string): PrSummary {
     reviewDecision: p.reviewDecision === 'APPROVED' ? 'approved' : p.reviewDecision === 'CHANGES_REQUESTED' ? 'changes_requested' : p.reviewDecision === 'REVIEW_REQUIRED' ? 'review_required' : null,
     reviewers: [...reviewed, ...asked.filter((l) => !reviewed.some((r) => r.login === l)).map((login) => ({ login, state: 'requested' as const }))],
     reviewRequested: asked.includes(me),
+    createdAt: p.createdAt,
+    requestedAt: p.timelineItems.nodes.filter((n) => n.requestedReviewer?.login === me).map((n) => n.createdAt!).sort().at(-1) ?? null,
+    milestone: p.milestone,
+    dependsOn: parseDependsOn(p.body),
+    linear: parseLinear({ title: p.title, headRef: p.headRefName, body: p.body }),
+    findingCounts: countFindings(p.reviewThreads.nodes.filter((t) => !t.isResolved).map((t) => t.comments.nodes[0]?.body ?? '')),
     url: p.url,
     additions: p.additions,
     deletions: p.deletions,
