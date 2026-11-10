@@ -150,6 +150,7 @@ function soloSeed(): SamplePr[] {
       checkRuns: [pass('checks', 'GitHub Actions'), pass('lighthouse', 'GitHub Actions'), pass('Vercel', 'Commit status', 'Deployment has completed')],
     },
     {
+      compatibility: 17,
       summary: { number: 61, title: 'Bump eslint from 9.39.5 to 10.12.0', author: 'dependabot', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(60 * 30), headSha: 'b77e310', isDraft: false, state: 'open', labels: ['dependencies'], myReview: null, checks: { passed: 1, failed: 2, pending: 0, total: 3 }, mergeable: true, mergeState: 'unstable', unresolvedThreads: 0 },
       body: 'Bumps eslint from 9.39.5 to 10.12.0.',
       bodyHtml: '<p>Bumps <a href="https://github.com">eslint</a> from 9.39.5 to 10.12.0.</p>',
@@ -214,7 +215,7 @@ export class SampleSource implements DataSource {
       : sinceSha && sinceSha !== p.summary.headSha ? { fromSha: sinceSha, toSha: p.summary.headSha, commits: 2, files: p.files.slice(0, 1) } : null;
     return {
       ...this.summarize(p), nodeId: `PR_${number}`, body: p.body, bodyHtml: p.bodyHtml, conversation: structuredClone(p.conversation),
-      mergeMethods: ['squash', 'rebase'], files: p.files.map((f) => ({ ...f })), checkRuns: p.checkRuns, sinceLastLook,
+      mergeMethods: ['squash', 'rebase'], files: p.files.map((f) => ({ ...f })), checkRuns: p.checkRuns, sinceLastLook, compatibility: p.compatibility ?? null,
     };
   }
 

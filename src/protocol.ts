@@ -83,6 +83,10 @@ export interface CheckRun {
   failedStep: string | null;
   /** The error lines from the failed step's log. */
   excerpt: string[] | null;
+  /** Branch protection requires it to pass before merging. */
+  required?: boolean;
+  /** How long it ran. */
+  seconds?: number | null;
 }
 
 export interface SinceLastLook {
@@ -130,6 +134,8 @@ export interface PrDetail extends PrSummary {
   mergeMethods: MergeMethod[];
   files: FileDiff[];
   checkRuns: CheckRun[];
+  /** Dependabot's compatibility score: the share of other repos where this update passed CI. */
+  compatibility?: number | null;
   /** Changes pushed since the reviewer last opened this PR, when there are any. */
   sinceLastLook: SinceLastLook | null;
 }

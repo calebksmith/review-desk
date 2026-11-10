@@ -203,6 +203,9 @@ export function openFindings(pr: PrDetail): { p0: number; p1: number } {
  */
 export function mergeBlocker(pr: PrDetail, queue: readonly PrSummary[] = []): string | null {
   if (pr.mergeable === false || pr.mergeState === 'dirty') return `Resolve the conflicts with ${pr.baseRef} first.`;
+  // A required check failing: GitHub won't merge it, so there's no "anyway".
+  const required = failingChecks(pr, true);
+  if (required.length) return `${required.join(', ')} ${required.length === 1 ? 'is a required check and is' : 'are required checks and are'} failing.`;
   const parent = parentOf(pr, queue);
   if (parent) return `Merge #${parent.number} first. This PR is stacked on it.`;
   if (pr.reviewDecision === 'changes_requested') return 'Changes were requested. It needs a new approval.';
@@ -213,13 +216,16 @@ export function mergeBlocker(pr: PrDetail, queue: readonly PrSummary[] = []): st
 /** Failing checks don't block a merge; the reviewer can merge anyway once they've been told. Null when none fail. */
 export function mergeWarning(pr: PrDetail): string | null {
   if (!pr.checks.failed) return null;
-  const names = failingChecks(pr);
+  // Only optional checks get here: required ones block (mergeBlocker).
+  const names = failingChecks(pr, false);
+  if (!names.length && pr.checkRuns.length) return null;
   return names.length ? `${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} failing` : `${plural(pr.checks.failed, 'check')} failing`;
 }
 
 const FAILED = ['failure', 'timed_out', 'cancelled', 'action_required', 'stale'];
-export function failingChecks(pr: PrDetail): string[] {
-  return pr.checkRuns.filter((r) => r.status === 'completed' && FAILED.includes(r.conclusion ?? '')).map((r) => r.name);
+/** Names of the failing checks; only required ones, or only optional ones, when asked. */
+export function failingChecks(pr: PrDetail, required?: boolean): string[] {
+  return pr.checkRuns.filter((r) => r.status === 'completed' && FAILED.includes(r.conclusion ?? '') && (required === undefined || !!r.required === required)).map((r) => r.name);
 }
 
 /** Dependabot opens PRs as the "dependabot" app; REST and GraphQL spell its login differently. */

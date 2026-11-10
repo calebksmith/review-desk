@@ -6,12 +6,14 @@ import { ago, fail, file, pass, running, say, sized, type SamplePr, type SeedSum
 // payments). Both repos have a #102, so nothing can tell PRs apart by number alone. The viewer is
 // calebksmith, the lead. Everything here is made up.
 
-const ci = (): CheckRun[] => [pass('Lint', 'GitHub Actions'), pass('Types', 'GitHub Actions'), pass('Tests', 'GitHub Actions'), pass('Preview', 'Vercel', 'Preview ready')];
+// Types and Tests are required by branch protection; Lint and the preview aren't.
+const ci = (): CheckRun[] => [pass('Lint', 'GitHub Actions', null, false, 21), pass('Types', 'GitHub Actions', null, true, 34), pass('Tests', 'GitHub Actions', null, true, 96), pass('Preview', 'Vercel', 'Preview ready', false, 72)];
 const req = (...logins: string[]): Reviewer[] => logins.map((login) => ({ login, state: 'requested' }));
 const rev = (login: string, state: Reviewer['state']): Reviewer => ({ login, state });
 
 interface Spec {
   repo?: string;
+  compatibility?: number;
   myReviewSha?: string;
   labels?: string[];
   /** Minutes since you were asked to review it. */
@@ -48,6 +50,7 @@ function pr(s: Spec): SamplePr {
     headRef: s.head,
     base: s.base,
     reviewers: s.reviewers ?? [],
+    compatibility: s.compatibility ?? null,
   };
 }
 
@@ -88,7 +91,7 @@ export function teamSeed(): SamplePr[] {
       body: 'Renders an invoice as a PDF from the billing service. Stacked on #110.',
       path: 'src/server/billing/invoice.ts', patch: ['@@ -0,0 +1,3 @@', '+export async function invoicePdf(id: string) {', '+  return renderPdf(<Invoice data={await billing.invoice(id)} />)', '+}'] }),
     pr({ n: 112, title: 'Meter API usage', author: 'priya', min: 60 * 3, head: 'priya/usage-metering', base: 'priya/billing-service', reviewers: req('calebksmith'), asked: 60 * 50,
-      checks: [pass('Lint', 'GitHub Actions'), pass('Types', 'GitHub Actions'), fail('Tests', 'GitHub Actions', 'Run tests', ['FAIL  src/server/billing/meter.test.ts > counts calls per key', 'AssertionError: expected 3 to be 2', 'Tests  1 failed | 41 passed (42)']), pass('Preview', 'Vercel', 'Preview ready')],
+      checks: [pass('Lint', 'GitHub Actions', null, false, 19), pass('Types', 'GitHub Actions', null, true, 31), fail('Tests', 'GitHub Actions', 'Run tests', ['FAIL  src/server/billing/meter.test.ts > counts calls per key', 'AssertionError: expected 3 to be 2', 'Tests  1 failed | 41 passed (42)'], true, 88), pass('Preview', 'Vercel', 'Preview ready')],
       body: 'Counts API calls per key per day, for usage billing. Stacked on #110.',
       path: 'src/server/billing/meter.ts', patch: ['@@ -0,0 +1,3 @@', '+export async function meter(key: string) {', '+  await redis.incr(`usage:${key}:${today()}`)', '+}'] }),
 
@@ -117,7 +120,7 @@ export function teamSeed(): SamplePr[] {
     pr({ n: 126, title: 'Speed up product search', author: 'sam', min: 60 * 12, head: 'sam/eng-412-search-index', reviewers: req('calebksmith'), behind: true, labels: ['hotfix'], asked: 60 * 12,
       body: 'Adds a trigram index so search by name is fast past 10,000 products.',
       path: 'db/migrations/0042_search_index.sql', patch: ['@@ -0,0 +1 @@', '+CREATE INDEX products_name_trgm ON products USING gin (name gin_trgm_ops);'] }),
-    pr({ n: 127, title: 'Bump vite from 6.3.1 to 6.3.5', author: 'dependabot', min: 60 * 5, head: 'dependabot/npm_and_yarn/vite-6.3.5',
+    pr({ n: 127, title: 'Bump vite from 6.3.1 to 6.3.5', author: 'dependabot', min: 60 * 5, head: 'dependabot/npm_and_yarn/vite-6.3.5', compatibility: 94,
       body: 'Bumps vite from 6.3.1 to 6.3.5.',
       path: 'package-lock.json', patch: ['@@ -4120,3 +4120,3 @@', '     "node_modules/vite": {', '-      "version": "6.3.1",', '+      "version": "6.3.5",'] }),
 

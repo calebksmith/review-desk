@@ -1,4 +1,5 @@
 import DOMPurify from 'dompurify';
+import { duration, isFailing, isSkipped, statusCard, type PartKey } from '../src/card';
 import { conversationCounts, startedAt } from '../src/conversation';
 import { mergeTree, parentOf, stackOf, stacks, type StackRow, type TreeRow } from '../src/stacks';
 import { parseKey, prKey } from '../src/protocol';
@@ -18,14 +19,14 @@ type Step = 'overview' | 'checks' | 'files';
 /** The comment box open in the diff: a new comment on a line (or range), a reply to a thread, or an edit. */
 interface Composer { path: string; line: number | null; side: 'RIGHT' | 'LEFT'; startLine?: number | null; replyTo?: string; resolve?: boolean; editId?: string; prefill?: string }
 type Thread = Extract<ConversationItem, { kind: 'thread' }>;
-interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; conv: 'all' | 'unresolved' | 'mine'; composer: Composer | null; finding: string | null; menu: 'checklist' | 'methods' | 'review' | null }
+interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; part: PartKey | null; cardOpen: boolean; conv: 'all' | 'unresolved' | 'mine'; composer: Composer | null; finding: string | null; menu: 'checklist' | 'methods' | 'review' | null }
 
 let host: HostState | null = null;
 /** True while the reviewer moves through the queue with j/k; a mouse move hides the cursor again. */
 let kbd = false;
 /** Text to put in Overview's comment box on the next render. */
 let prefill: string | null = null;
-let view: View = { filter: 'all', repo: '', reviewEvent: null, conv: 'all', composer: null, finding: null, showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
+let view: View = { filter: 'all', repo: '', reviewEvent: null, part: null, cardOpen: false, conv: 'all', composer: null, finding: null, showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
 // State saved by older versions named the files page "review".
 if (!['overview', 'checks', 'files'].includes(view.step)) view.step = 'files';
 // Older versions saved a bare PR number; keys are owner/name#number now.
@@ -53,6 +54,7 @@ const I = {
   globe: svg('M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18'),
   stack: svg('M6 4v10a3 3 0 0 0 3 3h9M6 9h6M15 14l3 3-3 3'),
   down: svg('M7 10l5 5 5-5', 'ico caretico'),
+  lock: svg('M7 11V8a5 5 0 0 1 10 0v3M6 11h12v9H6z'),
   doc: svg('M7 4h7l4 4v12H7zM14 4v4h4M10 12h5M10 16h5'),
   spark: svg('M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z'),
 };
@@ -248,7 +250,7 @@ function crumb(pr: PrDetail, h: HostState): string {
   const meta = `<span class="who">${esc(pr.author)}</span> wants to merge <span class="br head" title="${esc(pr.headRef)}">${esc(pr.headRef)}</span> into <span class="br">${esc(pr.baseRef)}</span>${parentLink(pr)}`;
   return `<div class="crumb prh"><button class="back" data-do="back" aria-label="Back to the review queue" title="Back to the review queue (Esc)">${I.back}</button>
     <div class="hd"><div class="r1">${host && multi(host) ? `<span class="rpo" title="Repository">${esc(pr.repo)}</span>` : ''}<button class="ttl" data-ext="${esc(pr.url)}" title="Open on GitHub"><b>${esc(pr.title)}</b> <span class="num">#${pr.number}</span>${I.ext}</button><span class="diffstat" title="Lines added and removed">+${pr.additions} <span class="d">−${pr.deletions}</span></span></div>
-      <div class="r2"><span class="meta">${meta}</span><div class="end">${pr.state === 'merged' ? `<span role="status">${statusPill(pr)}</span>` : `${summary(pr, h)}${decision(pr, h)}`}</div></div></div></div>${pr.state === 'merged' ? '' : blockBar(pr)}`;
+      <div class="r2"><span class="meta">${meta}</span><div class="end">${pr.state === 'merged' ? `<span role="status">${statusPill(pr)}</span>` : `${summary(pr, h)}${decision(pr, h)}`}</div></div></div></div>`;
 }
 
 /** "(#101)" after a stacked PR's base branch, opening the PR it's stacked on. */
@@ -272,17 +274,78 @@ function summary(pr: PrDetail, h: HostState): string {
 }
 
 /** GitHub's merge box, on demand: every condition, each with its fix. */
+/** The header's status popover: the same status card as Overview's, so there's one design in two places. */
 function checklist(pr: PrDetail, h: HostState): string {
-  const rows = mergeReadiness(pr, h.queue, h.user).map((it) => {
-    const act = it.action === 'updateBranch' ? `<button class="btn sm" data-do="updateBranch" ${h.busy ? 'disabled' : ''}>${h.busy === 'update' ? '<span class="spin sm"></span>' : ''}Update branch</button>`
-      : it.action === 'showChecks' && it.tone !== 'ok' ? '<button class="link" data-step="checks">Show checks</button>'
-      : it.action === 'openThreads' ? '<button class="link" data-do="threads">Show</button>'
-      : it.action === 'openPr' && it.pr ? `<button class="link" data-open="${esc(it.pr)}">Open #${parseKey(it.pr)?.number ?? ''}</button>`
-      : it.action === 'nextFinding' ? '<button class="link" data-do="nextFinding">Show</button>'
-      : it.action === 'fixConflicts' ? `<button class="btn sm fix" data-do="fixConflicts">${I.spark}Fix with agent</button>` : '';
-    return `<li class="ck ${it.tone}">${TONE_ICON[it.tone]}<span class="ckt">${esc(it.text)}</span>${act}</li>`;
+  return `<div class="pop cardpop" role="dialog" aria-label="Merge status">${statusCardView(pr, h, true)}</div>`;
+}
+
+/**
+ * The status card: what this PR needs and whose turn it is, Checks, Findings, Comments and Approvals as bars of
+ * one piece per item (click one for its details), and what blocks a merge with its fix. One line when it's ready.
+ */
+function statusCardView(pr: PrDetail, h: HostState, inPop = false): string {
+  const c = statusCard(pr, h.queue, h.user);
+  const compat = isDependabot(pr) && pr.compatibility != null ? (() => {
+    const tone = pr.compatibility >= 80 ? 'ok' : pr.compatibility >= 50 ? 'warn' : 'bad';
+    return `<span class="why ${tone}" title="Dependabot's compatibility score: in ${pr.compatibility}% of other repos, this update passed CI">Compatibility ${pr.compatibility}%</span>`;
+  })() : '';
+  if (c.ready && !view.cardOpen && !inPop) {
+    return `<div class="scard compact ok">${TONE_ICON.ok}<b>${esc(c.title)}</b><span class="sub">${esc(c.sub)}</span>${compat}<button class="link" data-do="cardOpen">Details${I.down}</button></div>`;
+  }
+  const parts = c.parts.map((p) => {
+    const segs = p.segments.length ? p.segments.map((t) => `<i class="${t}"></i>`).join('') : '<i class="none"></i>';
+    return `<button class="sc-p ${p.tone} ${view.part === p.key ? 'on' : ''}" data-part="${p.key}" aria-expanded="${view.part === p.key}">
+      <span class="sc-l"><b>${p.label}</b><span class="sc-s">${esc(p.summary)}</span>${p.locked ? `<span class="lock" title="Gates merging">${I.lock}</span>` : ''}</span><span class="bar">${segs}</span></button>`;
   }).join('');
-  return `<div class="pop" role="dialog" aria-label="Merge checklist"><span class="lbl">Merge checklist</span><ul>${rows}</ul></div>`;
+  const blockers = c.blockers.map((b) => `<div class="sc-b ${b.tone}">${TONE_ICON[b.tone]}<span>${esc(b.key === 'conflicts' ? conflictText(pr) : b.key === 'stack' && b.pr ? `Stacked on #${parseKey(b.pr)?.number}: it merges into ${pr.baseRef} until #${parseKey(b.pr)?.number} is in.` : b.text)}</span>${blockerAction(pr, h, b.key, b.pr)}</div>`).join('');
+  return `<div class="scard ${c.tone}"><div class="sc-h"><span class="sc-i ${c.tone}">${TONE_ICON[c.tone]}</span><span class="sc-t"><b>${esc(c.title)}</b>${c.sub ? `<span class="sub">${esc(c.sub)}</span>` : ''}</span>${compat}${c.ready && !inPop ? `<button class="link" data-do="cardOpen">Less</button>` : ''}</div>
+    <div class="sc-parts">${parts}</div>${view.part ? `<div class="sc-d">${partDetail(view.part, pr, h)}</div>` : ''}${blockers}</div>`;
+}
+
+/** Each part's details, under the card: the items behind the bar, with what you can do about them. */
+function partDetail(k: PartKey, pr: PrDetail, h: HostState): string {
+  if (k === 'checks') {
+    const groups: [string, CheckRun[]][] = [
+      ['failing', pr.checkRuns.filter(isFailing)], ['running', pr.checkRuns.filter((r) => r.status !== 'completed')],
+      ['skipped', pr.checkRuns.filter(isSkipped)], ['successful', pr.checkRuns.filter((r) => r.status === 'completed' && !isFailing(r) && !isSkipped(r))],
+    ];
+    const row = (r: CheckRun) => {
+      const fail = isFailing(r);
+      const when = fail ? `Failing after ${duration(r.seconds)}` : r.status !== 'completed' ? 'Running' : isSkipped(r) ? 'Skipped' : r.seconds != null ? `Successful in ${duration(r.seconds)}` : 'Successful';
+      const icon = fail ? `<span class="g bad">${I.x}</span>` : r.status !== 'completed' ? '<span class="g run"><span class="spin sm"></span></span>' : isSkipped(r) ? `<span class="g muted">${I.minus}</span>` : `<span class="g ok">${I.check}</span>`;
+      return `<li>${icon}<span class="nm">${esc(r.name)}</span><span class="tool">${esc(r.app)}</span><span class="sub">${esc(when.replace(/ after $| in $/, ''))}</span>${r.required ? '<span class="chip">Required</span>' : ''}
+        <span class="end">${fail ? `<button class="btn sm fix" data-fix="${esc(r.name)}">${I.spark}Fix with agent</button>` : ''}${r.url ? `<button class="link" data-ext="${esc(r.url)}">${fail ? 'Log' : 'Details'}${I.ext}</button>` : ''}</span></li>`;
+    };
+    return groups.filter(([, rs]) => rs.length).map(([name, rs]) => `<span class="lbl">${plural(rs.length, `${name} check`)}</span><ul>${rs.map(row).join('')}</ul>`).join('') || '<p class="none">This repo runs no checks on pull requests.</p>';
+  }
+  const all = threads(pr);
+  const gist = (t: Thread) => esc((t.comments[0]?.text ?? '').replace(/\s+/g, ' ').replace(/^\**P[0-3]\**\s*/, '').slice(0, 110));
+  const at = (t: Thread) => `${base(t.path)}${t.line ? `:${t.line}` : ''}`;
+  if (k === 'findings') {
+    const open = all.filter((t) => t.severity != null && !t.resolved).sort((a, b) => a.severity! - b.severity!);
+    const done = all.filter((t) => t.severity != null && t.resolved).length;
+    return (open.length ? `<ul>${open.map((t) => `<li class="link-row" data-goto="${esc(t.id)}">${sevChip(t.severity)}<span class="gist">${gist(t)}</span><span class="mono sub">${esc(at(t))}</span></li>`).join('')}</ul>` : '<p class="none">No open findings.</p>')
+      + (done ? `<p class="sub">${plural(done, 'finding')} resolved.</p>` : '');
+  }
+  if (k === 'comments') {
+    const open = all.filter((t) => t.severity == null && !t.resolved);
+    return open.length
+      ? `<ul>${open.map((t) => `<li class="link-row" data-goto="${esc(t.id)}"><b>${esc(who(t.comments[0]?.author ?? ''))}</b><span class="gist">${gist(t)}</span><span class="mono sub">${esc(at(t))}</span></li>`).join('')}</ul><button class="link" data-conv="unresolved">Show unresolved in the conversation</button>`
+      : '<p class="none">No unresolved comments.</p>';
+  }
+  const why = pr.reviewDecision === null ? 'This repo doesn’t require approvals; your approval is the review.'
+    : pr.reviewDecision === 'approved' ? 'GitHub has the approvals it needs.'
+    : pr.reviewDecision === 'changes_requested' ? 'Changes were requested; it needs a new approval after they’re made.'
+    : 'GitHub needs an approving review before this can merge.';
+  return `${reviewersList(pr)}<p class="sub">${why}</p>`;
+}
+
+/** A blocker's one fix: resolve the conflict (whoever should), bring the base in, or open the PR below. */
+function blockerAction(pr: PrDetail, h: HostState, key: string, prKeyBelow?: string): string {
+  if (key === 'conflicts') return conflictAction(pr);
+  if (key === 'base') return `<button class="btn sm" data-do="updateBranch" ${h.busy ? 'disabled' : ''}>${h.busy === 'update' ? '<span class="spin sm"></span>' : ''}Update branch</button>`;
+  if (key === 'stack' && prKeyBelow) return `<button class="btn sm" data-open="${esc(prKeyBelow)}">Open #${parseKey(prKeyBelow)?.number ?? ''}</button>`;
+  return '';
 }
 
 const VERB: Record<MergeMethod, string> = { squash: 'Squash and merge', merge: 'Create a merge commit', rebase: 'Rebase and merge' };
@@ -354,14 +417,17 @@ function mergeButton(pr: PrDetail, h: HostState): string {
   return `<div class="splitbtn">${main}<button class="${cls} caret" data-menu="methods" aria-haspopup="menu" aria-expanded="${open}" aria-label="Choose how to merge" ${h.busy ? 'disabled' : ''}>${I.down}</button>${menu}</div>`;
 }
 
-/** A conflict changes what the reviewer has to do, so it gets a bar above the page, not just a line in the checklist. */
-function blockBar(pr: PrDetail): string {
-  if (pr.mergeable !== false && pr.mergeState !== 'dirty') return '';
-  const head = `<b>This branch has conflicts with ${esc(pr.baseRef)}.</b>`;
-  // Who resolves depends on whose PR it is: you or your agent, Dependabot itself, or the teammate who wrote it.
-  if (isDependabot(pr)) return `<div class="blockbar" role="alert">${I.x}<span>${head} Dependabot can rebuild the branch on ${esc(pr.baseRef)}.</span><button class="btn sm" data-do="dependabotRebase" title="Posts “@dependabot rebase”">Ask Dependabot to rebase</button></div>`;
-  if (pr.mine || isAgent(pr.author)) return `<div class="blockbar" role="alert">${I.x}<span>${head} Resolve them before merging.</span><button class="btn sm fix" data-do="fixConflicts">${I.spark}Fix with agent</button></div>`;
-  return `<div class="blockbar" role="alert">${I.x}<span>${head} ${esc(pr.author)} resolves them; you can still review and approve the code now.</span><button class="btn sm" data-do="askResolve">Ask ${esc(pr.author)} to resolve</button></div>`;
+/** Who resolves a conflict depends on whose PR it is: you or your agent, Dependabot itself, or the teammate who wrote it. */
+function conflictText(pr: PrDetail): string {
+  if (isDependabot(pr)) return `Conflicts with ${pr.baseRef}. Dependabot can rebuild the branch.`;
+  if (pr.mine || isAgent(pr.author)) return `Conflicts with ${pr.baseRef}. Resolve them before merging.`;
+  return `Conflicts with ${pr.baseRef}. ${pr.author} resolves them; you can still review and approve the code now.`;
+}
+
+function conflictAction(pr: PrDetail): string {
+  if (isDependabot(pr)) return '<button class="btn sm" data-do="dependabotRebase" title="Posts “@dependabot rebase”">Ask Dependabot to rebase</button>';
+  if (pr.mine || isAgent(pr.author)) return `<button class="btn sm fix" data-do="fixConflicts">${I.spark}Fix with agent</button>`;
+  return `<button class="btn sm" data-do="askResolve">Ask ${esc(pr.author)} to resolve</button>`;
 }
 
 /** Coding agents and bots, whose conflicts your own agent can fix, as opposed to a teammate's branch. */
@@ -433,13 +499,25 @@ function details(pr: PrDetail): string {
   const state: Record<string, [string, string, string]> = {
     approved: ['ok', I.check, 'Approved'], changes_requested: ['bad', I.x, 'Requested changes'], commented: ['muted', I.com, 'Commented'], requested: ['run', I.clock, 'Asked to review'],
   };
+  return `<div class="details"><div class="dg"><span class="lbl">Reviewers</span>${reviewersList(pr)}</div>${detailsRest(pr)}</div>`;
+}
+
+function reviewersList(pr: PrDetail): string {
+  const me = host?.user ?? '';
+  const state: Record<string, [string, string, string]> = {
+    approved: ['ok', I.check, 'Approved'], changes_requested: ['bad', I.x, 'Requested changes'], commented: ['muted', I.com, 'Commented'], requested: ['run', I.clock, 'Asked to review'],
+  };
   const reviewers = pr.reviewers.length
     ? pr.reviewers.map((r) => { const [tone, icon, what] = state[r.state]!; return `<li class="${tone}" title="${esc(what)}">${icon}<span>${r.login === me ? 'you' : esc(who(r.login))}</span><span class="sub">${what}</span></li>`; }).join('')
     : '<li class="none">No reviewers</li>';
+  return `<ul class="revs">${reviewers}</ul>`;
+}
+
+function detailsRest(pr: PrDetail): string {
   const ms = pr.milestone ? `<div class="dg"><span class="lbl">Milestone</span><span>${esc(pr.milestone.title)}${pr.milestone.dueOn ? `<span class="sub"> · due ${new Date(pr.milestone.dueOn).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>` : ''}</span></div>` : '';
   const labels = pr.labels.length ? `<div class="dg"><span class="lbl">Labels</span><span class="labels">${pr.labels.map((l) => `<span class="chip">${esc(l)}</span>`).join('')}</span></div>` : '';
   const linear = pr.linear ? `<div class="dg"><span class="lbl">Linear</span>${pr.linear.url ? `<a class="lin" href="${esc(pr.linear.url)}">${esc(pr.linear.key)}</a>` : `<span class="mono">${esc(pr.linear.key)}</span>`}</div>` : '';
-  return `<div class="details"><div class="dg"><span class="lbl">Reviewers</span><ul class="revs">${reviewers}</ul></div>${labels}${ms}${linear}</div>`;
+  return `${labels}${ms}${linear}`;
 }
 
 function stepChecks(pr: PrDetail): string {
@@ -574,7 +652,7 @@ function stepOverview(pr: PrDetail): string {
   const n = conversationCounts(pr.conversation);
   const jump = n.fresh ? `<div class="ovmeta"><button class="link" data-do="jumpNew">Jump to ${plural(n.fresh, 'new comment')}${I.down}</button></div>` : '';
   return `<div class="ov">
-    ${jump}
+    ${pr.state === 'open' ? statusCardView(pr, host!) : ''}${jump}
     <section class="ovdesc" aria-label="Description">${description(pr)}</section>
     <section class="ovconv" aria-label="Conversation"><div class="convh"><h3 class="lbl">Conversation</h3>${convFilters(pr)}</div>
       ${conversation(filtered(pr))}</section>
@@ -600,7 +678,7 @@ function actionState(pr: PrDetail, a: CommentAction, i: number, h: HostState): s
   const reply = a.reviewer ? lastReplyFrom(pr.conversation, a.reviewer) : null;
   const replied = reply && (!asked || Date.parse(reply.createdAt) >= Date.parse(asked.createdAt));
   const btn = (label: string, cls: string) => `<button class="btn sm ${cls}" data-action="${i}" ${h.busy ? 'disabled' : ''} title="Posts “${esc(a.comment)}”">${esc(label)}</button>`;
-  if (replied) return `<span class="act"><span class="sub">${I.check}${esc(reply!.author.replace(/\[bot\]$/, ''))} replied ${ago(reply!.createdAt)} ago</span>${btn('Ask again', 'link-ish')}</span>`;
+  if (replied) return `<span class="act"><span class="sub">${I.check}${esc(who(reply!.author))} replied ${ago(reply!.createdAt)} ago</span>${btn('Ask again', 'link-ish')}</span>`;
   if (asked && a.reviewer) return `<span class="act"><span class="sub"><span class="spin sm"></span>Asked ${ago(asked.createdAt)} ago · waiting for a reply</span></span>`;
   return `<span class="act">${btn(a.label, 'fix')}</span>`;
 }
@@ -732,7 +810,7 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
       // First look, or new comments: start on Overview for the context. Otherwise pick up the files.
       const start: Step = !pr.seenBefore || conversationCounts(pr.conversation).fresh ? 'overview' : 'files';
       // A re-review opens the conversation on your own threads: what became of what you asked for.
-      view = { ...view, pr: prKey(pr), file: null, onlyNew: false, step: start, menu: null, composer: null, finding: null, conv: isReReview(pr) ? 'mine' : 'all' };
+      view = { ...view, pr: prKey(pr), file: null, onlyNew: false, step: start, menu: null, composer: null, finding: null, part: null, cardOpen: false, conv: isReReview(pr) ? 'mine' : 'all' };
       vscode.setState(view);
     }
     host = msg.state;
@@ -778,15 +856,16 @@ document.addEventListener('click', (e) => {
     if (/^https?:/.test(a.href)) send({ type: 'openExternal', url: a.href });
     return;
   }
-  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-conv],[data-layout],[data-cline],[data-reply],[data-edit],[data-del],[data-keep],[data-goto],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
+  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-conv],[data-part],[data-layout],[data-cline],[data-reply],[data-edit],[data-del],[data-keep],[data-goto],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
   if (!t || (t as HTMLButtonElement).disabled) return;
   // An action picked from a menu closes it.
-  if (view.menu && t.closest('.pop')) view.menu = null;
+  if (view.menu && t.closest('.pop') && !t.dataset.part && t.dataset.do !== 'cardOpen') view.menu = null;
   const d = t.dataset;
   if (d.open) send({ type: 'openPr', key: d.open });
   else if (d.filter) save({ filter: d.filter as Filter });
   else if (d.layout) save({ layout: d.layout as View['layout'], sel: 0 });
-  else if (d.conv) save({ conv: d.conv as View['conv'] });
+  else if (d.conv) save({ conv: d.conv as View['conv'], step: 'overview' });
+  else if (d.part) save({ part: view.part === d.part ? null : (d.part as PartKey) });
   else if (d.step) save({ step: d.step as Step });
   else if (d.fix) send({ type: 'fixWithAgent', check: d.fix });
   else if (d.thread) send({ type: 'fixThread', id: d.thread });
@@ -818,6 +897,7 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'composeCancel') save({ composer: null });
   else if (d.do === 'composeAdd' || d.do === 'composeNow' || d.do === 'composeSave') finishComposer(d.do);
   else if (d.do === 'nextFinding') stepFinding(1);
+  else if (d.do === 'cardOpen') save({ cardOpen: !view.cardOpen, part: null });
   else if (d.do === 'reviewWithAgent') send({ type: 'reviewWithAgent' });
   else if (d.do === 'dependabotRebase') send({ type: 'comment', body: '@dependabot rebase' });
   else if (d.do === 'askResolve' && host?.pr) {

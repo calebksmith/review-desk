@@ -133,9 +133,11 @@ export class GitHubSource implements DataSource {
         lines: f.patch ? parsePatch(f.patch) : null,
       }));
 
-    const [runs, statuses] = await Promise.all([
+    const [runs, statuses, required, compatibility] = await Promise.all([
       this.octokit.paginate(this.octokit.checks.listForRef, { owner, repo: name, ref: raw.headRefOid, per_page: 100 }),
       this.octokit.repos.getCombinedStatusForRef({ owner, repo: name, ref: raw.headRefOid, per_page: 100 }),
+      this.requiredChecks(owner, name, number),
+      /dependabot/i.test(raw.author?.login ?? '') ? compatibilityScore(raw.body) : Promise.resolve(null),
     ]);
     const checkRuns = await Promise.all(runs.map(async (r): Promise<CheckRun> => {
       const run: CheckRun = {
@@ -147,6 +149,8 @@ export class GitHubSource implements DataSource {
         summary: r.output?.summary ?? null,
         failedStep: null,
         excerpt: null,
+        required: required.has(r.name),
+        seconds: r.started_at && r.completed_at ? Math.round((Date.parse(r.completed_at) - Date.parse(r.started_at)) / 1000) : null,
       };
       // A failed GitHub Actions job says only "exit code 1". Name the step and show its error lines.
       return r.app?.slug === 'github-actions' && isFailure(run.conclusion) ? { ...run, ...(await this.jobFailure(repo, r.id)) } : run;
@@ -162,6 +166,7 @@ export class GitHubSource implements DataSource {
         summary: st.description ?? null,
         failedStep: null,
         excerpt: null,
+        required: required.has(st.context),
       });
     }
 
@@ -190,10 +195,32 @@ export class GitHubSource implements DataSource {
       bodyHtml: raw.bodyHTML,
       conversation: toConversation(raw.comments.nodes, raw.reviews.nodes, raw.threads.nodes),
       mergeMethods: mergeMethods(data.repository),
+      compatibility,
       files,
       checkRuns,
       sinceLastLook,
     };
+  }
+
+  /**
+   * Names of the checks branch protection requires. Asked separately so a token that can't read it only loses
+   * the "Required" marks (checks then count as optional), not the whole PR.
+   */
+  private async requiredChecks(owner: string, name: string, number: number): Promise<Set<string>> {
+    try {
+      const d = await this.octokit.graphql<{ repository: { pullRequest: { commits: { nodes: { commit: { statusCheckRollup: { contexts: { nodes: { name?: string; context?: string; isRequired?: boolean }[] } } | null } }[] } } } }>(
+        `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+          commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+            ... on CheckRun { name isRequired(pullRequestNumber: $number) }
+            ... on StatusContext { context isRequired(pullRequestNumber: $number) }
+          } } } } } } } } }`,
+        { owner, name, number },
+      );
+      const nodes = d.repository.pullRequest.commits.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? [];
+      return new Set(nodes.filter((n) => n.isRequired).map((n) => (n.name ?? n.context)!).filter(Boolean));
+    } catch {
+      return new Set();
+    }
   }
 
   /** The failed step of an Actions job and the error lines from its log. Logs can expire; then it's just the step. */
@@ -254,6 +281,27 @@ export class GitHubSource implements DataSource {
   async updateBranch(pr: PrDetail): Promise<void> {
     await this.octokit.pulls.updateBranch({ ...at(pr.repo), pull_number: pr.number, expected_head_sha: pr.headSha });
   }
+}
+
+/**
+ * Dependabot's compatibility score, from the badge its description links to (the number is only in the badge
+ * image, a public GitHub endpoint). Null when there's no badge or it can't be read quickly.
+ */
+export async function compatibilityScore(body: string): Promise<number | null> {
+  const url = /https:\/\/dependabot-badges\.githubapp\.com\/badges\/compatibility_score\?[^)\s"']+/.exec(body)?.[0];
+  if (!url) return null;
+  try {
+    const res = await fetch(url.replace(/&amp;/g, '&'), { signal: AbortSignal.timeout(3000) });
+    return parseScore(await res.text());
+  } catch {
+    return null;
+  }
+}
+
+/** The percentage in a compatibility badge's SVG; null for "unknown". */
+export function parseScore(svg: string): number | null {
+  const m = />\s*(\d{1,3})%\s*</.exec(svg);
+  return m ? Number(m[1]) : null;
 }
 
 const isFailure = (c: CheckConclusion | null) => c === 'failure' || c === 'timed_out' || c === 'cancelled' || c === 'action_required' || c === 'stale';

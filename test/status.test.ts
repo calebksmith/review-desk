@@ -183,3 +183,18 @@ describe('re-review', () => {
     expect(items.find((i) => i.key === 'findings')).toMatchObject({ tone: 'warn', text: '2 P1 findings open', action: 'nextFinding' });
   });
 });
+
+describe('required checks', () => {
+  const run = (name: string, conclusion: 'success' | 'failure', required = false) => ({ name, app: '', status: 'completed' as const, conclusion, url: null, summary: null, failedStep: null, excerpt: null, required });
+  const failing = { passed: 1, failed: 1, pending: 0, total: 2 };
+  it('blocks merging on a failing required check, with no "anyway"', () => {
+    const pr = detail({ checks: failing, checkRuns: [run('Tests', 'failure', true), run('Lint', 'success', true)] });
+    expect(mergeBlocker(pr)).toBe('Tests is a required check and is failing.');
+    expect(mergeWarning(pr)).toBeNull();
+  });
+  it('only warns about optional checks', () => {
+    const pr = detail({ checks: failing, checkRuns: [run('lighthouse', 'failure'), run('Tests', 'success', true)] });
+    expect(mergeBlocker(pr)).toBeNull();
+    expect(mergeWarning(pr)).toBe('lighthouse is failing');
+  });
+});

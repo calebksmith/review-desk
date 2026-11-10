@@ -12,8 +12,8 @@ export const file = (path: string, patch: string, viewed: FileDiff['viewed'] = '
     deletions: lines.filter((l) => l.kind === 'del').length };
 };
 
-export const pass = (name: string, app: string, summary: string | null = null): CheckRun => ({ name, app, status: 'completed', conclusion: 'success', url: 'https://github.com', summary, failedStep: null, excerpt: null });
-export const fail = (name: string, app: string, failedStep: string, excerpt: string[]): CheckRun => ({ name, app, status: 'completed', conclusion: 'failure', url: 'https://github.com', summary: null, failedStep, excerpt });
+export const pass = (name: string, app: string, summary: string | null = null, required = false, seconds: number | null = null): CheckRun => ({ name, app, status: 'completed', conclusion: 'success', url: 'https://github.com', summary, failedStep: null, excerpt: null, required, seconds });
+export const fail = (name: string, app: string, failedStep: string, excerpt: string[], required = false, seconds: number | null = null): CheckRun => ({ name, app, status: 'completed', conclusion: 'failure', url: 'https://github.com', summary: null, failedStep, excerpt, required, seconds });
 export const running = (name: string, app: string, summary: string | null = null): CheckRun => ({ name, app, status: 'in_progress', conclusion: null, url: 'https://github.com', summary, failedStep: null, excerpt: null });
 export const say = (author: string, min: number, html: string): Comment => ({ author, createdAt: ago(min), html, text: html.replace(/<[^>]+>/g, ''), url: 'https://github.com', isNew: false });
 
@@ -33,6 +33,8 @@ export interface SamplePr {
   headRef: string;
   /** The branch it merges into; main unless it's stacked. */
   base?: string;
+  /** Dependabot's compatibility score, for Dependabot PRs. */
+  compatibility?: number | null;
   /** Other people's reviews and review requests. The viewer's own review is summary.myReview. */
   reviewers?: Reviewer[];
 }

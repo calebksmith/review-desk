@@ -35,6 +35,8 @@ To install it as a normal extension, run `npm run package` and install the `.vsi
 
 ## Reviewing
 
+- **Status card** at the top of Overview, and in the header's status popover: what the PR needs and whose turn it is, then Checks, Findings, Comments and Approvals as bars of one piece per item (a lock marks parts that gate merging). Click one for its details: checks grouped failing, running, skipped and passed with Required marks, durations and Fix with agent; findings by severity; unresolved comments; reviewers. Conflicts, an out-of-date branch or a stacked PR below show underneath with their fix. A ready PR shows one line. Dependabot PRs show their compatibility score.
+- **Required checks**: a failing required check blocks merging; failing optional checks allow Merge anyway.
 - **Finish your review** from the header: Approve is one click; its ▾ opens a summary and GitHub's three verdicts (Comment, Approve, Request changes). Comments you've held back go with it ("Submit review · 3"). Approving with open P0/P1 findings asks first.
 - **Comment on lines** in Files changed: hover a line for **+** (shift-click another for a range), then **Add to review** or **Comment now**. Held-back comments show at their lines as **Pending**.
 - **Findings** (threads marked P0–P3, like Codex's) show at their lines with **Fix it**, **Ask the author** (a held-back reply), **Not an issue** (a held-back reply that resolves the thread when sent) and **Reply**. **]** and **[** step through open findings, most severe first.

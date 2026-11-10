@@ -269,9 +269,6 @@ kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: ce
 .menu .mk { width: 16px; flex-shrink: 0; color: var(--accent-ink) }
 .menu b { display: block; font-weight: 600 }
 .menu .sub { display: block; font-size: 12px; color: var(--fg-3) }
-.blockbar { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 8px 20px; background: var(--bad-soft); border-bottom: 1px solid var(--line) }
-.blockbar > .ico { color: var(--bad) }
-.blockbar .btn { margin-left: auto }
 @media (max-width: 720px) { .sumtext { display: none } }
 
 .ov { padding: 16px 20px 24px; display: flex; flex-direction: column; gap: 16px; min-height: 100% }
@@ -509,3 +506,57 @@ span.lin { color: var(--fg-3) }
 .revs li.none, .dg .sub { color: var(--fg-3) }
 .labels { display: flex; gap: 4px; flex-wrap: wrap }
 @media (max-width: 760px) { .details { display: none } }
+
+/* Status card: what the PR needs, whose turn it is, and a bar per part */
+.scard { border: 1px solid var(--line); border-radius: 8px; background: var(--win); overflow: hidden }
+.scard.compact { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 12px; color: var(--fg-2) }
+.scard.compact > .ico { width: 15px; height: 15px; color: var(--ok) }
+.scard.compact b { color: var(--fg) }
+.scard.compact .sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.scard.compact .link { margin-left: auto; flex-shrink: 0 }
+.sc-h { display: flex; align-items: center; gap: 10px; padding: 10px 12px }
+.sc-i { width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; background: var(--chrome); color: var(--fg-2) }
+.sc-i .ico { width: 15px; height: 15px }
+.sc-i.ok { background: var(--ok-soft); color: var(--ok) } .sc-i.bad { background: var(--bad-soft); color: var(--bad) } .sc-i.warn { background: var(--warn-soft); color: var(--warn) } .sc-i.run { background: var(--accent-soft); color: var(--accent-ink) }
+.sc-t { display: flex; flex-direction: column; min-width: 0; flex: 1 }
+.sc-t b { font-size: 14px }
+.sc-t .sub { font-size: 12px; color: var(--fg-2) }
+.sc-parts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--line-soft) }
+.sc-p { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; background: none; border: 0; border-left: 1px solid var(--line-soft); text-align: left; cursor: pointer; min-width: 0 }
+.sc-p:first-child { border-left: 0 }
+.sc-p:hover { background: var(--chrome) }
+.sc-p.on { background: var(--chrome); box-shadow: inset 0 -2px 0 var(--focus) }
+.sc-l { display: flex; align-items: baseline; gap: 6px; font-size: 12px; min-width: 0 }
+.sc-l b { font-weight: 600 }
+.sc-s { color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0 }
+.sc-p.bad .sc-s { color: var(--bad); font-weight: 600 } .sc-p.warn .sc-s { color: var(--warn); font-weight: 600 }
+.sc-l .lock { margin-left: auto; color: var(--fg-3); display: inline-flex } .sc-l .lock .ico { width: 12px; height: 12px }
+.bar { display: flex; gap: 2px; height: 6px }
+.bar i { flex: 1; border-radius: 2px; background: color-mix(in srgb, var(--fg) 14%, transparent) }
+.bar i.ok { background: var(--ok) } .bar i.bad { background: var(--bad) } .bar i.warn { background: var(--warn) } .bar i.run { background: var(--accent) }
+.bar i.none { background: repeating-linear-gradient(-45deg, color-mix(in srgb, var(--fg) 12%, transparent) 0 3px, transparent 3px 6px) }
+.sc-d { border-top: 1px solid var(--line-soft); padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; max-height: 320px; overflow: auto }
+.sc-d .lbl { margin-top: 6px }
+.sc-d ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column }
+.sc-d li { display: flex; align-items: center; gap: 8px; min-height: 30px; border-top: 1px solid var(--line-soft); min-width: 0 }
+.sc-d li:first-child { border-top: 0 }
+.sc-d li .g { display: inline-flex } .sc-d li .g .ico { width: 14px; height: 14px }
+.sc-d li .g.ok { color: var(--ok) } .sc-d li .g.bad { color: var(--bad) } .sc-d li .g.muted { color: var(--fg-3) }
+.sc-d li .nm { font-weight: 600; white-space: nowrap }
+.sc-d li .tool, .sc-d .sub { color: var(--fg-3) }
+.sc-d li .end { margin-left: auto; display: inline-flex; gap: 8px; align-items: center; flex-shrink: 0 }
+.sc-d li .gist { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 }
+.sc-d .link-row { cursor: pointer; padding: 0 4px; border-radius: 4px }
+.sc-d .link-row:hover { background: var(--chrome) }
+.sc-d .revs li { min-height: 24px; border: 0 }
+.sc-d p { margin: 4px 0 0 }
+.sc-b { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line-soft); font-size: 12px; font-weight: 600 }
+.sc-b > .ico { width: 14px; height: 14px; flex-shrink: 0 }
+.sc-b.bad { background: var(--bad-soft); color: var(--bad) } .sc-b.warn { background: var(--warn-soft); color: var(--warn) }
+.sc-b > span { flex: 1; min-width: 0 }
+.sc-b .btn { flex-shrink: 0; font-weight: 500 }
+.ov > .scard { max-width: 90ch; flex-shrink: 0 }
+.ov > * { flex-shrink: 0 }
+.pop.cardpop { width: 560px; padding: 0; border-radius: 8px; overflow: hidden }
+.pop.cardpop .scard { border: 0; border-radius: 0 }
+@media (max-width: 760px) { .sc-parts { grid-template-columns: repeat(2, minmax(0, 1fr)) } .sc-p:nth-child(3) { border-left: 0 } .sc-p:nth-child(n+3) { border-top: 1px solid var(--line-soft) } .pop.cardpop { width: min(560px, calc(100vw - 32px)) } }
