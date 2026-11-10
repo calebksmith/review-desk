@@ -41,6 +41,12 @@ export class Controller {
    */
   private opened: { key: string; sinceSha: string | null; kind: 'review' | 'look'; seenAt: string | null } | null = null;
 
+  /**
+   * Counts PR loads, and the moves that outdate one still in flight: another load, leaving the PR, an approval's
+   * fresher data. A load that finds the count has moved on is dropped.
+   */
+  private loads = 0;
+
   /** PRs closed from here this session (by key); GitHub can list them as open for a few seconds after. */
   private readonly closed = new Set<string>();
 
@@ -130,6 +136,7 @@ export class Controller {
 
   private async loadPr(at: { repo: string; number: number }, quiet = false): Promise<void> {
     if (!quiet) this.set({ view: 'pr', loading: true, error: null, notice: null, pr: this.state.pr && prKey(this.state.pr) === prKey(at) ? this.state.pr : null });
+    const load = ++this.loads;
     // Keyed by repo and number, so "new since you looked" survives switching between repos and the combined view.
     const key = `lastSeen:${prKey(at)}`;
     const atKey = `lastSeenAt:${prKey(at)}`;
@@ -144,8 +151,9 @@ export class Controller {
     }
     const [pr, me] = await Promise.all([this.source.getPr(at.repo, at.number, since.sinceSha), this.source.viewer()]);
     if (pr.sinceLastLook) pr.sinceLastLook.kind = since.kind;
-    // A quiet refresh landing after you've moved on doesn't pull you back, or mark anything seen.
-    if (quiet && (this.state.view !== 'pr' || !this.state.pr || prKey(this.state.pr) !== prKey(at))) return;
+    // Overtaken while GitHub answered (you opened another PR, left this one, or approved it): this answer is the
+    // older one, so it doesn't replace what's on screen, pull you back, or mark anything seen.
+    if (load !== this.loads) return;
     // Seen means opened: the next push or comment after this is "new since you looked". Refreshing isn't looking.
     if (!kept) {
       await this.store.set(key, pr.headSha);
@@ -186,7 +194,11 @@ export class Controller {
     }
     // Re-read it: on a team, GitHub's review decision may now be approved, or still need someone else.
     const fresh = await this.source.getPr(pr.repo, pr.number, null);
-    this.set({ pr: { ...pr, ...fresh, myReview: 'approved', conversation: pr.conversation, seenBefore: pr.seenBefore, sinceLastLook: pr.sinceLastLook } });
+    // Only if you're still on it. This is newer than any load of it still in flight, so that one is dropped.
+    if (this.state.pr && prKey(this.state.pr) === prKey(pr)) {
+      this.loads++;
+      this.set({ loading: false, pr: { ...pr, ...fresh, myReview: 'approved', conversation: pr.conversation, seenBefore: pr.seenBefore, sinceLastLook: pr.sinceLastLook } });
+    }
     this.host.post({ type: 'toast', text: fresh.reviewDecision === 'review_required' ? `Approved ${this.ref(pr)}. It needs another approval to merge.` : `Approved ${this.ref(pr)}` });
   }
 
@@ -425,6 +437,8 @@ export class Controller {
   }
 
   private set(patch: Partial<HostState>): void {
+    // Leaving the PR for the queue outdates a load of it still in flight.
+    if (patch.view === 'queue') this.loads++;
     this.state = { ...this.state, ...patch };
     this.push();
   }

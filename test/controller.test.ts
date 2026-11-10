@@ -136,6 +136,45 @@ describe('Controller', () => {
     expect(store.has('lastSeenAt:calebksmith/portfolio#52')).toBe(false);
   });
 
+  it('shows the PR you opened last, even when an earlier one answers later', async () => {
+    const { c, store } = setup();
+    await c.handle({ type: 'ready' });
+    const src = c['source'];
+    const real = src.getPr.bind(src);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    src.getPr = async (repo, n, since) => { if (n === 52) await held; return real(repo, n, since); };
+    const slow = c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#55' });
+    release();
+    await slow;
+    expect(c.snapshot.pr?.number).toBe(55);
+    expect(c.snapshot.loading).toBe(false);
+    expect(store.get('lastSeen:calebksmith/portfolio#52')).toBeUndefined();
+  });
+
+  it('keeps your approval on screen when a background refresh that started before it answers after', async () => {
+    const { c } = setup();
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#57' });
+    const src = c['source'];
+    const real = src.getPr.bind(src);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let hold = true;
+    src.getPr = async (repo, n, since) => {
+      if (!hold) return real(repo, n, since);
+      hold = false;
+      const old = structuredClone(await real(repo, n, since));
+      await held;
+      return old;
+    };
+    const background = c.autoRefresh('pr');
+    await c.handle({ type: 'approve' });
+    release();
+    await background;
+    expect(c.snapshot.pr?.myReview).toBe('approved');
+  });
+
   it('marks nothing new the first time a PR is opened', async () => {
     const { c, last } = setup();
     await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#55' });
