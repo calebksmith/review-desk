@@ -46,6 +46,11 @@ describe('sending reviews to GitHub', () => {
     expect(yours.calls).not.toContain('deletePullRequestReview');
   });
 
+  it('says which comments already went into your review when it fails partway, so a retry doesn’t post them twice', async () => {
+    const { src } = fake('me', 'addPullRequestReviewThreadReply');
+    await expect(src.submitReview(pr, 'COMMENT', '', [line, reply])).rejects.toMatchObject({ added: ['a'] });
+  });
+
   it('posts a single comment as its own review, and refuses while a review is in progress', async () => {
     const free = fake(null);
     await free.src.commentNow(pr, reply);

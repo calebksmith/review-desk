@@ -211,7 +211,9 @@ export interface HostState {
 
 export type ToWebview =
   | { type: 'state'; state: HostState }
-  | { type: 'toast'; text: string };
+  | { type: 'toast'; text: string }
+  /** A comment or review that failed to send, handed back so the panel can put the text back in its box. */
+  | { type: 'unsent'; msg: Extract<FromWebview, { type: 'comment' | 'submitReview' | 'commentNow' }> };
 
 export type FromWebview =
   | { type: 'ready' }

@@ -297,6 +297,31 @@ describe('Controller', () => {
       expect(c.snapshot.drafts.map((d) => d.id)).toEqual(['agent1']);
     });
 
+    it('puts a comment on a line the diff doesn’t have in the summary, since GitHub refuses it as a line comment', async () => {
+      const { c } = team();
+      await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
+      const got: { body: string; drafts: number }[] = [];
+      c['source'].submitReview = async (_pr, _event, body, drafts) => { got.push({ body, drafts: drafts.length }); return { unresolved: 0 }; };
+      await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 1, side: 'RIGHT', body: 'Pin to 22.11' } });
+      await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 400, side: 'RIGHT', body: 'Far away' } });
+      await c.handle({ type: 'submitReview', event: 'COMMENT', body: 'Two things.' });
+      expect(got).toEqual([{ body: 'Two things.\n\n- `.nvmrc:400`: Far away', drafts: 1 }]);
+    });
+
+    it('when sending fails, hands the summary back and drops only the comments already in your review on GitHub', async () => {
+      const { c, sent } = team();
+      await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
+      await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 1, side: 'RIGHT', body: 'One' } });
+      await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 1, side: 'RIGHT', body: 'Two' } });
+      const [one] = c.snapshot.drafts;
+      c['source'].submitReview = async () => { throw Object.assign(new Error('GitHub said no'), { added: [one!.id] }); };
+      const msg = { type: 'submitReview', event: 'COMMENT', body: 'My summary' } as const;
+      await c.handle(msg);
+      expect(c.snapshot.error).toBe('GitHub said no');
+      expect(c.snapshot.drafts.map((d) => d.body)).toEqual(['Two']);
+      expect(sent.at(-1)).toEqual({ type: 'unsent', msg });
+    });
+
     it('compares a re-review with the commit you reviewed', async () => {
       const { c } = team();
       await c.handle({ type: 'ready' });

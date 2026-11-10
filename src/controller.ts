@@ -3,6 +3,7 @@ import { conflictPrompt, fixPrompt, threadPrompt, type AgentRoute } from './agen
 import { parseFindings, reviewPrompt } from './agentReview';
 import { closeOptions, type CloseOption } from './dependabot';
 import { markNew } from './conversation';
+import { inDiff } from './patch';
 import { newlyYourTurn, waiting, whatArrived } from './refresh';
 import { DEFAULT_BLOCKER_LABELS } from './signals';
 import type { DataSource, Store } from './source';
@@ -80,6 +81,8 @@ export class Controller {
       }
     } catch (err) {
       this.set({ loading: false, busy: null, error: message(err) });
+      // The panel cleared the box when it sent; what was typed goes back so it isn't lost.
+      if (msg.type === 'comment' || msg.type === 'submitReview' || msg.type === 'commentNow') this.host.post({ type: 'unsent', msg });
     }
   }
 
@@ -260,11 +263,20 @@ export class Controller {
     this.set({ busy: 'review' });
     let sent = { unresolved: 0 };
     try {
-      // Findings without a line can't sit in the diff on GitHub either: they go in the summary instead.
-      const loose = send.filter((d) => !d.replyTo && d.line == null);
-      const summary = [body.trim(), ...loose.map((d) => `- \`${d.path}\`: ${d.body}`)].filter(Boolean).join('\n\n');
+      // GitHub refuses a comment on a line the diff doesn't have (an agent's finding can be anywhere in the file),
+      // and one without a line: those go in the summary instead.
+      const loose = send.filter((d) => !d.replyTo && !inDiff(pr.files.find((f) => f.path === d.path)?.lines ?? [], d.side, d.line));
+      const summary = [body.trim(), ...loose.map((d) => `- \`${d.path}${d.line != null ? `:${d.line}` : ''}\`: ${d.body}`)].filter(Boolean).join('\n\n');
       sent = await this.source.submitReview(pr, event, summary, send.filter((d) => !loose.includes(d)));
       this.source.invalidate?.();
+    } catch (err) {
+      // Comments that reached your review on GitHub before it failed stay there: sending them again would post them twice.
+      const added = (err as { added?: string[] } | null)?.added ?? [];
+      if (added.length) {
+        await this.saveDrafts(this.state.drafts.filter((d) => !added.includes(d.id)));
+        this.host.post({ type: 'toast', text: `${plural(added.length, 'comment')} ${added.length === 1 ? 'is' : 'are'} already in your review on GitHub and won’t be sent twice.` });
+      }
+      throw err;
     } finally {
       this.set({ busy: null });
     }

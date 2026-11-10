@@ -2,6 +2,7 @@ import DOMPurify from 'dompurify';
 import { duration, isFailing, isSkipped, statusCard, type PartKey } from '../src/card';
 import { conversationCounts, startedAt } from '../src/conversation';
 import { mergeTree, parentOf, stackOf, stacks, type StackRow, type TreeRow } from '../src/stacks';
+import { inDiff } from '../src/patch';
 import { parseKey, prKey } from '../src/protocol';
 import type { CheckRun, Comment, CommentAction, ConversationItem, Draft, ReviewEvent, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
 import { reasons } from '../src/signals';
@@ -650,9 +651,8 @@ function renderDiff(path: string, lines: DiffLine[], pr: PrDetail, full: DiffLin
   }).join('');
   // Threads on lines this diff doesn't show (outdated, or outside the changed hunks), and findings without a
   // line, still need a home.
-  const inFull = (side: 'RIGHT' | 'LEFT', line: number | null) => line != null && full.some((l) => l.kind !== 'gap' && (side === 'LEFT' ? l.oldNo : l.newNo) === line && (side === 'LEFT') === (l.kind === 'del'));
-  const elsewhere = here.filter((t) => !inFull('RIGHT', t.line));
-  const loose = drafts.filter((d) => !inFull(d.side, d.line));
+  const elsewhere = here.filter((t) => !inDiff(full, 'RIGHT', t.line));
+  const loose = drafts.filter((d) => !inDiff(full, d.side, d.line));
   return (elsewhere.length || loose.length ? `<div class="outside"><span class="lbl">Comments on lines not shown here</span>${elsewhere.map((t) => threadCard(t, pr)).join('')}${loose.map(draftCard).join('')}</div>` : '') + out;
 }
 
@@ -942,6 +942,19 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
     clearTimeout((t as unknown as { timer?: number }).timer);
     // Long enough to read: about a second per 20 characters, between 2.5 and 8 seconds.
     (t as unknown as { timer?: number }).timer = window.setTimeout(() => t.classList.remove('show'), Math.min(8000, Math.max(2500, msg.text.length * 50)));
+  } else if (msg.type === 'unsent') {
+    // Sending failed after the box was cleared: put the text back where it was typed.
+    const m = msg.msg;
+    if (m.type === 'comment') { prefill = m.body; render(); }
+    else if (m.type === 'submitReview') {
+      save({ menu: 'review', reviewEvent: m.event });
+      const box = document.getElementById('rbody') as HTMLTextAreaElement | null;
+      if (box) box.value = m.body;
+    } else {
+      const { body, ...at } = m.draft;
+      save({ step: 'files', file: at.path, near: false, composer: { ...at, id: composerId(), prefill: body } });
+      document.getElementById('lbox')?.focus();
+    }
   }
 });
 

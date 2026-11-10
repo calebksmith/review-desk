@@ -285,12 +285,15 @@ export class GitHubSource implements DataSource {
   async submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<Sent> {
     const existing = await this.pendingReviewId(pr);
     const id = existing ?? (await this.startReview(pr));
+    const added: string[] = [];
     try {
-      await this.addToReview(id, pr, drafts);
+      await this.addToReview(id, pr, drafts, added);
       await this.octokit.graphql('mutation($id: ID!, $event: PullRequestReviewEvent!, $body: String) { submitPullRequestReview(input: { pullRequestReviewId: $id, event: $event, body: $body }) { clientMutationId } }', { id, event, body: body || null });
     } catch (err) {
       // A review this call started and couldn't finish would block the next one; one you started stays yours.
       if (!existing) await this.discardReview(id);
+      // In a review of yours, the comments added so far stay in it: name them, so a retry doesn't post them twice.
+      else if (err instanceof Error) Object.assign(err, { added });
       throw err;
     }
     return this.resolveAll(drafts);
@@ -339,7 +342,7 @@ export class GitHubSource implements DataSource {
   }
 
   /** New comments on lines become threads in the review; replies join their threads, as part of the same review. */
-  private async addToReview(id: string, pr: PrDetail, drafts: Draft[]): Promise<void> {
+  private async addToReview(id: string, pr: PrDetail, drafts: Draft[], added: string[] = []): Promise<void> {
     for (const d of drafts) {
       if (d.replyTo) {
         await this.octokit.graphql('mutation($id: ID!, $thread: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewId: $id, pullRequestReviewThreadId: $thread, body: $body }) { clientMutationId } }', { id, thread: d.replyTo, body: d.body });
@@ -348,6 +351,7 @@ export class GitHubSource implements DataSource {
         await this.octokit.graphql('mutation($id: ID!, $path: String!, $line: Int!, $side: DiffSide!, $startLine: Int, $startSide: DiffSide, $body: String!) { addPullRequestReviewThread(input: { pullRequestReviewId: $id, path: $path, line: $line, side: $side, startLine: $startLine, startSide: $startSide, body: $body }) { clientMutationId } }',
           { id, path: d.path, line: d.line, side: d.side, body: d.body, startLine: null, startSide: null, ...range });
       }
+      added.push(d.id);
     }
   }
 
