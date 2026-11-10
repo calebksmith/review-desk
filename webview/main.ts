@@ -2,8 +2,8 @@ import DOMPurify from 'dompurify';
 import { conversationCounts, startedAt } from '../src/conversation';
 import { mergeTree, parentOf, stackOf, stacks, type StackRow, type TreeRow } from '../src/stacks';
 import { parseKey, prKey } from '../src/protocol';
-import type { CheckRun, Comment, CommentAction, ConversationItem, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
-import { bulkMergeable, byPriority, isDependabot, priority, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
+import type { CheckRun, Comment, CommentAction, ConversationItem, ReviewEvent, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
+import { bulkMergeable, byPriority, isDependabot, isReReview, openFindings, priority, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
 
 // The webview only renders. Everything it knows comes from the host's state messages;
 // what it remembers on its own is view state (filter, step, open file).
@@ -14,12 +14,12 @@ const vscode = acquireVsCodeApi();
 
 type Filter = 'all' | Bucket;
 type Step = 'overview' | 'checks' | 'files';
-interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; menu: 'checklist' | 'methods' | null }
+interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; menu: 'checklist' | 'methods' | 'review' | null }
 
 let host: HostState | null = null;
 /** True while the reviewer moves through the queue with j/k; a mouse move hides the cursor again. */
 let kbd = false;
-let view: View = { filter: 'all', repo: '', showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
+let view: View = { filter: 'all', repo: '', reviewEvent: null, showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
 // State saved by older versions named the files page "review".
 if (!['overview', 'checks', 'files'].includes(view.step)) view.step = 'files';
 // Older versions saved a bare PR number; keys are owner/name#number now.
@@ -271,9 +271,53 @@ const METHOD_NOTE: Record<MergeMethod, string> = {
 };
 
 /** The one button that moves the PR forward: Approve, then GitHub's "Squash and merge ▾". */
+/**
+ * GitHub's "Review changes": one click approves; ▾ opens the review with a summary and Comment, Approve or
+ * Request changes. With comments held back, the button sends them: "Submit review · 3".
+ */
+function reviewButton(pr: PrDetail, h: HostState, primary: boolean): string {
+  const held = h.drafts.filter((d) => d.from === 'you').length;
+  const open = view.menu === 'review';
+  const cls = `btn ${primary ? 'pri' : ''}`;
+  const main = held || !primary
+    ? `<button class="${cls} main" data-menu="review" ${h.busy ? 'disabled' : ''}>${h.busy === 'review' ? '<span class="spin"></span>' : I.com}${held ? `Submit review · ${held}` : 'Review'}</button>`
+    : `<button class="${cls} main" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
+  return `<div class="splitbtn">${main}<button class="${cls} caret" data-menu="review" aria-haspopup="dialog" aria-expanded="${open}" aria-label="Finish your review: comment, approve or request changes" ${h.busy ? 'disabled' : ''}>${I.down}</button>${open ? reviewPanel(pr, h) : ''}</div>`;
+}
+
+const EVENTS: { event: ReviewEvent; label: string; note: string }[] = [
+  { event: 'COMMENT', label: 'Comment', note: 'Feedback without approving or blocking.' },
+  { event: 'APPROVE', label: 'Approve', note: 'Good to merge.' },
+  { event: 'REQUEST_CHANGES', label: 'Request changes', note: 'Must be addressed before it merges.' },
+];
+
+function reviewPanel(pr: PrDetail, h: HostState): string {
+  const own = pr.mine;
+  const event: ReviewEvent = own ? 'COMMENT' : view.reviewEvent ?? 'APPROVE';
+  const held = h.drafts.filter((d) => d.from === 'you').length;
+  const agent = h.drafts.filter((d) => d.from === 'agent').length;
+  const f = openFindings(pr);
+  const warn = event === 'APPROVE' && (f.p0 || f.p1) ? `<p class="rwarn">${I.alert}${[f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ')} ${f.p0 + f.p1 === 1 ? 'finding is' : 'findings are'} still open.</p>` : '';
+  const radios = EVENTS.map((e) => {
+    const off = own && e.event !== 'COMMENT';
+    return `<label class="rv-opt ${off ? 'off' : ''}"><input type="radio" name="revent" value="${e.event}" ${e.event === event ? 'checked' : ''} ${off ? 'disabled' : ''}><span><b>${e.label}</b><span class="sub">${off ? 'Not on your own pull request.' : e.note}</span></span></label>`;
+  }).join('');
+  return `<div class="pop review" role="dialog" aria-label="Finish your review"><span class="lbl">Finish your review</span>
+    <textarea id="rbody" rows="3" placeholder="${event === 'REQUEST_CHANGES' ? 'Say what needs to change (required)' : 'Leave a summary (optional)'}" aria-label="Review summary"></textarea>
+    <div class="rv-opts">${radios}</div>
+    ${held || agent ? `<p class="rnote">${held ? `${plural(held, 'comment')} will be sent with it.` : ''}${agent ? ` ${plural(agent, 'suggestion')} from your agent stay${agent === 1 ? 's' : ''} as drafts until you keep ${agent === 1 ? 'it' : 'them'}.` : ''}</p>` : ''}
+    ${warn}<div class="ract"><button class="btn pri" data-do="submitReview" ${h.busy ? 'disabled' : ''}>Submit review</button></div></div>`;
+}
+
 function decision(pr: PrDetail, h: HostState): string {
-  // You can't approve your own PR; it goes straight to Merge, which waits for reviewers.
-  if (!pr.mine && pr.myReview !== 'approved') return `<button class="btn pri" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
+  // Not yet approved by you (or a re-review): the review is the decision. You can't approve your own PR.
+  if (!pr.mine && (pr.myReview !== 'approved' || isReReview(pr))) return reviewButton(pr, h, true);
+  // After approving, or on your own PR: Merge leads; comments you hold back still get a way out.
+  const extra = h.drafts.some((d) => d.from === 'you') ? reviewButton(pr, h, false) : '';
+  return extra + mergeButton(pr, h);
+}
+
+function mergeButton(pr: PrDetail, h: HostState): string {
   const blocker = mergeBlocker(pr, h.queue);
   const method = view.method && pr.mergeMethods.includes(view.method) ? view.method : pr.mergeMethods[0]!;
   // With a check failing, Merge stays available but stops being the primary action and says "anyway".
@@ -384,8 +428,8 @@ function stepFiles(pr: PrDetail): string {
   let lines = file?.lines ?? null;
   const fileSince = since?.files.find((f) => f.path === file?.path);
   if (view.onlyNew && fileSince) lines = fileSince.lines;
-  const banner = since && pr.state !== 'merged' ? `<div class="newbar">${I.rerun}<b>${plural(since.commits, 'new commit')} since you looked</b><span class="chip">${esc(since.fromSha.slice(0, 7))}…${esc(since.toSha.slice(0, 7))}</span><span>${since.files.map((f) => esc(base(f.path))).join(', ')}</span>
-    ${fileSince ? `<div class="seg"><button data-onlynew="0" aria-pressed="${!view.onlyNew}">Whole change</button><button data-onlynew="1" aria-pressed="${view.onlyNew}">Since you looked</button></div>` : since.files[0] ? `<button class="btn sm" data-file="${esc(since.files[0].path)}" data-onlynew="1">Show it${I.chev}</button>` : ''}</div>` : '';
+  const banner = since && pr.state !== 'merged' ? `<div class="newbar">${I.rerun}<b>${plural(since.commits, 'new commit')} since your ${since.kind === 'review' ? 'review' : 'last look'}</b><span class="chip">${esc(since.fromSha.slice(0, 7))}…${esc(since.toSha.slice(0, 7))}</span><span>${since.files.map((f) => esc(base(f.path))).join(', ')}</span>
+    ${fileSince ? `<div class="seg"><button data-onlynew="0" aria-pressed="${!view.onlyNew}">Whole change</button><button data-onlynew="1" aria-pressed="${view.onlyNew}">${since.kind === 'review' ? 'Since your review' : 'Since you looked'}</button></div>` : since.files[0] ? `<button class="btn sm" data-file="${esc(since.files[0].path)}" data-onlynew="1">Show it${I.chev}</button>` : ''}</div>` : '';
 
   return `${banner}
     <div class="split"><nav class="files" aria-label="Changed files"><div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}</nav>
@@ -413,7 +457,7 @@ function stepOverview(pr: PrDetail): string {
   const n = conversationCounts(pr.conversation);
   const jump = n.fresh ? `<div class="ovmeta"><button class="link" data-do="jumpNew">Jump to ${plural(n.fresh, 'new comment')}${I.down}</button></div>` : '';
   return `<div class="ov">
-    ${jump}
+    ${jump}${isReReview(pr) ? yourComments(pr) : ''}
     <section class="ovdesc" aria-label="Description">${description(pr)}</section>
     <section class="ovconv" aria-label="Conversation"><h3 class="lbl">Conversation${n.comments ? ` · ${n.comments}` : ''}${n.unresolved ? ` <span class="warnc">${I.alert}${plural(n.unresolved, 'unresolved thread')}</span>` : ''}</h3>
       ${conversation(pr.conversation)}</section>
@@ -458,6 +502,21 @@ function lastReplyFrom(items: ConversationItem[], reviewer: string): Comment | n
 
 function description(pr: PrDetail): string {
   return pr.bodyHtml.trim() ? `<div class="md">${safe(pr.bodyHtml)}</div>` : '<p class="none">The author didn’t write a description.</p>';
+}
+
+/** On a re-review: what became of each thread you started. Resolved, answered, or still waiting. */
+function yourComments(pr: PrDetail): string {
+  const me = host?.user ?? '';
+  const mine = pr.conversation.filter((it): it is Extract<ConversationItem, { kind: 'thread' }> => it.kind === 'thread' && it.comments[0]?.author === me);
+  if (!mine.length) return '';
+  const state = (t: (typeof mine)[number]) => {
+    if (t.resolved) return `<span class="ck-s ok">${I.check}Resolved</span>`;
+    const last = t.comments.at(-1)!;
+    return last.author !== me ? `<span class="ck-s run">${I.com}${esc(last.author)} replied</span>` : `<span class="ck-s muted">${I.minus}No reply yet</span>`;
+  };
+  const done = mine.filter((t) => t.resolved || t.comments.at(-1)!.author !== me).length;
+  return `<section class="since" aria-label="Your comments since your review"><span class="lbl">Your comments · ${done} of ${mine.length} answered</span>
+    <ul>${mine.map((t) => `<li>${state(t)}<button class="link mono" data-file="${esc(t.path)}">${esc(base(t.path))}${t.line ? `:${t.line}` : ''}</button><span class="sq">${esc(t.comments[0]!.text.slice(0, 90))}</span></li>`).join('')}</ul></section>`;
 }
 
 /** Oldest first, as on GitHub; the first new comment is marked so "N new comments" can jump to it. */
@@ -512,13 +571,18 @@ function prView(h: HostState): string {
 function render(): void {
   if (!host) return;
   const err = host.error ? `<div class="err" role="alert">${esc(host.error)}<button class="btn sm" data-do="refresh">Try again</button></div>` : '';
-  // Re-rendering replaces the comment box; keep what the reviewer was typing.
-  const box = document.getElementById('cbox') as HTMLTextAreaElement | null;
-  const draft = box ? { value: box.value, focused: document.activeElement === box, at: box.selectionStart } : null;
+  // Re-rendering replaces the text boxes; keep what the reviewer was typing in each.
+  const typing = ['cbox', 'rbody', 'lbox'].map((id) => {
+    const el = document.getElementById(id) as HTMLTextAreaElement | null;
+    return el ? { id, value: el.value, focused: document.activeElement === el, at: el.selectionStart } : null;
+  });
   app.innerHTML = err + (host.view === 'pr' ? prView(host) : queue(host)) + (view.keys ? keysHelp() : '');
-  const next = document.getElementById('cbox') as HTMLTextAreaElement | null;
-  if (next && draft && host.busy !== null) next.value = draft.value;
-  else if (next && draft) { next.value = draft.value; if (draft.focused) { next.focus(); next.setSelectionRange(draft.at, draft.at); } }
+  for (const t of typing) {
+    const el = t && (document.getElementById(t.id) as HTMLTextAreaElement | null);
+    if (!el || !t) continue;
+    el.value = t.value;
+    if (t.focused && host.busy === null) { el.focus(); el.setSelectionRange(t.at, t.at); }
+  }
 }
 
 function keysHelp(): string {
@@ -561,7 +625,8 @@ document.addEventListener('input', (e) => {
 
 document.addEventListener('change', (e) => {
   const t = e.target as HTMLInputElement | HTMLSelectElement;
-  if (t.id === 'repofilter') save({ repo: (t as HTMLSelectElement).value, sel: 0 });
+  if (t instanceof HTMLInputElement && t.name === 'revent') save({ reviewEvent: t.value as ReviewEvent });
+  else if (t.id === 'repofilter') save({ repo: (t as HTMLSelectElement).value, sel: 0 });
   else if (t.id === 'method') save({ method: t.value as MergeMethod });
   else if (t instanceof HTMLInputElement && t.dataset.viewed) send({ type: 'setViewed', path: t.dataset.viewed, viewed: t.checked });
 });
@@ -610,6 +675,7 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'mergeDependabot') send({ type: 'mergeDependabot' });
   else if (d.do === 'closeDependabot') send({ type: 'closeDependabot' });
   else if (d.do === 'comment') postComment();
+  else if (d.do === 'submitReview') submitReview();
   else if (d.do === 'dismissNotice') send({ type: 'dismissNotice' });
   else if (d.do === 'threads') {
     save({ step: 'overview' });
@@ -617,6 +683,15 @@ document.addEventListener('click', (e) => {
     open?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }
 });
+
+function submitReview(): void {
+  const pr = host?.pr;
+  if (!pr) return;
+  const event: ReviewEvent = pr.mine ? 'COMMENT' : view.reviewEvent ?? 'APPROVE';
+  const box = document.getElementById('rbody') as HTMLTextAreaElement | null;
+  send({ type: 'submitReview', event, body: box?.value ?? '' });
+  if (event !== 'REQUEST_CHANGES' || box?.value.trim()) { if (box) box.value = ''; save({ menu: null }); }
+}
 
 function postComment(): void {
   const box = document.getElementById('cbox') as HTMLTextAreaElement | null;
@@ -676,7 +751,11 @@ document.addEventListener('keydown', (e) => {
   } else if (k === '1') save({ step: 'overview' });
   else if (k === '2') save({ step: 'checks' });
   else if (k === '3') save({ step: 'files' });
-  else if (k === 'a' && pr.state !== 'merged' && pr.myReview !== 'approved') send({ type: 'approve' });
+  else if (k === 'a' && pr.state !== 'merged' && !pr.mine && (pr.myReview !== 'approved' || isReReview(pr))) {
+    // With comments held back, approving goes through the review so they're sent too.
+    if (host.drafts.some((d) => d.from === 'you')) save({ menu: 'review', reviewEvent: 'APPROVE' });
+    else send({ type: 'approve' });
+  }
 });
 
 send({ type: 'ready' });

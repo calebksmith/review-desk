@@ -20,6 +20,8 @@ export interface PrSummary {
   labels: string[];
   /** The signed-in reviewer's latest review on this PR. */
   myReview: 'approved' | 'changes_requested' | 'commented' | null;
+  /** The commit that review was on, so a later push means "re-review". */
+  myReviewSha: string | null;
   headRef: string;
   /** The branch it merges into. Another open PR's branch when the PR is stacked on it. */
   baseRef: string;
@@ -74,6 +76,8 @@ export interface CheckRun {
 }
 
 export interface SinceLastLook {
+  /** Since the reviewer last opened the PR, or since their last review (a re-review). */
+  kind?: 'look' | 'review';
   fromSha: string;
   toSha: string;
   commits: number;
@@ -98,7 +102,9 @@ export type ReviewVerdict = 'approved' | 'changes_requested' | 'commented' | 'di
 export type ConversationItem =
   | { kind: 'comment'; comment: Comment }
   | { kind: 'review'; verdict: ReviewVerdict; comment: Comment }
-  | { kind: 'thread'; id: string; path: string; line: number | null; resolved: boolean; outdated: boolean; comments: Comment[] };
+  | { kind: 'thread'; id: string; path: string; line: number | null; resolved: boolean; outdated: boolean; comments: Comment[];
+      /** P0–P3 from the first comment (Codex marks its findings this way); null when unmarked. */
+      severity: number | null };
 
 export interface PrDetail extends PrSummary {
   nodeId: string;
@@ -116,6 +122,31 @@ export interface PrDetail extends PrSummary {
   checkRuns: CheckRun[];
   /** Changes pushed since the reviewer last opened this PR, when there are any. */
   sinceLastLook: SinceLastLook | null;
+}
+
+/** How a review ends: GitHub's three verdicts. */
+export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+
+/**
+ * A comment held back for the reviewer's review: a new comment on a line of the diff, or a reply to an
+ * existing thread (which can also resolve it). Review Desk keeps these until the review is sent.
+ */
+export interface Draft {
+  id: string;
+  path: string;
+  /** The line it's on: the new file's line for added or unchanged lines, the old file's for removed ones. */
+  line: number | null;
+  side: 'RIGHT' | 'LEFT';
+  /** First line of a multi-line comment. */
+  startLine?: number | null;
+  /** A reply to this thread instead of a new comment. */
+  replyTo?: string;
+  /** Resolve that thread when the review is sent. */
+  resolve?: boolean;
+  body: string;
+  /** Written by the reviewer, or suggested by their agent and not kept yet. */
+  from: 'you' | 'agent';
+  severity?: number | null;
 }
 
 /** A comment the reviewer can post in one click, like "@codex review". From the reviewDesk.commentActions setting. */
@@ -143,12 +174,14 @@ export interface HostState {
   queue: PrSummary[];
   pr: PrDetail | null;
   loading: boolean;
-  busy: 'approve' | 'merge' | 'update' | 'bulk' | 'comment' | null;
+  busy: 'approve' | 'merge' | 'update' | 'bulk' | 'comment' | 'review' | null;
   /** Progress while merging Dependabot updates in one go. */
   bulk: { done: number; total: number } | null;
   /** What the last bulk merge did, until the reviewer dismisses it. */
   notice: string | null;
   actions: CommentAction[];
+  /** The open PR's held-back comments, sent with the review. */
+  drafts: Draft[];
   error: string | null;
 }
 
@@ -174,4 +207,10 @@ export type FromWebview =
   | { type: 'comment'; body: string }
   | { type: 'closeDependabot' }
   | { type: 'switchRepository' }
+  | { type: 'submitReview'; event: ReviewEvent; body: string }
+  | { type: 'addDraft'; draft: Omit<Draft, 'id' | 'from'> }
+  | { type: 'editDraft'; id: string; body: string }
+  | { type: 'keepDraft'; id: string }
+  | { type: 'deleteDraft'; id: string }
+  | { type: 'commentNow'; draft: Omit<Draft, 'id' | 'from'> }
   | { type: 'dismissNotice' };

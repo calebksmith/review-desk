@@ -37,6 +37,8 @@ function baseStatus(p: PrSummary): PrStatus {
     if (p.reviewDecision === 'review_required') return { label: waitingOn(p.reviewers), tone: 'muted', bucket: 'waiting', who: 'author' };
     return approved(p);
   }
+  // You reviewed already: it's back to you when the author pushes after your changes request, or asks again.
+  if (isReReview(p)) return { label: 'Re-review', tone: 'run', bucket: 'needs', who: 'you' };
   if (p.myReview === 'changes_requested') return { label: 'Changes requested', tone: 'muted', bucket: 'waiting', who: 'author' };
   if (p.myReview === 'approved') {
     if (p.reviewDecision === 'review_required') return { label: 'Needs another approval', tone: 'muted', bucket: 'waiting', who: 'author' };
@@ -49,6 +51,13 @@ function baseStatus(p: PrSummary): PrStatus {
   if (asked.length && !p.reviewRequested) return { label: waitingOn(p.reviewers), tone: 'muted', bucket: 'waiting', who: 'author' };
   // The normal state of a new PR: no colour, so the queue only lights up for real problems.
   return { label: 'Needs your review', tone: 'muted', bucket: 'needs', who: 'you', quiet: true };
+}
+
+/** A PR you reviewed that's your turn again: new commits since you requested changes, or you were asked again. */
+export function isReReview(p: PrSummary): boolean {
+  if (p.mine || !p.myReview) return false;
+  const pushed = !!p.myReviewSha && p.myReviewSha !== p.headSha;
+  return (p.myReview === 'changes_requested' && pushed) || p.reviewRequested;
 }
 
 function approved(p: PrSummary): PrStatus {
@@ -71,7 +80,7 @@ export function priority(p: PrSummary): { section: 'you' | 'others' | 'merged'; 
   if (p.state === 'merged') return { section: 'merged', rank: 9 };
   const blocking = s.tone === 'bad' ? 0 : 0.5;
   if (s.who !== 'you') return { section: 'others', rank: 5 + blocking };
-  if (p.reviewRequested && !p.myReview) return { section: 'you', rank: 0 + blocking };
+  if ((p.reviewRequested && !p.myReview) || isReReview(p)) return { section: 'you', rank: 0 + blocking };
   if (p.mine) return { section: 'you', rank: 1 + blocking };
   return { section: 'you', rank: 2 + blocking };
 }
@@ -91,10 +100,10 @@ function waitingOn(reviewers: Reviewer[]): string {
 const names = (rs: Reviewer[], me = '') => rs.map((r) => (r.login === me ? 'you' : r.login)).join(', ');
 
 export interface ReadinessItem {
-  key: 'stack' | 'approval' | 'checks' | 'conflicts' | 'base' | 'threads';
+  key: 'stack' | 'approval' | 'findings' | 'checks' | 'conflicts' | 'base' | 'threads';
   tone: Tone;
   text: string;
-  action?: 'updateBranch' | 'showChecks' | 'openThreads' | 'fixConflicts' | 'openPr';
+  action?: 'updateBranch' | 'showChecks' | 'openThreads' | 'fixConflicts' | 'openPr' | 'nextFinding';
   /** The PR an openPr action opens, as a key (owner/name#123). */
   pr?: string;
 }
@@ -118,12 +127,18 @@ export function mergeReadiness(pr: PrDetail, queue: readonly PrSummary[] = [], m
     else if (pr.myReview === 'changes_requested') items.push({ key: 'approval', tone: 'warn', text: 'You requested changes' });
     else items.push({ key: 'approval', tone: 'muted', text: 'Not approved yet' });
   } else if (pr.reviewDecision === 'changes_requested') {
-    items.push({ key: 'approval', tone: 'warn', text: `Changes requested by ${names(changesBy, me) || 'a reviewer'}` });
+    items.push({ key: 'approval', tone: 'warn', text: `Changes requested by ${names(changesBy, me) || 'a reviewer'}${isReReview(pr) ? '; updated since' : ''}` });
   } else if (pr.reviewDecision === 'approved') {
     items.push({ key: 'approval', tone: 'ok', text: `Approved by ${names(approvedBy, me) || 'a reviewer'}` });
   } else {
     const so = approvedBy.length ? `Approved by ${names(approvedBy, me)}; needs another approval` : 'Needs an approval';
     items.push({ key: 'approval', tone: pr.mine || pr.myReview === 'approved' ? 'warn' : 'muted', text: `${so}${asked.length ? ` (asked: ${names(asked, me)})` : ''}` });
+  }
+
+  const f = openFindings(pr);
+  if (f.p0 || f.p1) {
+    const parts = [f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ');
+    items.push({ key: 'findings', tone: f.p0 ? 'bad' : 'warn', text: `${parts} ${f.p0 + f.p1 === 1 ? 'finding' : 'findings'} open`, action: 'nextFinding' });
   }
 
   if (c.failed) items.push({ key: 'checks', tone: 'bad', text: plural(c.failed, 'check') + ' failing', action: 'showChecks' });
@@ -144,7 +159,7 @@ export function mergeReadiness(pr: PrDetail, queue: readonly PrSummary[] = [], m
 
 const URGENCY: Record<Tone, number> = { bad: 0, run: 1, warn: 2, muted: 3, ok: 4 };
 // Within a tone, what blocks a merge outright comes first.
-const LEAD: Record<ReadinessItem['key'], number> = { conflicts: 0, stack: 1, checks: 2, approval: 3, base: 4, threads: 5 };
+const LEAD: Record<ReadinessItem['key'], number> = { conflicts: 0, stack: 1, findings: 2, checks: 3, approval: 4, base: 5, threads: 6 };
 
 /**
  * The one line beside the header's button: the most urgent item, and how many others need attention.
@@ -157,6 +172,13 @@ export function mergeSummary(pr: PrDetail, queue: readonly PrSummary[] = [], me 
   const first = attention[0];
   if (!first) return { tone: 'ok', text: pr.myReview === 'approved' || pr.mine || pr.reviewDecision === 'approved' ? 'Ready to merge' : 'Ready once you approve', more: 0 };
   return { tone: first.tone, text: first.text, more: attention.length - 1 };
+}
+
+/** Unresolved findings marked P0 or P1 (by Codex, an agent or a person). */
+export function openFindings(pr: PrDetail): { p0: number; p1: number } {
+  const open = pr.conversation.filter((it) => it.kind === 'thread' && !it.resolved);
+  const sev = (n: number) => open.filter((it) => it.kind === 'thread' && it.severity === n).length;
+  return { p0: sev(0), p1: sev(1) };
 }
 
 /**

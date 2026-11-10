@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { conversationCounts, markNew, toConversation, type RawComment, type RawReview } from '../src/conversation';
+import { conversationCounts, markNew, severityOf, toConversation, type RawComment, type RawReview } from '../src/conversation';
 
 const c = (login: string, at: string, html = '<p>hi</p>'): RawComment => ({ author: { login }, createdAt: at, body: html.replace(/<[^>]+>/g, ''), bodyHTML: html, url: 'u' });
 const r = (state: RawReview['state'], at: string | null, body = ''): RawReview => ({ author: { login: 'rev' }, state, submittedAt: at, body, bodyHTML: body && `<p>${body}</p>`, url: 'u' });
@@ -47,4 +47,14 @@ describe('markNew', () => {
   it('flags nothing on a first look', () => {
     expect(conversationCounts(markNew(items, null, 'me')).fresh).toBe(0);
   });
+});
+
+describe('severityOf', () => {
+  it.each([
+    ['**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Guard against a null user', 1],
+    ['P0: tokens are logged in plain text', 0],
+    ['Consider renaming this (P2)', 2],
+    ['Use HTTP2 here', null],
+    ['No priority', null],
+  ])('%s', (text, sev) => expect(severityOf(text as string)).toBe(sev));
 });

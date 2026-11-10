@@ -12,6 +12,7 @@ const rev = (login: string, state: Reviewer['state']): Reviewer => ({ login, sta
 
 interface Spec {
   repo?: string;
+  myReviewSha?: string;
   n: number; title: string; author: string; min: number; head: string; base?: string;
   reviewers?: Reviewer[]; myReview?: SeedSummary['myReview']; draft?: boolean; merged?: boolean;
   checks?: CheckRun[]; conflicts?: boolean; behind?: boolean; threads?: number;
@@ -27,7 +28,7 @@ function pr(s: Spec): SamplePr {
     summary: {
       number: s.n, title: s.title, author: s.author, url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(s.min),
       headSha: (s.n * 2654435761 >>> 0).toString(16).padStart(8, '0').slice(0, 7), isDraft: !!s.draft, state: s.merged ? 'merged' : 'open',
-      labels: [], myReview: s.myReview ?? null,
+      labels: [], myReview: s.myReview ?? null, myReviewSha: s.myReviewSha ?? null,
       checks: { passed: checkRuns.length - failed - pending, failed, pending, total: checkRuns.length },
       mergeable: s.conflicts ? false : s.merged ? null : true,
       mergeState: s.conflicts ? 'dirty' : s.behind ? 'behind' : s.merged ? 'unknown' : failed ? 'unstable' : 'clean',
@@ -63,12 +64,13 @@ export function teamSeed(): SamplePr[] {
       path: 'src/app/login/LoginForm.tsx', patch: ['@@ -12,2 +12,3 @@', '   <PasswordField />', '+  <Checkbox name="remember">Remember me on this device</Checkbox>', '   <SubmitButton />'] }),
 
     // Stack B, priya: a billing service with two PRs built on it (a fork).
-    pr({ n: 110, title: 'Extract the billing service', author: 'priya', min: 60 * 26, head: 'priya/billing-service', myReview: 'changes_requested', threads: 1,
+    // You requested changes; priya has since pushed and replied, so it's back to you as a re-review.
+    pr({ n: 110, title: 'Extract the billing service', author: 'priya', min: 60 * 2, head: 'priya/billing-service', myReview: 'changes_requested', myReviewSha: '7a1c0de', threads: 1,
       body: 'Moves billing out of the checkout handler into its own module, so invoices and metering can build on it.',
       path: 'src/server/billing/index.ts', patch: ['@@ -0,0 +1,3 @@', '+export class Billing {', '+  constructor(private readonly db: Db) {}', '+}'],
       conversation: [
         { kind: 'review', verdict: 'changes_requested', comment: say('calebksmith', 60 * 22, '<p>The tax rounding moved with it, but the tests for it didn’t. Please bring those over.</p>') },
-        { kind: 'thread', id: 'T_110_1', path: 'src/server/billing/index.ts', line: 2, resolved: false, outdated: false, comments: [say('calebksmith', 60 * 22, '<p>Inject the clock too, so the invoice dates are testable.</p>')] },
+        { kind: 'thread', id: 'T_110_1', path: 'src/server/billing/index.ts', line: 2, resolved: false, outdated: false, severity: null, comments: [say('calebksmith', 60 * 22, '<p>Inject the clock too, so the invoice dates are testable.</p>'), say('priya', 130, '<p>Done: Billing takes a clock now, and the invoice tests pin it.</p>')] },
       ] }),
     pr({ n: 111, title: 'Generate invoice PDFs', author: 'priya', min: 60 * 9, head: 'priya/invoice-pdfs', base: 'priya/billing-service', reviewers: req('sam'),
       body: 'Renders an invoice as a PDF from the billing service. Stacked on #110.',

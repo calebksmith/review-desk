@@ -2,7 +2,7 @@ import { Octokit } from '@octokit/rest';
 import { COMMENT_FIELDS, toConversation, type RawComment, type RawReview, type RawThread } from './conversation';
 import { logExcerpt } from './logs';
 import { parsePatch } from './patch';
-import type { CheckConclusion, CheckRun, ChecksTally, FileDiff, MergeMethod, MergeState, PrDetail, PrSummary, Reviewer, ViewedState } from './protocol';
+import type { CheckConclusion, CheckRun, ChecksTally, Draft, FileDiff, MergeMethod, MergeState, PrDetail, PrSummary, ReviewEvent, Reviewer, ViewedState } from './protocol';
 import { combine, scopeLabel, searchQueries, type Scope } from './scope';
 import type { DataSource } from './source';
 
@@ -14,7 +14,7 @@ const PR_FIELDS = `
   reviewThreads(first: 100) { nodes { isResolved } }
   author { login }
   labels(first: 10) { nodes { name } }
-  latestReviews(first: 20) { nodes { author { login } state } }
+  latestReviews(first: 20) { nodes { author { login } state commit { oid } } }
   commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
     __typename
     ... on CheckRun { status conclusion }
@@ -32,7 +32,7 @@ interface RawPr {
   reviewThreads: { nodes: { isResolved: boolean }[] };
   author: { login: string } | null;
   labels: { nodes: { name: string }[] };
-  latestReviews: { nodes: { author: { login: string } | null; state: string }[] };
+  latestReviews: { nodes: { author: { login: string } | null; state: string; commit: { oid: string } | null }[] };
   commits: { nodes: { commit: { statusCheckRollup: { contexts: { nodes: RawContext[] } } | null } }[] };
 }
 type RawContext =
@@ -221,6 +221,31 @@ export class GitHubSource implements DataSource {
     await this.octokit.issues.createComment({ ...at(pr.repo), issue_number: pr.number, body });
   }
 
+  async submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<void> {
+    const lines = drafts.filter((d) => !d.replyTo && d.line != null);
+    await this.octokit.pulls.createReview({
+      ...at(pr.repo), pull_number: pr.number, commit_id: pr.headSha, event, body: body || undefined,
+      comments: lines.map((d) => ({ path: d.path, line: d.line!, side: d.side, body: d.body, ...(d.startLine && d.startLine !== d.line ? { start_line: d.startLine, start_side: d.side } : {}) })),
+    });
+    // GitHub's review call can't hold replies to existing threads; they follow right after, then any resolves.
+    for (const d of drafts.filter((x) => x.replyTo)) {
+      await this.octokit.graphql('mutation($id: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) { clientMutationId } }', { id: d.replyTo, body: d.body });
+      if (d.resolve) await this.octokit.graphql('mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { clientMutationId } }', { id: d.replyTo });
+    }
+  }
+
+  async commentNow(pr: PrDetail, d: Draft): Promise<void> {
+    if (d.replyTo) {
+      await this.octokit.graphql('mutation($id: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) { clientMutationId } }', { id: d.replyTo, body: d.body });
+      if (d.resolve) await this.octokit.graphql('mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { clientMutationId } }', { id: d.replyTo });
+      return;
+    }
+    await this.octokit.pulls.createReviewComment({
+      ...at(pr.repo), pull_number: pr.number, commit_id: pr.headSha, path: d.path, line: d.line!, side: d.side, body: d.body,
+      ...(d.startLine && d.startLine !== d.line ? { start_line: d.startLine, start_side: d.side } : {}),
+    });
+  }
+
   async updateBranch(pr: PrDetail): Promise<void> {
     await this.octokit.pulls.updateBranch({ ...at(pr.repo), pull_number: pr.number, expected_head_sha: pr.headSha });
   }
@@ -233,7 +258,8 @@ function toViewed(s: 'VIEWED' | 'UNVIEWED' | 'DISMISSED'): ViewedState {
 }
 
 function toSummary(p: RawPr, me: string): PrSummary {
-  const mine = p.latestReviews.nodes.find((r) => r.author?.login === me)?.state;
+  const myLatest = p.latestReviews.nodes.find((r) => r.author?.login === me);
+  const mine = myLatest?.state;
   const author = p.author?.login ?? 'ghost';
   const reviewed: Reviewer[] = p.latestReviews.nodes
     .filter((r) => r.author && r.author.login !== author && REVIEW_STATE[r.state])
@@ -258,6 +284,7 @@ function toSummary(p: RawPr, me: string): PrSummary {
     isDraft: p.isDraft,
     state: p.state === 'MERGED' ? 'merged' : 'open',
     labels: p.labels.nodes.map((l) => l.name),
+    myReviewSha: myLatest?.commit?.oid ?? null,
     myReview: mine === 'APPROVED' ? 'approved' : mine === 'CHANGES_REQUESTED' ? 'changes_requested' : mine === 'COMMENTED' ? 'commented' : null,
     checks: tally(p.commits.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? []),
     mergeable: p.mergeable === 'UNKNOWN' ? null : p.mergeable === 'MERGEABLE',

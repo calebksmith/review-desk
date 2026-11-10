@@ -1,4 +1,4 @@
-import type { MergeMethod, PrDetail, PrSummary, Reviewer } from './protocol';
+import type { Draft, MergeMethod, PrDetail, PrSummary, ReviewEvent, Reviewer } from './protocol';
 import { ago, decide, file, pass, say, sized, type SamplePr } from './sample-kit';
 import { EVERYTHING } from './scope';
 import { teamSeed } from './sample-team';
@@ -23,7 +23,7 @@ function soloSeed(): SamplePr[] {
 <p>Error logs now show the request path with the token removed. See <a href="https://github.com">the logging guide</a>.</p>`,
       conversation: [
         { kind: 'review', verdict: 'changes_requested', comment: say('calebksmith', 95, '<p>The catch block still logs the full URL, token included. Please redact it in <code>onError</code> too.</p>') },
-        { kind: 'thread', id: 'T_55_1', path: 'src/lib/track.ts', line: 61, resolved: true, outdated: false, comments: [
+        { kind: 'thread', id: 'T_55_1', path: 'src/lib/track.ts', line: 61, resolved: true, outdated: false, severity: null, comments: [
           say('calebksmith', 94, '<p>This line logs <code>req.path</code> but not the company. Can it use the same format as the catch above?</p>'),
           say('claude', 20, '<p>Done in 9d07f3e. Both lines now log the redacted path and the company.</p>'),
         ] },
@@ -77,7 +77,7 @@ function soloSeed(): SamplePr[] {
       body: 'Show each case study’s medal (its small badge icon and name) on its card.',
       bodyHtml: '<p>Show each case study’s medal (its small badge icon and name) on its card.</p><ul><li>Adds <code>MEDALS</code>, with a name and icon for each medal.</li><li>Cards show the icon beside the title and the medal name under it.</li></ul>',
       conversation: [
-        { kind: 'thread', id: 'T_52_1', path: 'src/components/WorkCard.tsx', line: 44, resolved: false, outdated: false, comments: [
+        { kind: 'thread', id: 'T_52_1', path: 'src/components/WorkCard.tsx', line: 44, resolved: false, outdated: false, severity: null, comments: [
           say('calebksmith', 180, '<p>Should the medal name sit under the summary instead? It wraps next to long titles on small screens.</p>'),
         ] },
       ],
@@ -206,9 +206,10 @@ export class SampleSource implements DataSource {
   async getPr(repo: string, number: number, sinceSha: string | null): Promise<PrDetail> {
     const p = this.find(repo, number);
     // #55 always shows one new commit, so the banner can be seen in demos.
-    const sinceLastLook = number === 55
+    // Otherwise, anything since an older commit shows the PR's first file as changed.
+    const sinceLastLook = number === 55 && repo === 'calebksmith/portfolio'
       ? { fromSha: sinceSha ?? 'c44e2b9', toSha: p.summary.headSha, commits: 1, files: p.files.filter((f) => f.path === 'src/lib/track.test.ts') }
-      : null;
+      : sinceSha && sinceSha !== p.summary.headSha ? { fromSha: sinceSha, toSha: p.summary.headSha, commits: 2, files: p.files.slice(0, 1) } : null;
     return {
       ...this.summarize(p), nodeId: `PR_${number}`, body: p.body, bodyHtml: p.bodyHtml, conversation: structuredClone(p.conversation),
       mergeMethods: ['squash', 'rebase'], files: p.files.map((f) => ({ ...f })), checkRuns: p.checkRuns, sinceLastLook,
@@ -238,8 +239,30 @@ export class SampleSource implements DataSource {
   }
 
   async comment(pr: PrDetail, body: string): Promise<void> {
-    const html = `<p>${body.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!)}</p>`;
+    const html = `<p>${esc(body)}</p>`;
     this.find(pr.repo, pr.number).conversation.push({ kind: 'comment', comment: { ...say(this.me, 0, html), text: body } });
+  }
+
+  /** Like GitHub: no approving or requesting changes on your own PR; line comments start threads, replies join theirs. */
+  async submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<void> {
+    const p = this.find(pr.repo, pr.number);
+    if (p.summary.author === this.me && event !== 'COMMENT') throw Object.assign(new Error(`Can not ${event === 'APPROVE' ? 'approve' : 'request changes on'} your own pull request`), { status: 422 });
+    const verdict = { APPROVE: 'approved', REQUEST_CHANGES: 'changes_requested', COMMENT: 'commented' } as const;
+    if (event !== 'COMMENT' || !p.summary.myReview) p.summary.myReview = verdict[event];
+    p.summary.myReviewSha = p.summary.headSha;
+    p.reviewers = (p.reviewers ?? []).filter((r) => r.login !== this.me);
+    if (body.trim() || event !== 'COMMENT') p.conversation.push({ kind: 'review', verdict: verdict[event], comment: { ...say(this.me, 0, body.trim() ? `<p>${esc(body)}</p>` : ''), text: body } });
+    for (const d of drafts) this.post(p, d);
+  }
+
+  async commentNow(pr: PrDetail, d: Draft): Promise<void> { this.post(this.find(pr.repo, pr.number), d); }
+
+  private post(p: SamplePr, d: Draft): void {
+    const c = { ...say(this.me, 0, `<p>${esc(d.body)}</p>`), text: d.body };
+    const thread = d.replyTo ? p.conversation.find((it) => it.kind === 'thread' && it.id === d.replyTo) : undefined;
+    if (thread?.kind === 'thread') { thread.comments.push(c); if (d.resolve) thread.resolved = true; return; }
+    p.conversation.push({ kind: 'thread', id: `T_${p.summary.number}_${p.conversation.length + 1}`, path: d.path, line: d.line, resolved: false, outdated: false, severity: null, comments: [c] });
+    p.summary.unresolvedThreads++;
   }
 
   async updateBranch(pr: PrDetail): Promise<void> { this.find(pr.repo, pr.number).summary.mergeState = 'clean'; }
@@ -251,6 +274,7 @@ export class SampleSource implements DataSource {
     const reviewers: Reviewer[] = s.myReview ? [...others, { login: this.me, state: s.myReview }] : others;
     return {
       ...s,
+      myReviewSha: s.myReviewSha ?? (s.myReview ? s.headSha : null),
       repo: this.repoOf(p),
       headRef: p.headRef,
       baseRef: p.base ?? 'main',
@@ -269,3 +293,5 @@ export class SampleSource implements DataSource {
     return p;
   }
 }
+
+const esc = (t: string) => t.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!);

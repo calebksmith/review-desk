@@ -33,9 +33,16 @@ export function toConversation(comments: RawComment[], reviews: RawReview[], thr
   }
   for (const t of threads) {
     if (!t.comments.nodes.length) continue;
-    items.push({ kind: 'thread', id: t.id, path: t.path, line: t.line ?? t.originalLine, resolved: t.isResolved, outdated: t.isOutdated, comments: t.comments.nodes.map(comment) });
+    const comments = t.comments.nodes.map(comment);
+    items.push({ kind: 'thread', id: t.id, path: t.path, line: t.line ?? t.originalLine, resolved: t.isResolved, outdated: t.isOutdated, comments, severity: severityOf(comments[0]?.text ?? '') });
   }
   return items.sort((a, b) => Date.parse(startedAt(a)) - Date.parse(startedAt(b)));
+}
+
+/** The P0–P3 a finding is marked with ("P1", or Codex's "![P1 Badge](…)"), near the start of its text. Null if none. */
+export function severityOf(text: string): number | null {
+  const m = /(?:^|[^\w])P([0-3])(?=[^\w]|$)/.exec(text.slice(0, 300));
+  return m ? Number(m[1]) : null;
 }
 
 export function startedAt(item: ConversationItem): string {

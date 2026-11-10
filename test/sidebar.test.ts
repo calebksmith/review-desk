@@ -27,8 +27,9 @@ describe('sidebar with a team', () => {
     expect(queueGroups(queue).find((g) => g.bucket === 'mine')!.prs.map((p) => `${p.repo}#${p.number}`).sort()).toEqual([
       'acme/payments-api#108', 'acme/payments-api#109', 'acme/storefront#122', 'acme/storefront#123', 'acme/storefront#124',
     ]);
-    // Review requests and unassigned PRs (storefront 102, 103, 112, 121, 125, 126, 127; payments 102) plus your 123 (ready) and 124 (changes requested).
-    expect(needsYou(queue)).toBe(10);
+    // Review requests and unassigned PRs (storefront 102, 103, 112, 121, 125, 126, 127; payments 102), the re-review
+    // of 110 (priya pushed after your changes request), plus your 123 (ready) and 124 (changes requested).
+    expect(needsYou(queue)).toBe(11);
     // Both repos have a #102; they're two PRs.
     expect(queue.filter((p) => p.number === 102).map((p) => p.repo).sort()).toEqual(['acme/payments-api', 'acme/storefront']);
   });

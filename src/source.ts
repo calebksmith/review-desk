@@ -1,4 +1,4 @@
-import type { MergeMethod, PrDetail, PrSummary } from './protocol';
+import type { Draft, MergeMethod, PrDetail, PrSummary, ReviewEvent } from './protocol';
 
 /** Where review data comes from: GitHub, or the built-in sample PRs. */
 export interface DataSource {
@@ -16,6 +16,10 @@ export interface DataSource {
   updateBranch(pr: PrDetail): Promise<void>;
   /** Posts a comment on the PR's conversation. */
   comment(pr: PrDetail, body: string): Promise<void>;
+  /** Sends a review: the verdict, a summary, and the held-back comments. Replies and resolves go with it. */
+  submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<void>;
+  /** Posts one line comment or reply right away, outside a review. */
+  commentNow(pr: PrDetail, draft: Draft): Promise<void>;
 }
 
 /** Small key-value store; VS Code's workspaceState in the extension, a Map in tests. */

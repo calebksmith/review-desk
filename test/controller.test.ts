@@ -236,4 +236,51 @@ describe('Controller', () => {
     expect(c.snapshot.pr?.title).toBe('Rotate API signing keys');
     expect([...store.keys()].filter((k) => k.startsWith('lastSeenAt:')).sort()).toEqual(['lastSeenAt:acme/payments-api#102', 'lastSeenAt:acme/storefront#102']);
   });
+
+  describe('reviews', () => {
+    const team = () => {
+      const sent: { type: string; text?: string }[] = [];
+      const store = new Map<string, unknown>();
+      const host = { post: (m: never) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async () => 'clipboard' as const, choose: async () => undefined, switchRepository: () => {} };
+      const c = new Controller(new SampleSource('team'), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host);
+      return { c, sent, store, toast: () => sent.filter((m) => m.type === 'toast').at(-1)?.text };
+    };
+
+    it('won’t request changes without a summary', async () => {
+      const { c, toast } = team();
+      await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
+      await c.handle({ type: 'submitReview', event: 'REQUEST_CHANGES', body: ' ' });
+      expect(toast()).toBe('Say what needs to change in the summary first.');
+      expect(c.snapshot.pr?.myReview).toBeNull();
+    });
+
+    it('sends your comments with the verdict and keeps your agent’s unkept suggestions', async () => {
+      const { c, toast } = team();
+      await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
+      await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 1, side: 'RIGHT', body: 'Pin to 22.11' } });
+      c['state'].drafts.push({ id: 'agent1', path: '.nvmrc', line: 1, side: 'RIGHT', body: 'P2 maybe', from: 'agent' });
+      await c.handle({ type: 'submitReview', event: 'REQUEST_CHANGES', body: 'This conflicts with main. Please merge main and resolve it.' });
+      expect(toast()).toBe('Requested changes on #121 with 1 comment.');
+      expect(c.snapshot.pr?.myReview).toBe('changes_requested');
+      expect(c.snapshot.pr?.conversation.some((it) => it.kind === 'thread' && it.comments[0]?.text === 'Pin to 22.11')).toBe(true);
+      expect(c.snapshot.drafts.map((d) => d.id)).toEqual(['agent1']);
+    });
+
+    it('compares a re-review with the commit you reviewed', async () => {
+      const { c } = team();
+      await c.handle({ type: 'ready' });
+      await c.handle({ type: 'openPr', key: 'acme/storefront#110' });
+      expect(c.snapshot.pr?.sinceLastLook).toMatchObject({ kind: 'review', fromSha: '7a1c0de' });
+    });
+
+    it('keeps drafts per PR', async () => {
+      const { c } = team();
+      await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
+      await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 1, side: 'RIGHT', body: 'one' } });
+      await c.handle({ type: 'openPr', key: 'acme/storefront#126' });
+      expect(c.snapshot.drafts).toEqual([]);
+      await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
+      expect(c.snapshot.drafts.map((d) => d.body)).toEqual(['one']);
+    });
+  });
 });

@@ -424,3 +424,25 @@ kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: ce
 .trunk .mono { font-size: 12px; font-weight: 600; color: var(--fg-2) }
 .trunk .sub { font-size: 11px; color: var(--fg-3) }
 .chip.next { font-family: var(--ui); font-weight: 600; background: var(--ok-soft); color: var(--ok); border-color: transparent; flex-shrink: 0 }
+
+/* Finish your review */
+.pop.review { width: 360px; display: flex; flex-direction: column; gap: 10px }
+.pop.review textarea { font: inherit; color: var(--fg); background: var(--input); border: 1px solid var(--btn-line); border-radius: 4px; padding: 6px 8px; resize: vertical; min-height: 60px }
+.rv-opts { display: flex; flex-direction: column; gap: 6px }
+.rv-opt { display: flex; gap: 8px; align-items: flex-start; cursor: pointer }
+.rv-opt input { margin-top: 3px }
+.rv-opt b { display: block; font-weight: 600 }
+.rv-opt .sub { display: block; font-size: 12px; color: var(--fg-3) }
+.rv-opt.off { opacity: .5; cursor: default }
+.rnote { margin: 0; font-size: 12px; color: var(--fg-2) }
+.rwarn { margin: 0; display: flex; gap: 6px; align-items: center; font-size: 12px; font-weight: 600; color: var(--warn) }
+.rwarn .ico { width: 14px; height: 14px }
+.ract { display: flex; justify-content: flex-end }
+/* Re-review: your earlier comments */
+.since { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--chrome) }
+.since ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px }
+.since li { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0 }
+.since .sq { color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0 }
+.ck-s { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; flex-shrink: 0; width: 120px }
+.ck-s .ico { width: 13px; height: 13px }
+.ck-s.ok { color: var(--ok) } .ck-s.run { color: var(--accent-ink) } .ck-s.muted { color: var(--fg-3) }

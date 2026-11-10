@@ -5,7 +5,7 @@ import { bulkMergeable, bulkSkipReason, byPriority, mergeBlocker, mergeReadiness
 
 const base: PrSummary = {
   repo: 'acme/web', number: 1, title: 't', author: 'a', url: '', additions: 0, deletions: 0, updatedAt: '', headSha: 'abc', isDraft: false, state: 'open',
-  labels: [], myReview: null, checks: { passed: 3, failed: 0, pending: 0, total: 3 }, mergeable: true, mergeState: 'clean', unresolvedThreads: 0,
+  labels: [], myReview: null, myReviewSha: null, checks: { passed: 3, failed: 0, pending: 0, total: 3 }, mergeable: true, mergeState: 'clean', unresolvedThreads: 0,
   headRef: 'h', baseRef: 'main', mine: false, reviewDecision: null, reviewers: [], reviewRequested: false,
 };
 const pr = (p: Partial<PrSummary> = {}): PrSummary => ({ ...base, ...p });
@@ -165,5 +165,20 @@ describe('priority', () => {
     expect(prStatus(pr({ reviewDecision: 'approved' })).who).toBe('author');
     expect(prStatus(pr({ myReview: 'approved' })).who).toBe('you');
     expect(prStatus(pr({ mine: true, reviewDecision: 'approved' })).who).toBe('you');
+  });
+});
+
+describe('re-review', () => {
+  it('comes back to you when the author pushes after your changes request, or asks again', () => {
+    expect(prStatus(pr({ myReview: 'changes_requested', myReviewSha: 'abc' }))).toMatchObject({ label: 'Changes requested', bucket: 'waiting' });
+    expect(prStatus(pr({ myReview: 'changes_requested', myReviewSha: 'old' }))).toMatchObject({ label: 'Re-review', bucket: 'needs', who: 'you' });
+    expect(prStatus(pr({ myReview: 'approved', myReviewSha: 'old', reviewDecision: 'review_required', reviewRequested: true }))).toMatchObject({ label: 'Re-review' });
+    expect(priority(pr({ myReview: 'changes_requested', myReviewSha: 'old' })).rank).toBe(0.5);
+  });
+
+  it('counts open P0 and P1 findings for the checklist', () => {
+    const t = (severity: number | null, resolved = false) => ({ kind: 'thread' as const, id: 'x', path: 'a', line: 1, resolved, outdated: false, comments: [], severity });
+    const items = mergeReadiness(detail({ conversation: [t(1), t(1), t(0, true), t(2)] }));
+    expect(items.find((i) => i.key === 'findings')).toMatchObject({ tone: 'warn', text: '2 P1 findings open', action: 'nextFinding' });
   });
 });

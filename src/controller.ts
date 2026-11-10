@@ -1,9 +1,9 @@
-import { parseKey, prKey, type CommentAction, type FromWebview, type HostState, type MergeMethod, type PrSummary, type ToWebview } from './protocol';
+import { parseKey, prKey, type CommentAction, type Draft, type FromWebview, type HostState, type MergeMethod, type PrDetail, type PrSummary, type ReviewEvent, type ToWebview } from './protocol';
 import { conflictPrompt, fixPrompt, threadPrompt, type AgentRoute } from './agent';
 import { closeOptions, type CloseOption } from './dependabot';
 import { markNew } from './conversation';
 import type { DataSource, Store } from './source';
-import { bulkMergeable, bulkSkipReason, mergeBlocker, mergeWarning, plural } from './status';
+import { bulkMergeable, bulkSkipReason, isReReview, mergeBlocker, mergeWarning, openFindings, plural } from './status';
 
 export interface Host {
   post(msg: ToWebview): void;
@@ -30,7 +30,7 @@ export class Controller {
   private readonly closed = new Set<string>();
 
   constructor(private readonly source: DataSource, private readonly store: Store, private readonly host: Host, private readonly label = '', actions: CommentAction[] = []) {
-    this.state = { scope: source.scope, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, bulk: null, notice: null, actions, error: null };
+    this.state = { scope: source.scope, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, bulk: null, notice: null, actions, drafts: [], error: null };
   }
 
   get snapshot(): HostState { return this.state; }
@@ -55,6 +55,12 @@ export class Controller {
         case 'comment': await this.comment(msg.body); break;
         case 'closeDependabot': await this.closeDependabot(); break;
         case 'switchRepository': this.host.switchRepository(); break;
+        case 'submitReview': await this.submitReview(msg.event, msg.body); break;
+        case 'addDraft': await this.saveDrafts([...this.state.drafts, { ...msg.draft, id: newId(), from: 'you' }]); break;
+        case 'editDraft': await this.saveDrafts(this.state.drafts.map((d) => (d.id === msg.id ? { ...d, body: msg.body, from: 'you' } : d))); break;
+        case 'keepDraft': await this.saveDrafts(this.state.drafts.map((d) => (d.id === msg.id ? { ...d, from: 'you' } : d))); break;
+        case 'deleteDraft': await this.saveDrafts(this.state.drafts.filter((d) => d.id !== msg.id)); break;
+        case 'commentNow': await this.commentNow(msg.draft); break;
         case 'dismissNotice': this.set({ notice: null }); break;
       }
     } catch (err) {
@@ -75,11 +81,15 @@ export class Controller {
     const key = `lastSeen:${prKey(at)}`;
     const atKey = `lastSeenAt:${prKey(at)}`;
     const seenAt = this.store.get<string>(atKey) ?? null;
-    const [pr, me] = await Promise.all([this.source.getPr(at.repo, at.number, this.store.get<string>(key) ?? null), this.source.viewer()]);
+    // A re-review compares with the commit you reviewed, not the one you last opened.
+    const summary = this.state.queue.find((p) => prKey(p) === prKey(at));
+    const sinceReview = summary && isReReview(summary) && summary.myReviewSha ? summary.myReviewSha : null;
+    const [pr, me] = await Promise.all([this.source.getPr(at.repo, at.number, sinceReview ?? this.store.get<string>(key) ?? null), this.source.viewer()]);
+    if (pr.sinceLastLook) pr.sinceLastLook.kind = sinceReview ? 'review' : 'look';
     // Seen means opened: the next push or comment after this is "new since you looked".
     await this.store.set(key, pr.headSha);
     await this.store.set(atKey, new Date().toISOString());
-    this.set({ pr: { ...pr, conversation: markNew(pr.conversation, seenAt, me), seenBefore: seenAt !== null }, loading: false });
+    this.set({ pr: { ...pr, conversation: markNew(pr.conversation, seenAt, me), seenBefore: seenAt !== null }, drafts: this.store.get<Draft[]>(`drafts:${prKey(at)}`) ?? [], loading: false });
   }
 
   private async setViewed(path: string, viewed: boolean): Promise<void> {
@@ -99,6 +109,9 @@ export class Controller {
   private async approve(): Promise<void> {
     const pr = this.state.pr;
     if (!pr || this.state.busy) return;
+    // Codex (or anyone) marked something P0/P1 and nobody has settled it: say so before approving.
+    const f = openFindings(pr);
+    if ((f.p0 || f.p1) && !(await this.host.confirm(`${[f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ')} ${f.p0 + f.p1 === 1 ? 'finding is' : 'findings are'} still open on ${this.ref(pr)}. Approve anyway?`, 'Approve anyway'))) return;
     this.set({ busy: 'approve' });
     try {
       await this.source.approve(pr);
@@ -165,6 +178,51 @@ export class Controller {
     const done = merged.length ? `Merged ${plural(merged.length, 'Dependabot update')}: ${merged.join(', ')}.` : 'Merged nothing.';
     this.set({ busy: null, bulk: null, notice: skipped.length ? `${done} Skipped ${skipped.join('; ')}.` : done });
     await this.loadQueue();
+  }
+
+  /**
+   * Sends the review: the verdict, a summary, and the held-back comments you wrote or kept. Your agent's
+   * suggestions you haven't kept stay as drafts. Request changes needs a summary, as on GitHub.
+   */
+  private async submitReview(event: ReviewEvent, body: string): Promise<void> {
+    const pr = this.state.pr;
+    if (!pr || this.state.busy) return;
+    const send = this.state.drafts.filter((d) => d.from === 'you');
+    if (event === 'REQUEST_CHANGES' && !body.trim()) { this.host.post({ type: 'toast', text: 'Say what needs to change in the summary first.' }); return; }
+    if (event === 'COMMENT' && !body.trim() && !send.length) { this.host.post({ type: 'toast', text: 'Write a summary or add a comment first.' }); return; }
+    const f = openFindings(pr);
+    if (event === 'APPROVE' && (f.p0 || f.p1) && !(await this.host.confirm(`${[f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ')} ${f.p0 + f.p1 === 1 ? 'finding is' : 'findings are'} still open. Approve anyway?`, 'Approve anyway'))) return;
+    this.set({ busy: 'review' });
+    try {
+      await this.source.submitReview(pr, event, body.trim(), send);
+    } finally {
+      this.set({ busy: null });
+    }
+    await this.saveDrafts(this.state.drafts.filter((d) => d.from !== 'you'));
+    const said = { APPROVE: 'Approved', REQUEST_CHANGES: 'Requested changes on', COMMENT: 'Sent your review of' }[event];
+    this.host.post({ type: 'toast', text: `${said} ${this.ref(pr)}${send.length ? ` with ${plural(send.length, 'comment')}` : ''}.` });
+    await this.loadPr(pr);
+  }
+
+  private async commentNow(draft: Omit<Draft, 'id' | 'from'>): Promise<void> {
+    const pr = this.state.pr;
+    if (!pr || !draft.body.trim() || this.state.busy) return;
+    this.set({ busy: 'comment' });
+    try {
+      await this.source.commentNow(pr, { ...draft, id: newId(), from: 'you' });
+    } finally {
+      this.set({ busy: null });
+    }
+    this.host.post({ type: 'toast', text: 'Comment posted' });
+    await this.loadPr(pr);
+  }
+
+  /** Held-back comments live per PR in the workspace, so they survive switching PRs and reloads until sent. */
+  private async saveDrafts(drafts: Draft[]): Promise<void> {
+    const pr = this.state.pr;
+    if (!pr) return;
+    await this.store.set(`drafts:${prKey(pr)}`, drafts);
+    this.set({ drafts });
   }
 
   private async fixWithAgent(check: string): Promise<void> {
@@ -263,3 +321,5 @@ function message(err: unknown): string {
   // Octokit appends the docs link to GitHub's message; the message alone reads better.
   return (err instanceof Error ? err.message : String(err)).replace(/ - https:\/\/docs\.github\.com\S*$/, '');
 }
+
+const newId = () => `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
