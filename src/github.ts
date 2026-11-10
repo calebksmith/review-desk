@@ -65,6 +65,8 @@ export class GitHubSource implements DataSource {
   private readonly octokit: Octokit;
   private login: string | null = null;
   private allowance: Budget | null = null;
+  /** Failed jobs already looked up, by job id: a finished job's steps and log don't change. */
+  private readonly failures = new Map<number, Pick<CheckRun, 'failedStep' | 'excerpt'>>();
 
   /** GitHub's hourly allowance as of the last queue load. */
   budget(): Budget | null { return this.allowance; }
@@ -247,12 +249,16 @@ export class GitHubSource implements DataSource {
 
   /** The failed step of an Actions job and the error lines from its log. Logs can expire; then it's just the step. */
   private async jobFailure(repo: string, jobId: number): Promise<Pick<CheckRun, 'failedStep' | 'excerpt'>> {
+    const known = this.failures.get(jobId);
+    if (known) return known;
     let failedStep: string | null = null;
     try {
       const job = await this.octokit.actions.getJobForWorkflowRun({ ...at(repo), job_id: jobId });
       failedStep = job.data.steps?.find((st) => st.conclusion === 'failure')?.name ?? null;
       const log = await this.octokit.actions.downloadJobLogsForWorkflowRun({ ...at(repo), job_id: jobId });
-      return { failedStep, excerpt: typeof log.data === 'string' ? logExcerpt(log.data) : null };
+      const found = { failedStep, excerpt: typeof log.data === 'string' ? logExcerpt(log.data) : null };
+      this.failures.set(jobId, found);
+      return found;
     } catch {
       return { failedStep, excerpt: null };
     }

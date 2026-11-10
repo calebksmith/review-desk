@@ -273,6 +273,16 @@ describe('Controller', () => {
     expect(last().pr!.seenBefore).toBe(true);
   });
 
+  it('opens web links only, so a check’s link can’t reach another extension', async () => {
+    const { c } = setup();
+    const opened: string[] = [];
+    c['host'].openExternal = (url) => { opened.push(url); };
+    await c.handle({ type: 'openExternal', url: 'https://github.com/acme/web/actions/runs/1' });
+    await c.handle({ type: 'openExternal', url: 'vscode://some.extension/run?x=1' });
+    await c.handle({ type: 'openExternal', url: 'command:workbench.action.terminal.new' });
+    expect(opened).toEqual(['https://github.com/acme/web/actions/runs/1']);
+  });
+
   it('passes the repo switcher on to VS Code', async () => {
     const { c, switched } = setup();
     await c.handle({ type: 'switchRepository' });

@@ -68,7 +68,8 @@ export class Controller {
         case 'merge': await this.merge(msg.method); break;
         case 'updateBranch': await this.updateBranch(); break;
         case 'openFile': if (this.state.pr) this.host.openFile(this.state.pr.repo, msg.path, msg.line); break;
-        case 'openExternal': this.host.openExternal(msg.url); break;
+        // Web links only: a check's link is set by whatever reported it, and other schemes reach other extensions.
+        case 'openExternal': if (/^https?:\/\//i.test(msg.url)) this.host.openExternal(msg.url); break;
         case 'mergeDependabot': await this.mergeDependabot(); break;
         case 'fixWithAgent': await this.fixWithAgent(msg.check); break;
         case 'fixThread': await this.fixThread(msg.id); break;
