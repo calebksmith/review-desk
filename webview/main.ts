@@ -23,6 +23,8 @@ interface View { filter: Filter; step: Step; file: string | null; onlyNew: boole
 let host: HostState | null = null;
 /** True while the reviewer moves through the queue with j/k; a mouse move hides the cursor again. */
 let kbd = false;
+/** Text to put in Overview's comment box on the next render. */
+let prefill: string | null = null;
 let view: View = { filter: 'all', repo: '', reviewEvent: null, composer: null, finding: null, showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
 // State saved by older versions named the files page "review".
 if (!['overview', 'checks', 'files'].includes(view.step)) view.step = 'files';
@@ -355,8 +357,15 @@ function mergeButton(pr: PrDetail, h: HostState): string {
 /** A conflict changes what the reviewer has to do, so it gets a bar above the page, not just a line in the checklist. */
 function blockBar(pr: PrDetail): string {
   if (pr.mergeable !== false && pr.mergeState !== 'dirty') return '';
-  return `<div class="blockbar" role="alert">${I.x}<span><b>This branch has conflicts with ${esc(pr.baseRef)}.</b> Resolve them before merging.</span><button class="btn sm fix" data-do="fixConflicts">${I.spark}Fix with agent</button></div>`;
+  const head = `<b>This branch has conflicts with ${esc(pr.baseRef)}.</b>`;
+  // Who resolves depends on whose PR it is: you or your agent, Dependabot itself, or the teammate who wrote it.
+  if (isDependabot(pr)) return `<div class="blockbar" role="alert">${I.x}<span>${head} Dependabot can rebuild the branch on ${esc(pr.baseRef)}.</span><button class="btn sm" data-do="dependabotRebase" title="Posts “@dependabot rebase”">Ask Dependabot to rebase</button></div>`;
+  if (pr.mine || isAgent(pr.author)) return `<div class="blockbar" role="alert">${I.x}<span>${head} Resolve them before merging.</span><button class="btn sm fix" data-do="fixConflicts">${I.spark}Fix with agent</button></div>`;
+  return `<div class="blockbar" role="alert">${I.x}<span>${head} ${esc(pr.author)} resolves them; you can still review and approve the code now.</span><button class="btn sm" data-do="askResolve">Ask ${esc(pr.author)} to resolve</button></div>`;
 }
+
+/** Coding agents and bots, whose conflicts your own agent can fix, as opposed to a teammate's branch. */
+const isAgent = (login: string) => /\[bot\]$/i.test(login) || ['claude', 'codex', 'copilot', 'devin', 'cursor', 'sweep'].includes(login.toLowerCase());
 
 /**
  * Dependabot PRs can be closed, or their update ignored, with a comment Dependabot reads. It lives on the
@@ -679,6 +688,11 @@ function render(): void {
     el.value = t.value;
     if (t.focused && host.busy === null) { el.focus(); el.setSelectionRange(t.at, t.at); }
   }
+  // After restoring what was typed, so a prefill isn't overwritten by the box's old text.
+  if (prefill) {
+    const box = document.getElementById('cbox') as HTMLTextAreaElement | null;
+    if (box) { box.value = prefill; box.focus(); box.dispatchEvent(new Event('input', { bubbles: true })); prefill = null; }
+  }
 }
 
 function keysHelp(): string {
@@ -782,6 +796,12 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'composeAdd' || d.do === 'composeNow' || d.do === 'composeSave') finishComposer(d.do);
   else if (d.do === 'nextFinding') stepFinding(1);
   else if (d.do === 'reviewWithAgent') send({ type: 'reviewWithAgent' });
+  else if (d.do === 'dependabotRebase') send({ type: 'comment', body: '@dependabot rebase' });
+  else if (d.do === 'askResolve' && host?.pr) {
+    // A ready-to-send comment in Overview's box, for you to read and send.
+    prefill = `@${host.pr.author} This branch has conflicts with ${host.pr.baseRef}. Could you merge ${host.pr.baseRef} into it and resolve them? I’ll keep reviewing the code meanwhile.`;
+    save({ step: 'overview' });
+  }
   else if (d.do === 'dismissNotice') send({ type: 'dismissNotice' });
   else if (d.do === 'threads') {
     save({ step: 'overview' });
