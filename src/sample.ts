@@ -1,27 +1,36 @@
-import { parsePatch } from './patch';
-import type { CheckRun, FileDiff, MergeMethod, PrDetail, PrSummary } from './protocol';
-import type { DataSource } from './source';
+import type { Draft, MergeMethod, PrDetail, PrSummary, ReviewEvent, Reviewer } from './protocol';
+import { ago, decide, file, pass, say, sized, type SamplePr } from './sample-kit';
+import { countFindings } from './conversation';
+import { EVERYTHING } from './scope';
+import { parseDependsOn, parseLinear } from './signals';
+import { teamSeed } from './sample-team';
+import type { DataSource, Sent } from './source';
 
 // Sample PRs for demos, screenshots and tests. Content is made up; shapes match GitHub.
+// "solo" is one reviewer and their agents; "team" is several developers, stacked PRs and required approvals.
 
-const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
-
-const file = (path: string, patch: string, viewed: FileDiff['viewed'] = 'unviewed'): FileDiff => {
-  const lines = parsePatch(patch);
-  return { path, status: 'modified', viewed, lines,
-    additions: lines.filter((l) => l.kind === 'add').length,
-    deletions: lines.filter((l) => l.kind === 'del').length };
-};
-
-const pass = (name: string, app: string, summary: string | null = null): CheckRun => ({ name, app, status: 'completed', conclusion: 'success', url: 'https://github.com', summary });
-
-interface SamplePr { summary: PrSummary; files: FileDiff[]; checkRuns: CheckRun[]; body: string; headRef: string }
-
-function seed(): SamplePr[] {
+function soloSeed(): SamplePr[] {
   const prs: SamplePr[] = [
     {
       summary: { number: 55, title: 'Count access-link opens by company', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(8), headSha: '9d07f3e', isDraft: false, state: 'open', labels: ['review-desk'], myReview: null, checks: { passed: 4, failed: 1, pending: 0, total: 5 }, mergeable: true, mergeState: 'unstable', unresolvedThreads: 0 },
       body: 'Show which company opened each access link, by day.',
+      bodyHtml: `<p>Show which company opened each access link, by day, so the weekly report can group opens by company.</p>
+<h3>What changed</h3>
+<ul><li><code>trackOpen</code> tags each open with the company that owns the link.</li>
+<li>A new <code>countByCompany</code> helper groups opens by day and company.</li>
+<li>The weekly report prints a table by company, in Pacific time.</li></ul>
+<h3>How to check it</h3>
+<ol><li>Run <code>npm run report</code>.</li><li>Opens appear under each company, one row per day.</li></ol>
+<h3>Notes</h3>
+<p>Error logs now show the request path with the token removed. See <a href="https://github.com">the logging guide</a>.</p>`,
+      conversation: [
+        { kind: 'review', verdict: 'changes_requested', comment: say('calebksmith', 95, '<p>The catch block still logs the full URL, token included. Please redact it in <code>onError</code> too.</p>') },
+        { kind: 'thread', id: 'T_55_1', path: 'src/lib/track.ts', line: 61, resolved: true, outdated: false, severity: null, comments: [
+          say('calebksmith', 94, '<p>This line logs <code>req.path</code> but not the company. Can it use the same format as the catch above?</p>'),
+          say('claude', 20, '<p>Done in 9d07f3e. Both lines now log the redacted path and the company.</p>'),
+        ] },
+        { kind: 'comment', comment: say('claude', 15, '<p>Pushed 9d07f3e: <code>onError</code> redacts the token too, with a test. <strong>Tests</strong> still fails on that new test. I’m looking at it next.</p>') },
+      ],
       headRef: 'claude/access-link-company',
       files: [
         file('src/lib/track.ts', [
@@ -60,13 +69,20 @@ function seed(): SamplePr[] {
       ],
       checkRuns: [
         pass('Lint', 'GitHub Actions'), pass('Prettier', 'GitHub Actions'), pass('Types', 'GitHub Actions'),
-        { name: 'Tests', app: 'GitHub Actions', status: 'completed', conclusion: 'failure', url: 'https://github.com', summary: '11 of 12 passed. Failed: redacts token in onError.' },
+        { name: 'Tests', app: 'GitHub Actions', status: 'completed', conclusion: 'failure', url: 'https://github.com', summary: null, failedStep: 'Run tests',
+          excerpt: ['FAIL  src/lib/track.test.ts > trackOpen > redacts the token in onError', 'AssertionError: expected "error /a/abc123?t=s3cr3t 500" to not contain "s3cr3t"', 'Tests  1 failed | 11 passed (12)'] },
         pass('Vercel', 'Vercel', 'Preview ready'),
       ],
     },
     {
       summary: { number: 52, title: 'Add medals to case study cards', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(24), headSha: '0b8e4f1', isDraft: false, state: 'open', labels: ['review-desk'], myReview: null, checks: { passed: 5, failed: 0, pending: 0, total: 5 }, mergeable: true, mergeState: 'clean', unresolvedThreads: 1 },
       body: 'Show each case study’s medal (its small badge icon and name) on its card.',
+      bodyHtml: '<p>Show each case study’s medal (its small badge icon and name) on its card.</p><ul><li>Adds <code>MEDALS</code>, with a name and icon for each medal.</li><li>Cards show the icon beside the title and the medal name under it.</li></ul>',
+      conversation: [
+        { kind: 'thread', id: 'T_52_1', path: 'src/components/WorkCard.tsx', line: 44, resolved: false, outdated: false, severity: null, comments: [
+          say('calebksmith', 180, '<p>Should the medal name sit under the summary instead? It wraps next to long titles on small screens.</p>'),
+        ] },
+      ],
       headRef: 'claude/case-study-medals',
       files: [
         file('src/components/WorkCard.tsx', [
@@ -106,6 +122,8 @@ function seed(): SamplePr[] {
     {
       summary: { number: 57, title: 'Fix dates on the Experience page', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(62), headSha: 'e1f04aa', isDraft: false, state: 'open', labels: ['review-desk'], myReview: null, checks: { passed: 4, failed: 0, pending: 1, total: 5 }, mergeable: true, mergeState: 'behind', unresolvedThreads: 0 },
       body: 'Use one date format across the Experience page.',
+      bodyHtml: '<p>Use one date format across the Experience page: short month and year, like <em>Jan 2023</em>.</p>',
+      conversation: [],
       headRef: 'claude/experience-dates',
       files: [file('src/content/experience.mdx', [
         '@@ -10,3 +10,3 @@',
@@ -120,58 +138,172 @@ function seed(): SamplePr[] {
         ' ',
       ].join('\n'))],
       checkRuns: [pass('Lint', 'GitHub Actions'), pass('Prettier', 'GitHub Actions'), pass('Types', 'GitHub Actions'), pass('Tests', 'GitHub Actions', '8 of 8 passed'),
-        { name: 'Vercel', app: 'Vercel', status: 'in_progress', conclusion: null, url: 'https://github.com', summary: 'Building preview' }],
+        { name: 'Vercel', app: 'Commit status', status: 'pending', conclusion: null, url: 'https://github.com', summary: 'Building preview', failedStep: null, excerpt: null }],
     },
     {
-      summary: { number: 48, title: 'Tighten homepage spacing', author: 'calebksmith', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(60 * 26), headSha: 'a71c2d0', isDraft: false, state: 'merged', labels: [], myReview: 'approved', checks: { passed: 5, failed: 0, pending: 0, total: 5 }, mergeable: null, mergeState: 'unknown', unresolvedThreads: 0 },
+      summary: { number: 60, title: 'Bump vite from 6.3.1 to 6.3.5', author: 'dependabot', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(60 * 5), headSha: '5c1d9a2', isDraft: false, state: 'open', labels: ['dependencies'], myReview: null, checks: { passed: 3, failed: 0, pending: 0, total: 3 }, mergeable: true, mergeState: 'clean', unresolvedThreads: 0 },
+      body: 'Bumps vite from 6.3.1 to 6.3.5.',
+      bodyHtml: '<p>Bumps <a href="https://github.com">vite</a> from 6.3.1 to 6.3.5.</p><details><summary>Release notes</summary><ul><li>Fix HMR for CSS modules</li><li>Fix a dev server crash on Windows paths</li></ul></details>',
+      conversation: [],
+      headRef: 'dependabot/npm_and_yarn/vite-6.3.5',
+      files: [file('package-lock.json', ['@@ -4120,3 +4120,3 @@', '     "node_modules/vite": {', '-      "version": "6.3.1",', '+      "version": "6.3.5",'].join('\n'))],
+      checkRuns: [pass('checks', 'GitHub Actions'), pass('lighthouse', 'GitHub Actions'), pass('Vercel', 'Commit status', 'Deployment has completed')],
+    },
+    {
+      compatibility: 17,
+      summary: { number: 61, title: 'Bump eslint from 9.39.5 to 10.12.0', author: 'dependabot', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(60 * 30), headSha: 'b77e310', isDraft: false, state: 'open', labels: ['dependencies'], myReview: null, checks: { passed: 1, failed: 2, pending: 0, total: 3 }, mergeable: true, mergeState: 'unstable', unresolvedThreads: 0 },
+      body: 'Bumps eslint from 9.39.5 to 10.12.0.',
+      bodyHtml: '<p>Bumps <a href="https://github.com">eslint</a> from 9.39.5 to 10.12.0.</p>',
+      conversation: [],
+      headRef: 'dependabot/npm_and_yarn/eslint-10.12.0',
+      files: [file('package.json', ['@@ -40,3 +40,3 @@', '     "@types/node": "^22",', '-    "eslint": "^9",', '+    "eslint": "^10",'].join('\n'))],
+      checkRuns: [
+        { name: 'checks', app: 'GitHub Actions', status: 'completed', conclusion: 'failure', url: 'https://github.com', summary: null, failedStep: 'Run npm ci',
+          excerpt: ['npm error code ERESOLVE', 'npm error ERESOLVE could not resolve', 'npm error While resolving: eslint-plugin-jsx-a11y@6.10.2', 'npm error Found: eslint@10.12.0'] },
+        { name: 'lighthouse', app: 'GitHub Actions', status: 'completed', conclusion: 'failure', url: 'https://github.com', summary: null, failedStep: 'Run npm ci', excerpt: ['npm error code ERESOLVE', 'npm error ERESOLVE could not resolve'] },
+        pass('Vercel Preview Comments', 'Vercel'),
+      ],
+    },
+    {
+      summary: { number: 48, title: 'Tighten homepage spacing', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(60 * 26), headSha: 'a71c2d0', isDraft: false, state: 'merged', labels: [], myReview: 'approved', checks: { passed: 5, failed: 0, pending: 0, total: 5 }, mergeable: null, mergeState: 'unknown', unresolvedThreads: 0 },
       body: 'Use the 8px scale on the homepage sections.',
+      bodyHtml: '<p>Use the 8px scale on the homepage sections.</p>',
+      conversation: [{ kind: 'review', verdict: 'approved', comment: say('calebksmith', 60 * 27, '') }],
       headRef: 'homepage-spacing',
       files: [file('src/app/page.tsx', ['@@ -20,2 +20,2 @@', '-<section className="mt-6">', '+<section className="mt-8">'].join('\n'), 'viewed')],
       checkRuns: [pass('Lint', 'GitHub Actions'), pass('Tests', 'GitHub Actions')],
     },
   ];
-  for (const p of prs) {
-    p.summary.additions = p.files.reduce((n, f) => n + f.additions, 0);
-    p.summary.deletions = p.files.reduce((n, f) => n + f.deletions, 0);
-  }
-  return prs;
+  return sized(prs);
 }
 
+export type SampleKind = 'solo' | 'team';
+
+const SETS: Record<SampleKind, { repo: string; scope: string; required: number; seed: () => SamplePr[] }> = {
+  solo: { repo: 'calebksmith/portfolio', scope: 'calebksmith/portfolio', required: 0, seed: soloSeed },
+  // Everything involving the reviewer across two repos, with one approval required before anything merges.
+  team: { repo: 'acme/storefront', scope: EVERYTHING, required: 1, seed: teamSeed },
+};
+
 export class SampleSource implements DataSource {
-  readonly repo = 'calebksmith/portfolio';
+  readonly scope: string;
   readonly sample = true;
-  private prs = seed();
+  /** Where PRs live when the seed doesn't say. */
+  private readonly repo: string;
+  private readonly me = 'calebksmith';
+  private readonly required: number;
+  private prs: SamplePr[];
 
-  async viewer(): Promise<string> { return 'calebksmith'; }
+  constructor(readonly kind: SampleKind = 'solo') {
+    const set = SETS[kind];
+    this.repo = set.repo;
+    this.scope = set.scope;
+    this.required = set.required;
+    this.prs = set.seed();
+  }
 
-  async listPrs(): Promise<PrSummary[]> { return this.prs.map((p) => ({ ...p.summary })); }
+  async viewer(): Promise<string> { return this.me; }
 
-  async getPr(number: number, sinceSha: string | null): Promise<PrDetail> {
-    const p = this.find(number);
+  async listPrs(): Promise<PrSummary[]> { return this.prs.map((p) => this.summarize(p)); }
+
+  async getPr(repo: string, number: number, sinceSha: string | null): Promise<PrDetail> {
+    const p = this.find(repo, number);
     // #55 always shows one new commit, so the banner can be seen in demos.
-    const sinceLastLook = number === 55
+    // Otherwise, anything since an older commit shows the PR's first file as changed.
+    const sinceLastLook = number === 55 && repo === 'calebksmith/portfolio'
       ? { fromSha: sinceSha ?? 'c44e2b9', toSha: p.summary.headSha, commits: 1, files: p.files.filter((f) => f.path === 'src/lib/track.test.ts') }
-      : null;
+      : sinceSha && sinceSha !== p.summary.headSha ? { fromSha: sinceSha, toSha: p.summary.headSha, commits: 2, files: p.files.slice(0, 1) } : null;
     return {
-      ...p.summary, nodeId: `PR_${number}`, body: p.body, headRef: p.headRef, baseRef: 'main',
-      mergeMethods: ['squash', 'rebase'], files: p.files.map((f) => ({ ...f })), checkRuns: p.checkRuns, sinceLastLook,
+      ...this.summarize(p), nodeId: `PR_${number}`, body: p.body, bodyHtml: p.bodyHtml, conversation: structuredClone(p.conversation),
+      mergeMethods: ['squash', 'rebase'], files: p.files.map((f) => ({ ...f })), checkRuns: p.checkRuns, sinceLastLook, compatibility: p.compatibility ?? null,
     };
   }
 
   async setViewed(pr: PrDetail, path: string, viewed: boolean): Promise<void> {
-    const f = this.find(pr.number).files.find((x) => x.path === path);
+    const f = this.find(pr.repo, pr.number).files.find((x) => x.path === path);
     if (f) f.viewed = viewed ? 'viewed' : 'unviewed';
   }
 
-  async approve(pr: PrDetail): Promise<void> { this.find(pr.number).summary.myReview = 'approved'; }
+  async approve(pr: PrDetail): Promise<void> {
+    const p = this.find(pr.repo, pr.number);
+    if (p.summary.author === this.me) throw Object.assign(new Error('You can’t approve your own pull request.'), { status: 422 });
+    p.summary.myReview = 'approved';
+  }
 
-  async merge(pr: PrDetail, _method: MergeMethod): Promise<void> { this.find(pr.number).summary.state = 'merged'; }
+  /** Like GitHub: refuses without the required approvals, and moves PRs stacked on this one onto its base. */
+  async merge(pr: PrDetail, _method: MergeMethod): Promise<void> {
+    const p = this.find(pr.repo, pr.number);
+    const s = this.summarize(p);
+    if (this.required && s.reviewDecision !== 'approved') {
+      throw Object.assign(new Error(`At least ${this.required} approving review is required by reviewers with write access.`), { status: 405 });
+    }
+    p.summary.state = 'merged';
+    for (const child of this.prs) if (this.repoOf(child) === this.repoOf(p) && child.base === p.headRef && child.summary.state === 'open') child.base = p.base ?? 'main';
+  }
 
-  async updateBranch(pr: PrDetail): Promise<void> { this.find(pr.number).summary.mergeState = 'clean'; }
+  async comment(pr: PrDetail, body: string): Promise<void> {
+    const html = `<p>${esc(body)}</p>`;
+    this.find(pr.repo, pr.number).conversation.push({ kind: 'comment', comment: { ...say(this.me, 0, html), text: body } });
+  }
 
-  private find(number: number): SamplePr {
-    const p = this.prs.find((x) => x.summary.number === number);
-    if (!p) throw new Error(`No sample PR #${number}`);
+  /** Like GitHub: no approving or requesting changes on your own PR; line comments start threads, replies join theirs. */
+  async submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<Sent> {
+    const p = this.find(pr.repo, pr.number);
+    if (p.summary.author === this.me && event !== 'COMMENT') throw Object.assign(new Error(`Can not ${event === 'APPROVE' ? 'approve' : 'request changes on'} your own pull request`), { status: 422 });
+    const verdict = { APPROVE: 'approved', REQUEST_CHANGES: 'changes_requested', COMMENT: 'commented' } as const;
+    if (event !== 'COMMENT' || !p.summary.myReview) p.summary.myReview = verdict[event];
+    p.summary.myReviewSha = p.summary.headSha;
+    p.reviewers = (p.reviewers ?? []).filter((r) => r.login !== this.me);
+    if (body.trim() || event !== 'COMMENT') p.conversation.push({ kind: 'review', verdict: verdict[event], comment: { ...say(this.me, 0, body.trim() ? `<p>${esc(body)}</p>` : ''), text: body } });
+    for (const d of drafts) this.post(p, d);
+    return { unresolved: 0 };
+  }
+
+  async commentNow(pr: PrDetail, d: Draft): Promise<Sent> { this.post(this.find(pr.repo, pr.number), d); return { unresolved: 0 }; }
+
+  private post(p: SamplePr, d: Draft): void {
+    const c = { ...say(this.me, 0, `<p>${esc(d.body)}</p>`), text: d.body };
+    const thread = d.replyTo ? p.conversation.find((it) => it.kind === 'thread' && it.id === d.replyTo) : undefined;
+    if (thread?.kind === 'thread') { thread.comments.push(c); if (d.resolve) thread.resolved = true; return; }
+    p.conversation.push({ kind: 'thread', id: `T_${p.summary.number}_${p.conversation.length + 1}`, path: d.path, line: d.line, resolved: false, outdated: false, severity: null, comments: [c] });
+    p.summary.unresolvedThreads++;
+  }
+
+  async updateBranch(pr: PrDetail): Promise<void> { this.find(pr.repo, pr.number).summary.mergeState = 'clean'; }
+
+  /** Adds what GitHub works out: branches, whose PR it is, the viewer's review among the others, the decision. */
+  private summarize(p: SamplePr): PrSummary {
+    const s = p.summary;
+    const others = (p.reviewers ?? []).filter((r) => r.login !== this.me || !s.myReview);
+    const reviewers: Reviewer[] = s.myReview ? [...others, { login: this.me, state: s.myReview }] : others;
+    const open = p.conversation.filter((it) => it.kind === 'thread' && !it.resolved).map((it) => (it.kind === 'thread' ? it.comments[0]?.text ?? '' : ''));
+    return {
+      ...s,
+      createdAt: s.createdAt ?? s.updatedAt,
+      requestedAt: s.requestedAt ?? null,
+      milestone: s.milestone ?? null,
+      dependsOn: parseDependsOn(p.body),
+      linear: parseLinear({ title: s.title, headRef: p.headRef, body: p.body }),
+      findingCounts: countFindings(open),
+      myReviewSha: s.myReviewSha ?? (s.myReview ? s.headSha : null),
+      repo: this.repoOf(p),
+      headRef: p.headRef,
+      fromFork: false,
+      baseRef: p.base ?? 'main',
+      mine: s.author === this.me,
+      reviewers,
+      reviewRequested: reviewers.some((r) => r.login === this.me && r.state === 'requested'),
+      reviewDecision: decide(reviewers, this.required, s.author),
+    };
+  }
+
+  private repoOf(p: SamplePr): string { return p.repo ?? this.repo; }
+
+  private find(repo: string, number: number): SamplePr {
+    const p = this.prs.find((x) => this.repoOf(x) === repo && x.summary.number === number);
+    if (!p) throw new Error(`No sample PR ${repo}#${number}`);
     return p;
   }
 }
+
+const esc = (t: string) => t.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!);

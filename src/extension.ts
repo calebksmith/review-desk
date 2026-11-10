@@ -1,84 +1,522 @@
 import * as vscode from 'vscode';
+import { findingsFor, findingsPath } from './agentReview';
+import { excludeLocally } from './gitExclude';
+import type { AgentRoute } from './agent';
 import { Controller, type Host } from './controller';
 import { GitHubSource } from './github';
-import type { FromWebview } from './protocol';
-import { parseRemote } from './remote';
+import { prKey, type CommentAction, type FromWebview, type PrSummary } from './protocol';
+import { defaultScope, EVERYTHING_PICK, githubRepos, parseRepositoryInput } from './repos';
+import { EVERYTHING, scopeLabel, type Scope } from './scope';
+import { budgetLow, due, dueOnReturn, QUEUE_EVERY, STALE_ON_RETURN } from './refresh';
 import { SampleSource } from './sample';
+import { SharedSource } from './shared';
+import { needsYou, queueGroups, repoGroups, type QueueGroup, type RepoGroup } from './sidebar';
+import { parentOf } from './stacks';
+import { bulkMergeable, prStatus, type Tone } from './status';
 import type { DataSource } from './source';
 
 const SCOPES = ['repo'];
 let panel: vscode.WebviewPanel | undefined;
+let controller: Controller | undefined;
+/** Where review data comes from right now. The sidebar and the panel share it. */
+let source: DataSource | undefined;
+let tree: QueueTree;
+let treeView: vscode.TreeView<vscode.TreeItem> | undefined;
+/** The queue opens by itself once per window, when the sidebar first shows; closing it after that sticks. */
+let autoOpened = false;
 
 export function activate(context: vscode.ExtensionContext): void {
+  lastContext = context;
+  tree = new QueueTree();
+  const view = vscode.window.createTreeView('reviewDesk.queue', { treeDataProvider: tree, showCollapseAll: false });
+  tree.attach(view);
+  treeView = view;
   context.subscriptions.push(
-    vscode.commands.registerCommand('reviewDesk.open', async () => {
-      try {
-        open(context, await githubSource(false));
-      } catch (err) {
-        vscode.window.showErrorMessage(`Review Desk: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    view,
+    command('reviewDesk.open', async () => {
+      if (await ensureSource(context)) open(context);
     }),
-    vscode.commands.registerCommand('reviewDesk.openSample', () => open(context, new SampleSource())),
-    vscode.commands.registerCommand('reviewDesk.signOut', async () => {
-      try {
-        open(context, await githubSource(true));
-      } catch (err) {
-        vscode.window.showErrorMessage(`Review Desk: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    command('reviewDesk.connect', async () => {
+      if (await ensureSource(context)) await tree.refresh();
+    }),
+    command('reviewDesk.openPr', async (key: unknown) => {
+      if (typeof key === 'string' && (await ensureSource(context))) open(context, key);
+    }),
+    command('reviewDesk.openOnGitHub', async (item: unknown) => {
+      if (item instanceof PrItem) await vscode.env.openExternal(vscode.Uri.parse(item.pr.url));
+    }),
+    command('reviewDesk.mergeDependabot', async () => {
+      if (!(await ensureSource(context))) return;
+      open(context);
+      await controller?.handle({ type: 'mergeDependabot' });
+    }),
+    command('reviewDesk.refresh', async () => {
+      await tree.refresh();
+      await controller?.handle({ type: 'refresh' });
+    }),
+    vscode.commands.registerCommand('reviewDesk.openSample', () => {
+      useSource(new SampleSource());
+      open(context);
+    }),
+    vscode.commands.registerCommand('reviewDesk.openTeamSample', () => {
+      useSource(new SampleSource('team'));
+      open(context);
+    }),
+    command('reviewDesk.switchRepository', async () => {
+      const scope = await chooseScope(context, true);
+      if (scope) { useSource(await githubSource(scope, false)); open(context); }
+    }),
+    command('reviewDesk.signOut', async () => {
+      const scope = await chooseScope(context, false);
+      if (scope) { useSource(await githubSource(scope, true)); open(context); }
+    }),
+    view.onDidChangeVisibility((e) => { if (e.visible) { void tree.refreshIfStale(); autoOpen(context); } }),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('reviewDesk.label')) void tree.refresh();
+      if (!e.affectsConfiguration('reviewDesk.repository') && !e.affectsConfiguration('reviewDesk.repositories')) return;
+      // Choose what to review updates these settings itself and has already switched; only follow edits made elsewhere.
+      if (source && !source.sample && scopeLabel(currentScope(context)) !== source.scope) void connectQuietly(context);
     }),
   );
+  void connectQuietly(context);
+  startRefreshing(context);
+}
+
+/**
+ * Refreshing on its own: every 15 seconds, see what's due (the queue every 5 minutes, the open PR every
+ * minute, or every 30 seconds while you wait on checks or a reviewer), only while VS Code has focus and Review
+ * Desk is on screen, and never when GitHub's hourly allowance is low. Coming back catches up on anything
+ * older than a minute.
+ */
+function startRefreshing(context: vscode.ExtensionContext): void {
+  const onScreen = () => !!panel?.visible || !!treeView?.visible;
+  const tick = () => {
+    const now = Date.now();
+    const budget = source?.budget?.() ?? null;
+    const watching = vscode.window.state.focused && onScreen();
+    if (controller) {
+      const st = controller.snapshot;
+      const d = due({ now, watching, queueAt: controller.queueAt, prAt: st.view === 'pr' && st.pr ? controller.prAt : null, waiting: controller.waitingOnSomething, budget });
+      if (d.pr) void controller.autoRefresh('pr');
+      if (d.queue) void controller.autoRefresh('queue');
+    } else if (watching && treeView?.visible && !budgetLow(budget, now) && tree.age(now) >= QUEUE_EVERY) {
+      void tree.refresh();
+    }
+  };
+  const comeBack = () => {
+    if (!vscode.window.state.focused || !onScreen()) return;
+    const now = Date.now();
+    const budget = source?.budget?.() ?? null;
+    if (controller) {
+      const st = controller.snapshot;
+      const d = dueOnReturn({ now, queueAt: controller.queueAt, prAt: st.view === 'pr' && st.pr ? controller.prAt : null, budget });
+      if (d.pr) void controller.autoRefresh('pr');
+      if (d.queue) void controller.autoRefresh('queue');
+    } else if (treeView?.visible && !budgetLow(budget, now) && tree.age(now) >= STALE_ON_RETURN) {
+      void tree.refresh();
+    }
+  };
+  const timer = setInterval(tick, 15_000);
+  context.subscriptions.push({ dispose: () => clearInterval(timer) }, vscode.window.onDidChangeWindowState((w) => { if (w.focused) comeBack(); }));
+  watchReturn = comeBack;
+}
+
+/** Called when the panel comes back into view, to catch up the same way as on window focus. */
+let watchReturn: () => void = () => {};
+
+/** The scope settings and the workspace's last pick point at, without asking. */
+function currentScope(context: vscode.ExtensionContext): Scope {
+  const settings = vscode.workspace.getConfiguration('reviewDesk');
+  return defaultScope(settings.get<string>('repository') ?? '', context.workspaceState.get<string>(REMEMBERED), fullRepos());
+}
+
+/** The repos to always show in full, from reviewDesk.repositories, cleaned up and without duplicates. */
+function fullRepos(): string[] {
+  const listed = vscode.workspace.getConfiguration('reviewDesk').get<string[]>('repositories') ?? [];
+  return [...new Set(listed.map((r) => parseRepositoryInput(String(r))).filter((r): r is string => !!r))];
+}
+
+/** At startup: connect only if that needs no prompt (already signed in). Otherwise the sidebar offers sign-in. */
+async function connectQuietly(context: vscode.ExtensionContext): Promise<void> {
+  try {
+    const session = await vscode.authentication.getSession('github', SCOPES, { silent: true });
+    if (session) useSource(new GitHubSource(session.accessToken, currentScope(context)));
+    else tree.show(undefined);
+  } catch {
+    tree.show(undefined);
+  }
+}
+
+/** The current source, or a new one after sign-in. False if the reviewer cancels. */
+async function ensureSource(context: vscode.ExtensionContext): Promise<boolean> {
+  if (source) return true;
+  const scope = await chooseScope(context, false);
+  if (!scope) return false;
+  useSource(await githubSource(scope, false));
+  return true;
+}
+
+function useSource(next: DataSource): void {
+  // One queue for the sidebar and the panel: loads close together share one GitHub request.
+  source = new SharedSource(next);
+  if (panel) { panel.dispose(); panel = undefined; controller = undefined; }
+  tree.show(next);
+  if (treeView) autoOpen(treeView.visible ? lastContext : undefined);
+}
+
+let lastContext: vscode.ExtensionContext | undefined;
+
+/** Opening the sidebar opens the queue beside it, the first time in a window and once there's something to show. */
+function autoOpen(context: vscode.ExtensionContext | undefined): void {
+  if (!context || autoOpened || panel || !source || !treeView?.visible) return;
+  autoOpened = true;
+  open(context);
 }
 
 export function deactivate(): void {}
 
-async function githubSource(switchAccount: boolean): Promise<DataSource> {
-  const session = await vscode.authentication.getSession('github', SCOPES, switchAccount ? { clearSessionPreference: true, createIfNone: true } : { createIfNone: true });
-  return new GitHubSource(session.accessToken, await repository());
+/** Registers a command that shows its errors instead of failing silently. */
+function command(id: string, run: (arg?: unknown) => Promise<void>): vscode.Disposable {
+  return vscode.commands.registerCommand(id, async (arg?: unknown) => {
+    try {
+      await run(arg);
+    } catch (err) {
+      vscode.window.showErrorMessage(`Review Desk: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
 }
 
-/** The repo from settings, or the GitHub remote of the open folder. */
-async function repository(): Promise<string> {
-  const configured = vscode.workspace.getConfiguration('reviewDesk').get<string>('repository')?.trim();
-  if (configured) return configured;
+async function githubSource(scope: Scope, switchAccount: boolean): Promise<DataSource> {
+  const session = await vscode.authentication.getSession('github', SCOPES, switchAccount ? { clearSessionPreference: true, createIfNone: true } : { createIfNone: true });
+  return new GitHubSource(session.accessToken, scope);
+}
+
+/**
+ * What to review. Without asking: a pinned repo, the workspace's last pick, or everything that involves you.
+ * Asking offers everything, the open folders' repos, or any owner/name. Undefined if the reviewer cancels.
+ */
+async function chooseScope(context: vscode.ExtensionContext, ask: boolean): Promise<Scope | undefined> {
+  if (!ask) return currentScope(context);
+  const settings = vscode.workspace.getConfiguration('reviewDesk');
+  const now = currentScope(context);
+  const picked = await pickScope(await openGitHubRepos(), now);
+  if (!picked) return undefined;
+
+  // A repo pinned in settings stays the source of truth: update it where it was set, so the pick sticks.
+  const where = settingScope(settings.inspect<string>('repository'));
+  if (where !== undefined) await settings.update('repository', picked === EVERYTHING_PICK ? undefined : picked, where);
+  await context.workspaceState.update(REMEMBERED, picked);
+  return currentScope(context);
+}
+
+const REMEMBERED = 'repository';
+
+async function openGitHubRepos(): Promise<string[]> {
+  return (await gitRepos()).map((r) => r.name);
+}
+
+/** The workspace's git repos that have a GitHub remote, with where each is on disk. */
+async function gitRepos(): Promise<{ name: string; root: vscode.Uri }[]> {
   const git = vscode.extensions.getExtension('vscode.git');
   const api = (await git?.activate())?.getAPI(1);
-  for (const repo of api?.repositories ?? []) {
-    const remote = repo.state.remotes.find((r: { name: string }) => r.name === 'origin') ?? repo.state.remotes[0];
-    const parsed = parseRemote(remote?.fetchUrl ?? remote?.pushUrl ?? '');
-    if (parsed) return parsed;
-  }
-  throw new Error('Open a folder with a GitHub remote, or set "reviewDesk.repository" to owner/name.');
+  const repos: { rootUri: vscode.Uri; state: { remotes: { name: string; fetchUrl?: string; pushUrl?: string }[] } }[] = api?.repositories ?? [];
+  return repos.flatMap((r) => githubRepos([r]).map((name) => ({ name, root: r.rootUri })));
 }
 
+/** Everything that involves you, an open folder's repo, or one typed in. EVERYTHING_PICK means everything. */
+async function pickScope(candidates: string[], now: Scope): Promise<string | undefined> {
+  const other = 'Another repository…';
+  const edit = 'Repositories to always show in full…';
+  const full = fullRepos();
+  const items: vscode.QuickPickItem[] = [
+    { label: `$(globe) ${EVERYTHING}`, description: [now.kind === 'involves' ? 'Reviewing now' : '', full.length ? `+ ${full.join(', ')} in full` : 'across all your repos'].filter(Boolean).join(' · ') },
+    { label: 'One repository', kind: vscode.QuickPickItemKind.Separator },
+    ...candidates.map((label) => ({ label, description: now.kind === 'repo' && now.repo === label ? 'Reviewing now' : undefined })),
+    { label: other, description: 'Type owner/name or paste a GitHub link' },
+    { label: '', kind: vscode.QuickPickItemKind.Separator },
+    { label: edit, description: 'Repos whose every PR shows in Everything' },
+  ];
+  const choice = await vscode.window.showQuickPick(items, { title: 'Review Desk: Choose what to review', placeHolder: 'Everything that involves you, or one repository' });
+  if (!choice) return undefined;
+  if (choice.label.endsWith(EVERYTHING)) return EVERYTHING_PICK;
+  if (choice.label === edit) { await vscode.commands.executeCommand('workbench.action.openSettings', 'reviewDesk.repositories'); return undefined; }
+  if (choice.label !== other) return choice.label;
+  const typed = await vscode.window.showInputBox({
+    title: 'Review Desk: Choose a repository',
+    prompt: 'Which repository do you want to review?',
+    placeHolder: 'owner/name',
+    value: now.kind === 'repo' ? now.repo : '',
+    validateInput: (text) => (parseRepositoryInput(text) ? null : 'Type owner/name, like octocat/hello-world, or paste a github.com link'),
+  });
+  return typed === undefined ? undefined : parseRepositoryInput(typed) ?? undefined;
+}
 
-function open(context: vscode.ExtensionContext, source: DataSource): void {
-  panel?.dispose();
+/** Where reviewDesk.repository is set, workspace before user settings; undefined when it isn't set anywhere. */
+function settingScope(inspected: { globalValue?: string; workspaceValue?: string } | undefined): vscode.ConfigurationTarget | undefined {
+  if (inspected?.workspaceValue?.trim()) return vscode.ConfigurationTarget.Workspace;
+  if (inspected?.globalValue?.trim()) return vscode.ConfigurationTarget.Global;
+  return undefined;
+}
+
+/** Shows the panel, opening a PR if one is given. Reuses the panel that's already open. */
+function open(context: vscode.ExtensionContext, key?: string): void {
+  if (!source) return;
+  if (panel && controller) {
+    panel.reveal();
+    // A PR to open, or (from Open review queue) back to the queue from whatever PR is showing.
+    void controller.handle(key !== undefined ? { type: 'openPr', key } : { type: 'back' });
+    return;
+  }
   panel = vscode.window.createWebviewPanel('reviewDesk', 'Review Desk', vscode.ViewColumn.Active, {
     enableScripts: true,
     retainContextWhenHidden: true,
     localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')],
   });
+  panel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'review-desk.svg');
   const webview = panel.webview;
 
   const host: Host = {
-    post: (msg) => { void webview.postMessage(msg); },
-    openFile: async (path, line) => {
-      const folder = vscode.workspace.workspaceFolders?.[0];
-      if (!folder) return;
-      const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, path));
+    post: (msg) => {
+      void webview.postMessage(msg);
+      if (msg.type !== 'state') return;
+      const st = msg.state;
+      // Whatever the panel learns about the queue (after a refresh, approve or merge) updates the sidebar too.
+      if (!st.loading && st.view === 'queue') tree.setQueue(st.queue);
+      // The tab says what's open, like any editor tab; the sidebar marks the open PR.
+      if (panel) panel.title = st.view === 'pr' && st.pr ? `#${st.pr.number} ${st.pr.title}` : 'Review queue';
+      if (st.view === 'pr' && st.pr) tree.reveal(prKey(st.pr));
+    },
+    openFile: async (repo, path, line) => {
+      // The PR's repo has to be open here to jump into its files; with several repos in view, find the right folder.
+      const root = (await gitRepos()).find((r) => r.name.toLowerCase() === repo.toLowerCase())?.root;
+      if (!root) { void vscode.window.showInformationMessage(`Open ${repo} in VS Code to jump to its files.`); return; }
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(root, path));
       const pos = new vscode.Position(Math.max(0, (line ?? 1) - 1), 0);
       await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside, selection: new vscode.Range(pos, pos) });
     },
     openExternal: (url) => { void vscode.env.openExternal(vscode.Uri.parse(url)); },
     confirm: async (question, action) => (await vscode.window.showWarningMessage(question, { modal: true }, action)) === action,
+    askAgent,
+    choose: async (title, options) => vscode.window.showQuickPick(options, { title, placeHolder: 'Pick one' }),
+    switchRepository: () => { void vscode.commands.executeCommand('reviewDesk.switchRepository'); },
+    findingsFile: async (repo, number) => {
+      const root = (await gitRepos()).find((r) => r.name.toLowerCase() === repo.toLowerCase())?.root;
+      if (!root) return null;
+      await excludeReviewDesk(root);
+      await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(root, '.review-desk'));
+      watchFindings(context, root);
+      return vscode.Uri.joinPath(root, findingsPath(repo, number)).fsPath;
+    },
   };
-  const label = vscode.workspace.getConfiguration('reviewDesk').get<string>('label')?.trim() ?? '';
   const store = { get: <T>(key: string) => context.workspaceState.get<T>(key), set: (key: string, value: unknown) => context.workspaceState.update(key, value) };
-  const controller = new Controller(source, store, host, label);
-  webview.onDidReceiveMessage((msg: FromWebview) => controller.handle(msg), undefined, context.subscriptions);
-  panel.onDidDispose(() => { panel = undefined; }, undefined, context.subscriptions);
+  const actions = vscode.workspace.getConfiguration('reviewDesk').get<CommentAction[]>('commentActions') ?? [];
+  const c = new Controller(source, store, host, label(), actions.filter((a) => a && typeof a.label === 'string' && typeof a.comment === 'string'), blockerLabels());
+  controller = c;
+  webview.onDidReceiveMessage((msg: FromWebview) => c.handle(msg), undefined, context.subscriptions);
+  panel.onDidDispose(() => { panel = undefined; controller = undefined; }, undefined, context.subscriptions);
+  panel.onDidChangeViewState((e) => { if (e.webviewPanel.visible) watchReturn(); }, undefined, context.subscriptions);
   webview.html = html(webview, context.extensionUri);
+  // The webview asks for the queue when it's ready; a PR opened now shows once it's loaded.
+  if (key !== undefined) void c.handle({ type: 'openPr', key });
 }
+
+const label = () => vscode.workspace.getConfiguration('reviewDesk').get<string>('label')?.trim() ?? '';
+const blockerLabels = () => (vscode.workspace.getConfiguration('reviewDesk').get<string[]>('blockerLabels') ?? []).filter((l) => typeof l === 'string' && l.trim());
+
+/* ---------- Sidebar ---------- */
+
+const TONE: Record<Tone, { icon: string; color?: string }> = {
+  bad: { icon: 'git-pull-request', color: 'testing.iconFailed' },
+  warn: { icon: 'git-pull-request', color: 'editorWarning.foreground' },
+  run: { icon: 'git-pull-request', color: 'textLink.foreground' },
+  ok: { icon: 'git-pull-request', color: 'testing.iconPassed' },
+  muted: { icon: 'git-pull-request' },
+};
+
+/** A repo, when the sidebar covers several: its PRs grouped as usual inside, with how many are your turn. */
+class RepoItem extends vscode.TreeItem {
+  constructor(readonly repo: RepoGroup) {
+    super(repo.repo, vscode.TreeItemCollapsibleState.Expanded);
+    this.id = `repo:${repo.repo}`;
+    this.iconPath = new vscode.ThemeIcon('repo');
+    const total = repo.groups.reduce((n, g) => n + g.prs.length, 0);
+    this.description = repo.yourTurn ? `${repo.yourTurn} your turn` : String(total);
+    this.tooltip = `${repo.repo}: ${total} pull request${total === 1 ? '' : 's'}${repo.yourTurn ? `, ${repo.yourTurn} your turn` : ''}`;
+  }
+}
+
+class GroupItem extends vscode.TreeItem {
+  /** `repo` is set when the group sits inside a repo (several repos in view). */
+  constructor(readonly group: QueueGroup, readonly repo?: string) {
+    super(group.label, group.bucket === 'merged' ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded);
+    this.description = String(group.prs.length);
+    this.id = repo ? `group:${repo}:${group.bucket}` : `group:${group.bucket}`;
+    // "Needs you" offers the one-click Dependabot merge when any update qualifies.
+    this.contextValue = group.bucket === 'needs' && bulkMergeable(group.prs).length ? 'group-bulk' : 'group';
+  }
+}
+
+class PrItem extends vscode.TreeItem {
+  constructor(readonly pr: PrSummary, queue: readonly PrSummary[] = []) {
+    // The number leads, as in the queue: "#102 Add the login API".
+    super(`#${pr.number} ${pr.title}`, vscode.TreeItemCollapsibleState.None);
+    const status = prStatus(pr);
+    this.id = `pr:${prKey(pr)}`;
+    // Say the status only when it adds to the group's name ("Needs you" already means needs your review).
+    const parent = parentOf(pr, queue);
+    // With several repos in view, a number alone is ambiguous: say which repo.
+    // With several repos the PR sits under its repo, so the row doesn't repeat it.
+    this.description = [parent ? `on #${parent.number}` : '', status.quiet ? '' : status.label].filter(Boolean).join(' · ');
+    this.tooltip = new vscode.MarkdownString(`**${pr.repo}#${pr.number} ${pr.title}**\n\n${status.label} · by ${pr.author} · +${pr.additions} −${pr.deletions}`);
+    const t = TONE[status.tone];
+    this.iconPath = pr.state === 'merged' ? new vscode.ThemeIcon('git-merge') : new vscode.ThemeIcon(t.icon, t.color ? new vscode.ThemeColor(t.color) : undefined);
+    this.contextValue = 'pr';
+    this.command = { command: 'reviewDesk.openPr', title: 'Open', arguments: [prKey(pr)] };
+  }
+}
+
+/** The PR list in the sidebar, with the number that needs the reviewer on the icon. */
+class QueueTree implements vscode.TreeDataProvider<vscode.TreeItem> {
+  private readonly changed = new vscode.EventEmitter<void>();
+  readonly onDidChangeTreeData = this.changed.event;
+  private view: vscode.TreeView<vscode.TreeItem> | undefined;
+  private queue: PrSummary[] | null = null;
+  private message: string | null = null;
+  private loadedAt = 0;
+
+  attach(view: vscode.TreeView<vscode.TreeItem>): void { this.view = view; }
+
+  /** Marks the PR open in the panel, without taking focus from it. */
+  reveal(key: string): void {
+    const pr = this.queue?.find((p) => prKey(p) === key);
+    if (!pr || !this.view?.visible) return;
+    void this.view.reveal(new PrItem(pr, this.queue ?? []), { select: true, focus: false, expand: true }).then(undefined, () => {});
+  }
+
+  getParent(item: vscode.TreeItem): vscode.TreeItem | undefined {
+    if (!this.queue) return undefined;
+    const multi = this.multi();
+    if (item instanceof GroupItem) {
+      const r = multi && item.repo ? repoGroups(this.queue, blockerLabels()).find((x) => x.repo === item.repo) : undefined;
+      return r ? new RepoItem(r) : undefined;
+    }
+    if (!(item instanceof PrItem)) return undefined;
+    const prs = multi ? this.queue.filter((p) => p.repo === item.pr.repo) : this.queue;
+    const group = queueGroups(prs, blockerLabels()).find((g) => g.prs.some((p) => prKey(p) === prKey(item.pr)));
+    return group ? new GroupItem(group, multi ? item.pr.repo : undefined) : undefined;
+  }
+
+  /** The sidebar covers more than one repo, so it groups by repo first. */
+  private multi(): boolean { return new Set((this.queue ?? []).map((p) => p.repo)).size > 1; }
+
+  /** Switches to a source (or none: then the welcome view offers sign-in) and loads it. */
+  show(next: DataSource | undefined): void {
+    void vscode.commands.executeCommand('setContext', 'reviewDesk.connected', !!next);
+    this.queue = null;
+    this.message = null;
+    if (this.view) this.view.description = next ? `${next.scope}${next.sample ? ' · sample' : ''}` : undefined;
+    this.render();
+    if (next) void this.refresh();
+  }
+
+  async refresh(): Promise<void> {
+    const from = source;
+    if (!from) return;
+    try {
+      const prs = await from.listPrs();
+      if (from !== source) return;
+      const only = label();
+      this.setQueue(only ? prs.filter((p) => p.labels.includes(only)) : prs);
+    } catch (err) {
+      this.message = `Couldn’t load pull requests: ${err instanceof Error ? err.message : String(err)}`;
+      this.render();
+    }
+  }
+
+  async refreshIfStale(): Promise<void> {
+    if (this.age(Date.now()) >= STALE_ON_RETURN && !budgetLow(source?.budget?.() ?? null, Date.now())) await this.refresh();
+  }
+
+  /** How long ago the sidebar's queue loaded. */
+  age(now: number): number { return now - this.loadedAt; }
+
+  setQueue(queue: PrSummary[]): void {
+    this.queue = queue;
+    this.message = null;
+    this.loadedAt = Date.now();
+    this.render();
+  }
+
+  private render(): void {
+    if (this.view) {
+      const n = this.queue ? needsYou(this.queue) : 0;
+      this.view.badge = n ? { value: n, tooltip: `${n} pull request${n === 1 ? '' : 's'} need${n === 1 ? 's' : ''} you` } : undefined;
+      this.view.message = this.message ?? (this.queue && !this.queue.length ? 'No open pull requests.' : undefined);
+    }
+    this.changed.fire();
+  }
+
+  getTreeItem(item: vscode.TreeItem): vscode.TreeItem { return item; }
+
+  getChildren(item?: vscode.TreeItem): vscode.TreeItem[] {
+    if (!source) return [];
+    if (!this.queue) return item ? [] : [Object.assign(new vscode.TreeItem('Loading pull requests…'), { iconPath: new vscode.ThemeIcon('loading~spin') })];
+    if (item instanceof GroupItem) return item.group.prs.map((p) => new PrItem(p, this.queue ?? []));
+    if (item instanceof RepoItem) return item.repo.groups.map((g) => new GroupItem(g, item.repo.repo));
+    if (item) return [];
+    return this.multi() ? repoGroups(this.queue, blockerLabels()).map((r) => new RepoItem(r)) : queueGroups(this.queue, blockerLabels()).map((g) => new GroupItem(g));
+  }
+}
+
+/** Keeps .review-desk/ out of git through the repo's local excludes (never its .gitignore). */
+const excludeReviewDesk = (root: vscode.Uri) => excludeLocally(root.fsPath, '.review-desk/', "Review Desk: your agent's review findings");
+
+/** Watches a repo's .review-desk folder; a findings file that appears or changes joins its PR's drafts. */
+const watched = new Set<string>();
+function watchFindings(context: vscode.ExtensionContext, root: vscode.Uri): void {
+  if (watched.has(root.fsPath)) return;
+  watched.add(root.fsPath);
+  const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, '.review-desk/*.json'));
+  const load = async (uri: vscode.Uri) => {
+    const at = findingsFor(uri.fsPath);
+    if (!at) return;
+    let raw: unknown;
+    try { raw = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri))); } catch { return; } // half-written: wait for the next change
+    if (!controller) open(context);
+    await controller?.importFindings(at, raw);
+  };
+  context.subscriptions.push(watcher, watcher.onDidCreate(load), watcher.onDidChange(load));
+}
+
+/**
+ * Gives a prompt to the reviewer's AI agent, filled in but not sent. Claude Code and VS Code's chat
+ * are opened through their commands; neither is a documented API, so any failure falls back to the
+ * clipboard, which works with every agent.
+ */
+async function askAgent(prompt: string): Promise<AgentRoute> {
+  const choice = vscode.workspace.getConfiguration('reviewDesk').get<string>('agent') ?? 'auto';
+  const commands = new Set(await vscode.commands.getCommands(true));
+  const tryClaude = (choice === 'auto' || choice === 'claudeCode') && commands.has(CLAUDE_OPEN);
+  const tryChat = (choice === 'auto' || choice === 'chat') && commands.has(CHAT_OPEN);
+  if (tryClaude) {
+    try {
+      // Same call Claude Code's own vscode://anthropic.claude-code/open?prompt= link makes: a new session with the prompt in it.
+      await vscode.commands.executeCommand(CLAUDE_OPEN, undefined, prompt);
+      return 'claudeCode';
+    } catch { /* fall through */ }
+  }
+  if (tryChat) {
+    try {
+      await vscode.commands.executeCommand(CHAT_OPEN, { query: prompt, isPartialQuery: true, mode: 'agent' });
+      return 'chat';
+    } catch { /* fall through */ }
+  }
+  await vscode.env.clipboard.writeText(prompt);
+  return 'clipboard';
+}
+
+const CLAUDE_OPEN = 'claude-vscode.editor.open';
+const CHAT_OPEN = 'workbench.action.chat.open';
 
 function html(webview: vscode.Webview, root: vscode.Uri): string {
   const nonce = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');

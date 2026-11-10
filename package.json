@@ -9,25 +9,94 @@
   "engines": { "vscode": "^1.90.0" },
   "categories": ["Other"],
   "main": "./dist/extension.js",
-  "activationEvents": [],
+  "activationEvents": ["onStartupFinished"],
   "contributes": {
     "commands": [
-      { "command": "reviewDesk.open", "title": "Open", "category": "Review Desk", "icon": "$(checklist)" },
+      { "command": "reviewDesk.open", "title": "Open review queue", "category": "Review Desk", "icon": "$(inbox)" },
       { "command": "reviewDesk.openSample", "title": "Open with sample data", "category": "Review Desk" },
-      { "command": "reviewDesk.signOut", "title": "Use a different GitHub account", "category": "Review Desk" }
+      { "command": "reviewDesk.openTeamSample", "title": "Open with team sample data", "category": "Review Desk" },
+      { "command": "reviewDesk.switchRepository", "title": "Choose what to review", "category": "Review Desk", "icon": "$(repo)" },
+      { "command": "reviewDesk.mergeDependabot", "title": "Merge passing Dependabot updates", "category": "Review Desk", "icon": "$(git-merge)" },
+      { "command": "reviewDesk.signOut", "title": "Use a different GitHub account", "category": "Review Desk" },
+      { "command": "reviewDesk.connect", "title": "Sign in with GitHub", "category": "Review Desk" },
+      { "command": "reviewDesk.refresh", "title": "Refresh", "category": "Review Desk", "icon": "$(refresh)" },
+      { "command": "reviewDesk.openPr", "title": "Open pull request", "category": "Review Desk" },
+      { "command": "reviewDesk.openOnGitHub", "title": "Open on GitHub", "category": "Review Desk", "icon": "$(link-external)" }
     ],
+    "viewsContainers": {
+      "activitybar": [{ "id": "reviewDesk", "title": "Review Desk", "icon": "media/review-desk.svg" }]
+    },
+    "views": {
+      "reviewDesk": [{ "id": "reviewDesk.queue", "name": "Pull requests", "icon": "media/review-desk.svg" }]
+    },
+    "viewsWelcome": [
+      {
+        "view": "reviewDesk.queue",
+        "when": "!reviewDesk.connected",
+        "contents": "Review pull requests that agents wrote, beside your code.\n[Sign in with GitHub](command:reviewDesk.connect)\nNo GitHub repo handy? Try it with [sample data](command:reviewDesk.openSample) or [a team’s sample data](command:reviewDesk.openTeamSample)."
+      }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "reviewDesk.open", "when": "view == reviewDesk.queue && reviewDesk.connected", "group": "navigation@1" },
+        { "command": "reviewDesk.refresh", "when": "view == reviewDesk.queue && reviewDesk.connected", "group": "navigation@2" },
+        { "command": "reviewDesk.switchRepository", "when": "view == reviewDesk.queue", "group": "navigation@3" },
+        { "command": "reviewDesk.signOut", "when": "view == reviewDesk.queue && reviewDesk.connected", "group": "1_repo@2" }
+      ],
+      "view/item/context": [
+        { "command": "reviewDesk.openOnGitHub", "when": "view == reviewDesk.queue && viewItem == pr", "group": "inline" },
+        { "command": "reviewDesk.mergeDependabot", "when": "view == reviewDesk.queue && viewItem == group-bulk", "group": "inline" }
+      ],
+      "commandPalette": [
+        { "command": "reviewDesk.openPr", "when": "false" },
+        { "command": "reviewDesk.openOnGitHub", "when": "false" }
+      ]
+    },
     "configuration": {
       "title": "Review Desk",
       "properties": {
         "reviewDesk.repository": {
           "type": "string",
           "default": "",
-          "markdownDescription": "The repository to review, as `owner/name`. Leave empty to use the `origin` remote of the open folder."
+          "markdownDescription": "Review only this repository, as `owner/name`. Leave empty to review **everything that involves you** across GitHub (plus `#reviewDesk.repositories#` in full), or pick with **Review Desk: Choose what to review**."
+        },
+        "reviewDesk.repositories": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Repositories to always show in full, as `owner/name`. **Everything involving you** lists every open PR in these, not just the ones that involve you."
+        },
+        "reviewDesk.blockerLabels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["release-blocker", "hotfix", "blocker", "urgent"],
+          "markdownDescription": "Labels that mean a PR blocks a release. Those PRs go to the top of **Your turn**, marked **Release blocker**."
         },
         "reviewDesk.label": {
           "type": "string",
           "default": "",
           "markdownDescription": "Only show pull requests with this label. Leave empty to show every open pull request."
+        },
+        "reviewDesk.commentActions": {
+          "type": "array",
+          "default": [],
+          "markdownDescription": "Comments you post often, as one-click buttons in a PR's Conversation tab, such as `@codex review`. Set `reviewer` to the account that answers, and its latest reply shows beside the button.",
+          "items": {
+            "type": "object",
+            "required": ["label", "comment"],
+            "properties": {
+              "label": { "type": "string", "description": "The button's name, such as \"Ask Codex to review\"." },
+              "comment": { "type": "string", "description": "What to post, such as \"@codex review\"." },
+              "reviewer": { "type": "string", "description": "The GitHub account that answers, such as chatgpt-codex-connector." }
+            }
+          }
+        },
+        "reviewDesk.agent": {
+          "type": "string",
+          "enum": ["auto", "claudeCode", "chat", "clipboard"],
+          "enumDescriptions": ["Claude Code if it's installed, then VS Code's chat, then the clipboard", "A new Claude Code session", "VS Code's chat, in agent mode (Copilot or another chat agent)", "Copy the prompt to paste into any agent"],
+          "default": "auto",
+          "markdownDescription": "Where **Fix with agent** sends a failing check. The prompt is filled in, not sent, so you can read it first."
         }
       }
     }
@@ -46,6 +115,7 @@
     "@types/node": "^22.0.0",
     "@types/vscode": "~1.90.0",
     "@vscode/vsce": "^3.6.0",
+    "dompurify": "^3.4.17",
     "esbuild": "^0.25.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
