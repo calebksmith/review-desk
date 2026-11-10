@@ -8,7 +8,7 @@ import { prKey, type CommentAction, type FromWebview, type PrSummary } from './p
 import { defaultScope, EVERYTHING_PICK, githubRepos, parseRepositoryInput } from './repos';
 import { EVERYTHING, scopeLabel, type Scope } from './scope';
 import { SampleSource } from './sample';
-import { needsYou, queueGroups, type QueueGroup } from './sidebar';
+import { needsYou, queueGroups, repoGroups, type QueueGroup, type RepoGroup } from './sidebar';
 import { parentOf } from './stacks';
 import { bulkMergeable, prStatus, type Tone } from './status';
 import type { DataSource } from './source';
@@ -286,11 +286,24 @@ const TONE: Record<Tone, { icon: string; color?: string }> = {
   muted: { icon: 'git-pull-request' },
 };
 
+/** A repo, when the sidebar covers several: its PRs grouped as usual inside, with how many are your turn. */
+class RepoItem extends vscode.TreeItem {
+  constructor(readonly repo: RepoGroup) {
+    super(repo.repo, vscode.TreeItemCollapsibleState.Expanded);
+    this.id = `repo:${repo.repo}`;
+    this.iconPath = new vscode.ThemeIcon('repo');
+    const total = repo.groups.reduce((n, g) => n + g.prs.length, 0);
+    this.description = repo.yourTurn ? `${repo.yourTurn} your turn` : String(total);
+    this.tooltip = `${repo.repo}: ${total} pull request${total === 1 ? '' : 's'}${repo.yourTurn ? `, ${repo.yourTurn} your turn` : ''}`;
+  }
+}
+
 class GroupItem extends vscode.TreeItem {
-  constructor(readonly group: QueueGroup) {
+  /** `repo` is set when the group sits inside a repo (several repos in view). */
+  constructor(readonly group: QueueGroup, readonly repo?: string) {
     super(group.label, group.bucket === 'merged' ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded);
     this.description = String(group.prs.length);
-    this.id = `group:${group.bucket}`;
+    this.id = repo ? `group:${repo}:${group.bucket}` : `group:${group.bucket}`;
     // "Needs you" offers the one-click Dependabot merge when any update qualifies.
     this.contextValue = group.bucket === 'needs' && bulkMergeable(group.prs).length ? 'group-bulk' : 'group';
   }
@@ -305,8 +318,8 @@ class PrItem extends vscode.TreeItem {
     // Say the status only when it adds to the group's name ("Needs you" already means needs your review).
     const parent = parentOf(pr, queue);
     // With several repos in view, a number alone is ambiguous: say which repo.
-    const multi = new Set(queue.map((p) => p.repo)).size > 1;
-    this.description = [multi ? pr.repo.split('/')[1] : '', parent ? `on #${parent.number}` : '', status.quiet ? '' : status.label].filter(Boolean).join(' · ');
+    // With several repos the PR sits under its repo, so the row doesn't repeat it.
+    this.description = [parent ? `on #${parent.number}` : '', status.quiet ? '' : status.label].filter(Boolean).join(' · ');
     this.tooltip = new vscode.MarkdownString(`**${pr.repo}#${pr.number} ${pr.title}**\n\n${status.label} · by ${pr.author} · +${pr.additions} −${pr.deletions}`);
     const t = TONE[status.tone];
     this.iconPath = pr.state === 'merged' ? new vscode.ThemeIcon('git-merge') : new vscode.ThemeIcon(t.icon, t.color ? new vscode.ThemeColor(t.color) : undefined);
@@ -334,10 +347,20 @@ class QueueTree implements vscode.TreeDataProvider<vscode.TreeItem> {
   }
 
   getParent(item: vscode.TreeItem): vscode.TreeItem | undefined {
-    if (!(item instanceof PrItem) || !this.queue) return undefined;
-    const group = queueGroups(this.queue).find((g) => g.prs.some((p) => prKey(p) === prKey(item.pr)));
-    return group ? new GroupItem(group) : undefined;
+    if (!this.queue) return undefined;
+    const multi = this.multi();
+    if (item instanceof GroupItem) {
+      const r = multi && item.repo ? repoGroups(this.queue, blockerLabels()).find((x) => x.repo === item.repo) : undefined;
+      return r ? new RepoItem(r) : undefined;
+    }
+    if (!(item instanceof PrItem)) return undefined;
+    const prs = multi ? this.queue.filter((p) => p.repo === item.pr.repo) : this.queue;
+    const group = queueGroups(prs, blockerLabels()).find((g) => g.prs.some((p) => prKey(p) === prKey(item.pr)));
+    return group ? new GroupItem(group, multi ? item.pr.repo : undefined) : undefined;
   }
+
+  /** The sidebar covers more than one repo, so it groups by repo first. */
+  private multi(): boolean { return new Set((this.queue ?? []).map((p) => p.repo)).size > 1; }
 
   /** Switches to a source (or none: then the welcome view offers sign-in) and loads it. */
   show(next: DataSource | undefined): void {
@@ -389,7 +412,9 @@ class QueueTree implements vscode.TreeDataProvider<vscode.TreeItem> {
     if (!source) return [];
     if (!this.queue) return item ? [] : [Object.assign(new vscode.TreeItem('Loading pull requests…'), { iconPath: new vscode.ThemeIcon('loading~spin') })];
     if (item instanceof GroupItem) return item.group.prs.map((p) => new PrItem(p, this.queue ?? []));
-    return item ? [] : queueGroups(this.queue, blockerLabels()).map((g) => new GroupItem(g));
+    if (item instanceof RepoItem) return item.repo.groups.map((g) => new GroupItem(g, item.repo.repo));
+    if (item) return [];
+    return this.multi() ? repoGroups(this.queue, blockerLabels()).map((r) => new RepoItem(r)) : queueGroups(this.queue, blockerLabels()).map((g) => new GroupItem(g));
   }
 }
 

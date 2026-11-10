@@ -24,3 +24,17 @@ export function queueGroups(queue: PrSummary[], blockerLabels: readonly string[]
 export function needsYou(queue: PrSummary[]): number {
   return queue.filter((p) => priority(p).section === 'you').length;
 }
+
+export interface RepoGroup { repo: string; yourTurn: number; groups: QueueGroup[] }
+
+/**
+ * With several repos in view, the sidebar groups by repo first, so switching between projects stays tidy:
+ * repos with the most of your turn first, then by name. Repos with no PRs don't appear.
+ */
+export function repoGroups(queue: PrSummary[], blockerLabels: readonly string[] = DEFAULT_BLOCKER_LABELS): RepoGroup[] {
+  const repos = [...new Set(queue.map((p) => p.repo))];
+  return repos
+    .map((repo) => { const prs = queue.filter((p) => p.repo === repo); return { repo, yourTurn: needsYou(prs), groups: queueGroups(prs, blockerLabels) }; })
+    .filter((r) => r.groups.length)
+    .sort((a, b) => b.yourTurn - a.yourTurn || a.repo.localeCompare(b.repo));
+}

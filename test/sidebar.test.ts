@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { SampleSource } from '../src/sample';
-import { needsYou, queueGroups } from '../src/sidebar';
+import { needsYou, queueGroups, repoGroups } from '../src/sidebar';
 
 describe('sidebar', () => {
   it('groups PRs in working order, failing first, and leaves out empty groups', async () => {
@@ -32,5 +32,16 @@ describe('sidebar with a team', () => {
     expect(needsYou(queue)).toBe(11);
     // Both repos have a #102; they're two PRs.
     expect(queue.filter((p) => p.number === 102).map((p) => p.repo).sort()).toEqual(['acme/payments-api', 'acme/storefront']);
+  });
+});
+
+describe('sidebar across repos', () => {
+  it('groups by repo, most of your turn first, each with its own status groups', async () => {
+    const queue = await new SampleSource('team').listPrs();
+    const repos = repoGroups(queue);
+    expect(repos.map((r) => [r.repo, r.yourTurn])).toEqual([['acme/storefront', 10], ['acme/payments-api', 1]]);
+    expect(repos[1]!.groups.map((g) => g.label)).toEqual(['Needs you', 'Your PRs']);
+    expect(repos[1]!.groups.flatMap((g) => g.prs).every((p) => p.repo === 'acme/payments-api')).toBe(true);
+    expect(repoGroups([])).toEqual([]);
   });
 });
