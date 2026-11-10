@@ -12,7 +12,7 @@
   "activationEvents": ["onStartupFinished"],
   "contributes": {
     "commands": [
-      { "command": "reviewDesk.open", "title": "Open review queue", "category": "Review Desk", "icon": "$(preview)" },
+      { "command": "reviewDesk.open", "title": "Open review queue", "category": "Review Desk", "icon": "$(inbox)" },
       { "command": "reviewDesk.openSample", "title": "Open with sample data", "category": "Review Desk" },
       { "command": "reviewDesk.openTeamSample", "title": "Open with team sample data", "category": "Review Desk" },
       { "command": "reviewDesk.switchRepository", "title": "Choose what to review", "category": "Review Desk", "icon": "$(repo)" },

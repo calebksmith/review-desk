@@ -19,11 +19,16 @@ let controller: Controller | undefined;
 /** Where review data comes from right now. The sidebar and the panel share it. */
 let source: DataSource | undefined;
 let tree: QueueTree;
+let treeView: vscode.TreeView<vscode.TreeItem> | undefined;
+/** The queue opens by itself once per window, when the sidebar first shows; closing it after that sticks. */
+let autoOpened = false;
 
 export function activate(context: vscode.ExtensionContext): void {
+  lastContext = context;
   tree = new QueueTree();
   const view = vscode.window.createTreeView('reviewDesk.queue', { treeDataProvider: tree, showCollapseAll: false });
   tree.attach(view);
+  treeView = view;
   context.subscriptions.push(
     view,
     command('reviewDesk.open', async () => {
@@ -63,7 +68,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const scope = await chooseScope(context, false);
       if (scope) { useSource(await githubSource(scope, true)); open(context); }
     }),
-    view.onDidChangeVisibility((e) => { if (e.visible) void tree.refreshIfStale(); }),
+    view.onDidChangeVisibility((e) => { if (e.visible) { void tree.refreshIfStale(); autoOpen(context); } }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('reviewDesk.label')) void tree.refresh();
       if (!e.affectsConfiguration('reviewDesk.repository') && !e.affectsConfiguration('reviewDesk.repositories')) return;
@@ -110,6 +115,16 @@ function useSource(next: DataSource): void {
   source = next;
   if (panel) { panel.dispose(); panel = undefined; controller = undefined; }
   tree.show(next);
+  if (treeView) autoOpen(treeView.visible ? lastContext : undefined);
+}
+
+let lastContext: vscode.ExtensionContext | undefined;
+
+/** Opening the sidebar opens the queue beside it, the first time in a window and once there's something to show. */
+function autoOpen(context: vscode.ExtensionContext | undefined): void {
+  if (!context || autoOpened || panel || !source || !treeView?.visible) return;
+  autoOpened = true;
+  open(context);
 }
 
 export function deactivate(): void {}
