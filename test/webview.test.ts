@@ -8,3 +8,12 @@ describe('webview markup', () => {
     expect(src.match(/\s[\w-]+=""\$\{/g) ?? []).toEqual([]);
   });
 });
+
+// VS Code's GitHub sign-in grants the "repo" scope only. Team fields need read:org, and asking for one
+// fails every query.
+describe('GitHub queries', () => {
+  const src = readFileSync(new URL('../src/github.ts', import.meta.url), 'utf8');
+  it('ask for no team fields, which the repo scope can’t read', () => {
+    expect(src.match(/\.\.\. on Team \{/g) ?? []).toEqual([]);
+  });
+});

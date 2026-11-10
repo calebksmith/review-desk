@@ -13,7 +13,7 @@ const PR_FIELDS = `
   headRefName baseRefName reviewDecision createdAt body
   milestone { title dueOn }
   timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 10) { nodes { ... on ReviewRequestedEvent { createdAt requestedReviewer { ... on User { login } } } } }
-  reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug } ... on Bot { login } } } }
+  reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Bot { login } } } }
   reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { body } } } }
   author { login }
   labels(first: 10) { nodes { name } }
@@ -32,7 +32,7 @@ interface RawPr {
   createdAt: string; body: string; milestone: { title: string; dueOn: string | null } | null;
   timelineItems: { nodes: { createdAt?: string; requestedReviewer?: { login?: string } | null }[] };
   headRefName: string; baseRefName: string; reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null;
-  reviewRequests: { nodes: { requestedReviewer: { __typename: string; login?: string; slug?: string } | null }[] };
+  reviewRequests: { nodes: { requestedReviewer: { __typename: string; login?: string } | null }[] };
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN'; mergeStateStatus: string;
   reviewThreads: { nodes: { isResolved: boolean; comments: { nodes: { body: string }[] } }[] };
   author: { login: string } | null;
@@ -269,7 +269,8 @@ function toSummary(p: RawPr, me: string): PrSummary {
   const reviewed: Reviewer[] = p.latestReviews.nodes
     .filter((r) => r.author && r.author.login !== author && REVIEW_STATE[r.state])
     .map((r) => ({ login: r.author!.login, state: REVIEW_STATE[r.state]! }));
-  const asked = p.reviewRequests.nodes.map((n) => n.requestedReviewer?.login ?? n.requestedReviewer?.slug).filter((l): l is string => !!l);
+  // A team's name needs the read:org permission, which Review Desk doesn't ask for; a team request reads "a team".
+  const asked = p.reviewRequests.nodes.map((n) => n.requestedReviewer?.login ?? (n.requestedReviewer?.__typename === 'Team' ? 'a team' : undefined)).filter((l): l is string => !!l);
   return {
     repo: p.repository.nameWithOwner,
     number: p.number,
