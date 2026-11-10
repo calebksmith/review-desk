@@ -155,6 +155,22 @@ main { flex: 1; min-width: 0; overflow: auto; display: flex; flex-direction: col
 .vbox { margin: 0; accent-color: var(--ok); cursor: pointer }
 .newdot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0 }
 .diffpane { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: auto }
+.dwrap { flex: 1; min-width: 0; display: flex; position: relative }
+/* Comments to go through: where you are, Previous and Next, and whole files or only the code near them. */
+.qbar { display: flex; align-items: center; gap: 10px; padding: 6px 20px; background: var(--chrome); border-bottom: 1px solid var(--line); flex-wrap: wrap; font-size: 12px }
+.qbar .qnav { display: inline-flex; gap: 4px }
+.qbar .seg { margin-left: auto; background: var(--win) }
+.qn { flex-shrink: 0; min-width: 18px; height: 16px; padding: 0 5px; border: 0; border-radius: 8px; font-family: var(--mono); font-size: 10px; font-weight: 700; line-height: 16px; cursor: pointer; background: var(--accent-soft); color: var(--accent-ink) }
+.qn.s0 { background: var(--bad); color: var(--win) } .qn.s1 { background: var(--warn-soft); color: var(--warn) }
+.qn:focus-visible { outline: 1px solid var(--focus) }
+/* Marks beside the diff's scrollbar, one per comment to go through. Only the marks take clicks. */
+.rail { position: absolute; top: 0; right: 0; bottom: 0; width: 8px; pointer-events: none }
+.rail .tick { position: absolute; right: 1px; top: calc(var(--y, 0) * 100%); width: 6px; height: 4px; padding: 0; border: 0; border-radius: 2px; background: var(--accent); opacity: .75; pointer-events: auto; cursor: pointer }
+.rail .tick.s0 { background: var(--bad) } .rail .tick.s1 { background: var(--warn) }
+.rail .tick.current { height: 6px; opacity: 1; box-shadow: 0 0 0 1px var(--focus) }
+.nsec + .nsec { border-top: 1px solid var(--line) }
+.nsec .dh .cnt { font-size: 11px; color: var(--fg-3) }
+.nsec .dh .end { margin-left: auto }
 .dh { display: flex; align-items: center; gap: 10px; padding: 6px 12px; background: var(--chrome); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 1 }
 .vt { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--fg-2); cursor: pointer }
 .code { font-family: var(--mono); font-size: var(--vscode-editor-font-size, 12px); line-height: 1.6 }
@@ -445,7 +461,7 @@ kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: ce
 .ln:hover .addc, .addc:focus-visible { opacity: 1 }
 .tcard, .drf, .composer { margin: 6px 12px 8px 64px; border: 1px solid var(--line); border-radius: 8px; background: var(--win); font-family: var(--ui); font-size: 13px; line-height: 20px; white-space: normal }
 .tcard { padding: 8px 12px; display: flex; flex-direction: column; gap: 6px }
-.tcard.current { box-shadow: 0 0 0 2px var(--focus) }
+.tcard.current, .drf.current { box-shadow: 0 0 0 2px var(--focus) }
 .tcard.resolved { opacity: .7 }
 .tch { display: flex; align-items: center; gap: 8px }
 .tch > .ico { width: 14px; height: 14px; color: var(--fg-3) }

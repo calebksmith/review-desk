@@ -5,6 +5,7 @@ import { mergeTree, parentOf, stackOf, stacks, type StackRow, type TreeRow } fro
 import { parseKey, prKey } from '../src/protocol';
 import type { CheckRun, Comment, CommentAction, ConversationItem, Draft, ReviewEvent, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
 import { reasons } from '../src/signals';
+import { fileMarks, nearLines, reviewQueue, stepQueue, type QueueItem } from '../src/queue';
 import { bulkMergeable, isDependabot, isReReview, openFindings, priority, priorityOrder, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
 
 // The webview only renders. Everything it knows comes from the host's state messages;
@@ -19,14 +20,14 @@ type Step = 'overview' | 'checks' | 'files';
 /** The comment box open in the diff: a new comment on a line (or range), a reply to a thread, or an edit. */
 interface Composer { id?: string; path: string; line: number | null; side: 'RIGHT' | 'LEFT'; startLine?: number | null; replyTo?: string; resolve?: boolean; editId?: string; prefill?: string }
 type Thread = Extract<ConversationItem, { kind: 'thread' }>;
-interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; part: PartKey | null; cardOpen: boolean; conv: 'all' | 'unresolved' | 'mine'; composer: Composer | null; finding: string | null; menu: 'checklist' | 'methods' | 'review' | null }
+interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; part: PartKey | null; cardOpen: boolean; conv: 'all' | 'unresolved' | 'mine'; composer: Composer | null; finding: string | null; near: boolean; menu: 'checklist' | 'methods' | 'review' | null }
 
 let host: HostState | null = null;
 /** True while the reviewer moves through the queue with j/k; a mouse move hides the cursor again. */
 let kbd = false;
 /** Text to put in Overview's comment box on the next render. */
 let prefill: string | null = null;
-let view: View = { filter: 'all', repo: '', reviewEvent: null, part: null, cardOpen: false, conv: 'all', composer: null, finding: null, showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
+let view: View = { filter: 'all', repo: '', reviewEvent: null, part: null, cardOpen: false, conv: 'all', composer: null, finding: null, near: false, showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
 // State saved by older versions named the files page "review".
 if (!['overview', 'checks', 'files'].includes(view.step)) view.step = 'files';
 // Older versions saved a bare PR number; keys are owner/name#number now.
@@ -41,6 +42,7 @@ const I = {
   x: svg('M6 6l12 12M18 6L6 18'),
   dot: '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/></svg>',
   chev: svg('M9 6l6 6-6 6'),
+  prev: svg('M15 6l-6 6 6 6'),
   back: svg('M19 12H5M11 6l-6 6 6 6'),
   inbox: svg('M3 13h5l2 3h4l2-3h5M5 5h14l2 8v6H3v-6z'),
   rerun: svg('M4 12a8 8 0 1 0 2.3-5.7M4 4v4h4'),
@@ -557,12 +559,21 @@ function stepFiles(pr: PrDetail): string {
   const since = pr.sinceLastLook;
   const changedSince = new Set(since?.files.map((f) => f.path) ?? []);
 
+  const q = reviewQueue(pr, host!.drafts, host!.user);
+  const marks = fileMarks(q);
+  const near = view.near && q.length > 0;
+  const cur = q.find((x) => x.id === view.finding) ?? null;
+
   const flist = files.map((f) => {
     const isNew = changedSince.has(f.path) || f.viewed === 'changed';
-    return `<div class="frow" aria-current="${view.file === f.path}">
+    const m = marks.get(f.path);
+    const first = m && q.find((x) => x.path === f.path);
+    const badge = m && first ? `<button class="qn ${sevTone(m.severity)}" data-q="${esc(first.id)}" title="${plural(m.count, 'comment')} to go through. Show ${m.count > 1 ? 'the first' : 'it'}" aria-label="${plural(m.count, 'comment')} to go through in ${esc(base(f.path))}">${m.count}</button>` : '';
+    const here = near ? cur?.path === f.path : view.file === f.path;
+    return `<div class="frow" aria-current="${here}">
       <input type="checkbox" class="vbox" data-viewed="${esc(f.path)}" ${f.viewed === 'viewed' ? 'checked' : ''} aria-label="Viewed ${esc(f.path)}">
       <button class="fn" data-file="${esc(f.path)}" title="${esc(f.path)}"><span class="bn">${esc(base(f.path))}</span><span class="dir">${esc(dir(f.path).replace(/\/$/, ''))}</span></button>
-      ${isNew ? '<span class="newdot" title="Changed since you looked"></span>' : ''}<span class="diffstat"><span class="a">+${f.additions}</span> <span class="d">−${f.deletions}</span></span></div>`;
+      ${isNew ? '<span class="newdot" title="Changed since you looked"></span>' : ''}${badge}<span class="diffstat"><span class="a">+${f.additions}</span> <span class="d">−${f.deletions}</span></span></div>`;
   }).join('');
 
   let lines = file?.lines ?? null;
@@ -571,10 +582,41 @@ function stepFiles(pr: PrDetail): string {
   const banner = since && pr.state !== 'merged' ? `<div class="newbar">${I.rerun}<b>${plural(since.commits, 'new commit')} since your ${since.kind === 'review' ? 'review' : 'last look'}</b><span class="chip">${esc(since.fromSha.slice(0, 7))}…${esc(since.toSha.slice(0, 7))}</span><span>${since.files.map((f) => esc(base(f.path))).join(', ')}</span>
     ${fileSince ? `<div class="seg"><button data-onlynew="0" aria-pressed="${!view.onlyNew}">Whole change</button><button data-onlynew="1" aria-pressed="${view.onlyNew}">${since.kind === 'review' ? 'Since your review' : 'Since you looked'}</button></div>` : since.files[0] ? `<button class="btn sm" data-file="${esc(since.files[0].path)}" data-onlynew="1">Show it${I.chev}</button>` : ''}</div>` : '';
 
-  return `${banner}
+  const whole = file ? `<div class="dh"><span class="mono">${esc(file.path)}</span><label class="vt"><input type="checkbox" data-viewed="${esc(file.path)}" ${file.viewed === 'viewed' ? 'checked' : ''}> Viewed</label></div>
+        <div class="code">${lines ? renderDiff(file!.path, lines, pr) : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>';
+
+  return `${banner}${queueBar(q, cur, near)}
     <div class="split"><nav class="files" aria-label="Changed files">${pr.state === 'open' ? `<button class="btn sm fix agentrev" data-do="reviewWithAgent" title="Your agent reviews this PR adversarially; its findings come back as drafts">${I.spark}Review with agent</button>` : ''}<div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}</nav>
-      <section class="diffpane" aria-label="Diff">${file ? `<div class="dh"><span class="mono">${esc(file.path)}</span><label class="vt"><input type="checkbox" data-viewed="${esc(file.path)}" ${file.viewed === 'viewed' ? 'checked' : ''}> Viewed</label></div>
-        <div class="code">${lines ? renderDiff(file!.path, lines, pr) : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>'}</section></div>`;
+      <div class="dwrap"><section class="diffpane" aria-label="Diff" data-shows="${near ? '' : esc(file?.path ?? '')}">${near ? nearDiff(q, pr) : whole}</section><div class="rail" aria-hidden="true"></div></div></div>`;
+}
+
+/** Severity as a color class for the file list's counts and the scrollbar's marks: only P0 and P1 get one. */
+const sevTone = (n: number | null) => (n === 0 ? 's0' : n === 1 ? 's1' : '');
+
+/**
+ * Where you are in the comments to go through, with Previous and Next, and whether the diff shows whole files
+ * or only the code near those comments. Hidden when nothing is left to go through.
+ */
+function queueBar(q: QueueItem[], cur: QueueItem | null, near: boolean): string {
+  if (!q.length) return '';
+  // On the only one left, there's nowhere to step to.
+  const only = !!cur && q.length === 1;
+  const where = cur ? `${sevChip(cur.severity)}${cur.kind === 'draft' ? `<span class="chip agent">${I.spark}From your agent</span>` : ''}<button class="link mono" data-q="${esc(cur.id)}" title="Show it">${esc(base(cur.path))}${cur.line ? `:${cur.line}` : ''}</button>` : '';
+  return `<div class="qbar"><b>${cur ? `Comment ${q.indexOf(cur) + 1} of ${q.length}` : `${plural(q.length, 'comment')} to go through`}</b>${where}
+    <span class="qnav"><button class="btn sm" data-do="prevFinding" title="Previous comment ( [ )" aria-label="Previous comment" ${only ? 'disabled' : ''}>${I.prev}</button><button class="btn sm" data-do="nextFinding" title="Next comment ( ] )" ${only ? 'disabled' : ''}>${cur ? 'Next' : 'Start'}${I.chev}</button></span>
+    <div class="seg"><button data-do="near" data-near="0" aria-pressed="${!near}">Whole files</button><button data-do="near" data-near="1" aria-pressed="${near}" title="Every file with comments to go through, cut down to the code around them">Near comments</button></div></div>`;
+}
+
+/** Only the code near the comments to go through, every file with some in one scroll, most severe file first. */
+function nearDiff(q: QueueItem[], pr: PrDetail): string {
+  const paths = [...new Set(q.map((x) => x.path))];
+  return paths.map((path) => {
+    const f = pr.files.find((x) => x.path === path);
+    const full = f?.lines ?? [];
+    const here = q.filter((x) => x.path === path);
+    return `<section class="nsec"><div class="dh"><span class="mono">${esc(path)}</span><span class="cnt">${plural(here.length, 'comment')}</span><span class="end"><button class="link" data-file="${esc(path)}">Whole file${I.chev}</button></span></div>
+      <div class="code">${renderDiff(path, nearLines(full, here), pr, full)}</div></section>`;
+  }).join('');
 }
 
 /* ---------- Comments in the diff ---------- */
@@ -583,23 +625,24 @@ const SEV = ['P0', 'P1', 'P2', 'P3'];
 const sevChip = (n: number | null | undefined) => (n == null ? '' : `<span class="sev s${n}" title="Severity ${SEV[n]}">${SEV[n]}</span>`);
 const threads = (pr: PrDetail) => pr.conversation.filter((it): it is Thread => it.kind === 'thread');
 
-/** Open findings, most severe first (unmarked last), then by file and line: what ] and [ step through. */
-function findings(pr: PrDetail): Thread[] {
-  return threads(pr).filter((t) => !t.resolved).sort((a, b) => (a.severity ?? 9) - (b.severity ?? 9) || a.path.localeCompare(b.path) || (a.line ?? 0) - (b.line ?? 0));
-}
+/** The comments to go through on the open PR: what ] and [ step through. */
+const queueNow = () => (host?.pr ? reviewQueue(host.pr, host.drafts, host.user) : []);
 
-/** The diff with comments woven in: threads and held-back comments under their lines, and the comment box. */
-function renderDiff(path: string, lines: DiffLine[], pr: PrDetail): string {
+/**
+ * The diff with comments woven in: threads and held-back comments under their lines, and the comment box.
+ * `full` is the file's whole diff when `lines` is cut down to the code near comments: comments on lines cut
+ * away just aren't shown, and only those on lines the diff doesn't have at all are listed above it.
+ */
+function renderDiff(path: string, lines: DiffLine[], pr: PrDetail, full: DiffLine[] = lines): string {
   const h = host!;
   const here = threads(pr).filter((t) => t.path === path);
   const drafts = h.drafts.filter((d) => d.path === path && !d.replyTo);
-  const shown = new Set<string>();
   const out = lines.map((l) => {
     let html = diffLine(l);
     if (l.kind === 'gap') return html;
     const side: 'RIGHT' | 'LEFT' = l.kind === 'del' ? 'LEFT' : 'RIGHT';
     const no = side === 'LEFT' ? l.oldNo : l.newNo;
-    for (const t of here.filter((x) => side === 'RIGHT' && x.line === no)) { html += threadCard(t, pr); shown.add(t.id); }
+    for (const t of here.filter((x) => side === 'RIGHT' && x.line === no)) html += threadCard(t, pr);
     for (const d of drafts.filter((x) => x.side === side && x.line === no)) html += draftCard(d);
     const c = view.composer;
     if (c && !c.replyTo && !c.editId && c.path === path && c.side === side && c.line === no) html += composerBox(c);
@@ -607,8 +650,9 @@ function renderDiff(path: string, lines: DiffLine[], pr: PrDetail): string {
   }).join('');
   // Threads on lines this diff doesn't show (outdated, or outside the changed hunks), and findings without a
   // line, still need a home.
-  const elsewhere = here.filter((t) => !shown.has(t.id));
-  const loose = drafts.filter((d) => d.line == null || !lines.some((l) => l.kind !== 'gap' && (d.side === 'LEFT' ? l.oldNo : l.newNo) === d.line && (d.side === 'LEFT') === (l.kind === 'del')));
+  const inFull = (side: 'RIGHT' | 'LEFT', line: number | null) => line != null && full.some((l) => l.kind !== 'gap' && (side === 'LEFT' ? l.oldNo : l.newNo) === line && (side === 'LEFT') === (l.kind === 'del'));
+  const elsewhere = here.filter((t) => !inFull('RIGHT', t.line));
+  const loose = drafts.filter((d) => !inFull(d.side, d.line));
   return (elsewhere.length || loose.length ? `<div class="outside"><span class="lbl">Comments on lines not shown here</span>${elsewhere.map((t) => threadCard(t, pr)).join('')}${loose.map(draftCard).join('')}</div>` : '') + out;
 }
 
@@ -633,7 +677,7 @@ function threadCard(t: Thread, pr: PrDetail): string {
 function draftCard(d: Draft): string {
   const c = view.composer;
   if (c?.editId === d.id) return composerBox(c);
-  return `<div class="drf ${d.from}"><div class="drh"><span class="chip pend">Pending</span>${d.from === 'agent' ? `<span class="chip agent">${I.spark}From your agent</span>` : ''}${sevChip(d.severity)}${d.resolve ? '<span class="chip">Resolves the thread</span>' : ''}
+  return `<div class="drf ${d.from} ${view.finding === d.id ? 'current' : ''}" data-draft-id="${esc(d.id)}"><div class="drh"><span class="chip pend">Pending</span>${d.from === 'agent' ? `<span class="chip agent">${I.spark}From your agent</span>` : ''}${sevChip(d.severity)}${d.resolve ? '<span class="chip">Resolves the thread</span>' : ''}
     <span class="end"><button class="link" data-edit="${esc(d.id)}">Edit</button><button class="link" data-del="${esc(d.id)}">Delete</button>${d.from === 'agent' ? `<button class="btn sm" data-keep="${esc(d.id)}">Keep</button>` : ''}</span></div>
     <div class="drb">${esc(d.body.replace(/^\*\*P[0-3]\*\*\s*/, ''))}</div></div>`;
 }
@@ -804,9 +848,24 @@ function render(): void {
   });
   // Redrawing replaces every scrolling area; keep where each one was (refreshes happen on their own now).
   const scrolls = SCROLLERS.map((sel) => Array.from(app.querySelectorAll<HTMLElement>(sel)).map((el) => el.scrollTop));
+  // The comment you're on stays where it is on screen, even when the comments above it are gone (dealt with)
+  // or have grown (a reply box opened).
+  // The diff keeps its place while it shows the same thing; another file starts at the top.
+  const paneWas = app.querySelector<HTMLElement>('.diffpane');
+  const pane = paneWas && { shows: paneWas.dataset.shows, top: paneWas.scrollTop };
+  const curEl = view.finding ? cardFor(view.finding) : null;
+  const cur = curEl && { id: view.finding!, top: curEl.getBoundingClientRect().top };
   app.innerHTML = err + (host.view === 'pr' ? prView(host) : queue(host)) + (view.keys ? keysHelp() : '');
   applyVars();
   SCROLLERS.forEach((sel, i) => app.querySelectorAll<HTMLElement>(sel).forEach((el, j) => { const top = scrolls[i]![j]; if (top) el.scrollTop = top; }));
+  const paneNow = app.querySelector<HTMLElement>('.diffpane');
+  if (pane && paneNow && paneNow.dataset.shows === pane.shows) paneNow.scrollTop = pane.top;
+  if (cur) {
+    const el = cardFor(cur.id);
+    const pane = el?.closest<HTMLElement>('.diffpane');
+    if (el && pane) pane.scrollTop += el.getBoundingClientRect().top - cur.top;
+  }
+  placeMarks();
   for (const t of typing) {
     const el = t && (document.getElementById(t.id) as HTMLTextAreaElement | null);
     if (!el || !t || (el.dataset.for ?? '') !== t.owner) continue;
@@ -819,6 +878,28 @@ function render(): void {
     if (box) { box.value = prefill; box.focus(); box.dispatchEvent(new Event('input', { bubbles: true })); prefill = null; }
   }
 }
+
+/** A mark beside the diff's scrollbar for each comment to go through, at its place in the diff; click one to go there. */
+function placeMarks(): void {
+  const rail = app.querySelector<HTMLElement>('.rail');
+  const pane = app.querySelector<HTMLElement>('.diffpane');
+  if (!rail || !pane) return;
+  rail.replaceChildren();
+  if (pane.scrollHeight <= pane.clientHeight) return;
+  const top = pane.getBoundingClientRect().top - pane.scrollTop;
+  for (const q of queueNow()) {
+    const el = cardFor(q.id);
+    if (!el) continue;
+    const b = document.createElement('button');
+    b.className = `tick ${sevTone(q.severity)} ${q.id === view.finding ? 'current' : ''}`;
+    b.dataset.q = q.id;
+    b.tabIndex = -1;
+    b.title = `${base(q.path)}${q.line ? `:${q.line}` : ''}`;
+    b.style.setProperty('--y', String((el.getBoundingClientRect().top - top) / pane.scrollHeight));
+    rail.append(b);
+  }
+}
+window.addEventListener('resize', placeMarks);
 
 /**
  * The webview's CSP has no 'unsafe-inline', so style attributes in rendered HTML are dropped. Layout values
@@ -895,7 +976,7 @@ document.addEventListener('click', (e) => {
     if (/^https?:/.test(a.href)) send({ type: 'openExternal', url: a.href });
     return;
   }
-  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-conv],[data-part],[data-layout],[data-cline],[data-reply],[data-edit],[data-del],[data-keep],[data-goto],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
+  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-conv],[data-part],[data-layout],[data-cline],[data-reply],[data-edit],[data-del],[data-keep],[data-goto],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-q],[data-do]');
   if (!t || (t as HTMLButtonElement).disabled) return;
   // An action picked from a menu closes it.
   if (view.menu && t.closest('.pop') && !t.dataset.part && t.dataset.do !== 'cardOpen') view.menu = null;
@@ -907,17 +988,18 @@ document.addEventListener('click', (e) => {
   else if (d.part) save({ part: view.part === d.part ? null : (d.part as PartKey) });
   else if (d.step) save({ step: d.step as Step });
   else if (d.fix) send({ type: 'fixWithAgent', check: d.fix });
-  else if (d.thread) send({ type: 'fixThread', id: d.thread });
+  else if (d.thread) { send({ type: 'fixThread', id: d.thread }); advanceFrom(d.thread); }
   else if (d.action) { const a: CommentAction | undefined = host?.actions[Number(d.action)]; if (a) send({ type: 'comment', body: a.comment }); }
-  else if (d.file) save({ file: d.file, step: 'files', onlyNew: d.onlynew === '1' });
+  else if (d.file) save({ file: d.file, step: 'files', onlyNew: d.onlynew === '1', near: false });
   else if (d.onlynew) save({ onlyNew: d.onlynew === '1' });
   else if (d.line && view.file) send({ type: 'openFile', path: view.file, line: Number(d.line) });
   else if (d.cline && view.file) openComposer(d.cline, (e as MouseEvent).shiftKey);
   else if (d.reply) save({ composer: replyTo(d.reply, d.resolve === '1', d.prefill), finding: d.reply });
   else if (d.edit) { const dr = host?.drafts.find((x) => x.id === d.edit); if (dr) save({ composer: { id: composerId(), path: dr.path, line: dr.line, side: dr.side, replyTo: dr.replyTo, resolve: dr.resolve, editId: dr.id, prefill: dr.body } }); }
-  else if (d.del) send({ type: 'deleteDraft', id: d.del });
-  else if (d.keep) send({ type: 'keepDraft', id: d.keep });
-  else if (d.goto) goToThread(d.goto);
+  else if (d.del) { send({ type: 'deleteDraft', id: d.del }); advanceFrom(d.del); }
+  else if (d.keep) { send({ type: 'keepDraft', id: d.keep }); advanceFrom(d.keep); }
+  else if (d.goto) goToItem(d.goto);
+  else if (d.q) goToItem(d.q);
   else if (d.ext) send({ type: 'openExternal', url: d.ext });
   else if (d.do === 'back') send({ type: 'back' });
   else if (d.do === 'refresh') send({ type: 'refresh' });
@@ -936,6 +1018,15 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'composeCancel') save({ composer: null });
   else if (d.do === 'composeAdd' || d.do === 'composeNow' || d.do === 'composeSave') finishComposer(d.do);
   else if (d.do === 'nextFinding') stepFinding(1);
+  else if (d.do === 'prevFinding') stepFinding(-1);
+  else if (d.do === 'near') {
+    // Showing only code near comments starts at the first one, unless you're already on one.
+    const on = d.near === '1';
+    const q = queueNow();
+    const start = on && !q.some((x) => x.id === view.finding) ? q[0]?.id ?? null : view.finding;
+    save({ near: on, finding: start });
+    if (start) cardFor(start)?.scrollIntoView({ block: 'center' });
+  }
   else if (d.do === 'cardOpen') save({ cardOpen: !view.cardOpen, part: null });
   else if (d.do === 'reviewWithAgent') send({ type: 'reviewWithAgent' });
   else if (d.do === 'dependabotRebase') send({ type: 'comment', body: '@dependabot rebase' });
@@ -979,23 +1070,40 @@ function finishComposer(how: 'composeAdd' | 'composeNow' | 'composeSave'): void 
   if (how === 'composeSave' && c.editId) send({ type: 'editDraft', id: c.editId, body });
   else send({ type: how === 'composeNow' ? 'commentNow' : 'addDraft', draft });
   save({ composer: null });
+  if (how !== 'composeSave') advanceFrom(c.replyTo);
 }
 
-/** Shows a thread in the diff: its file, scrolled to it. */
-function goToThread(id: string): void {
-  const t = host?.pr && threads(host.pr).find((x) => x.id === id);
-  if (!t) return;
-  save({ step: 'files', file: t.path, onlyNew: false, finding: id });
-  document.querySelector(`.tcard[data-thread-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'center' });
+/**
+ * Shows a thread or a held-back comment in the diff, scrolled to it. Showing only code near comments stays on
+ * if it's one to go through; anything else (a resolved thread, say) opens its whole file.
+ */
+function goToItem(id: string): void {
+  const pr = host?.pr;
+  if (!pr) return;
+  const path = threads(pr).find((x) => x.id === id)?.path ?? host!.drafts.find((d) => d.id === id)?.path;
+  if (path == null) return;
+  const near = view.near && queueNow().some((x) => x.id === id);
+  save({ step: 'files', onlyNew: false, finding: id, near, ...(near ? {} : { file: path }) });
+  cardFor(id)?.scrollIntoView({ block: 'center' });
 }
 
-/** ] and [: the next or previous open finding, most severe first. */
+const cardFor = (id: string) => app.querySelector<HTMLElement>(`.diffpane [data-thread-id="${CSS.escape(id)}"], .diffpane [data-draft-id="${CSS.escape(id)}"]`);
+
+/** ] and [: the next or previous comment to go through, most severe first. */
 function stepFinding(dir: 1 | -1): void {
-  const list = host?.pr ? findings(host.pr) : [];
-  if (!list.length) { return; }
-  const at = list.findIndex((t) => t.id === view.finding);
-  const next = list[(at < 0 ? (dir > 0 ? 0 : list.length - 1) : (at + dir + list.length) % list.length)]!;
-  goToThread(next.id);
+  const next = stepQueue(queueNow(), view.finding, dir);
+  if (next) goToItem(next.id);
+}
+
+/**
+ * Once you've dealt with the comment you're on (answered it, sent it to your agent, kept or deleted your
+ * agent's suggestion), go on to the next one. Only in Files changed, and only for the current comment.
+ */
+function advanceFrom(id: string | undefined): void {
+  if (!id || id !== view.finding || view.step !== 'files') return;
+  const next = stepQueue(queueNow(), id, 1);
+  if (next) goToItem(next.id);
+  else save({ finding: null });
 }
 
 function submitReview(): void {
