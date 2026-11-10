@@ -245,6 +245,14 @@ describe('Controller', () => {
     expect(last().pr!.conversation).toHaveLength(before);
   });
 
+  it('resolves a thread right away, as GitHub’s Resolve conversation does', async () => {
+    const { c, sent } = setup();
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });
+    await c.handle({ type: 'resolveThread', id: 'T_52_1' });
+    expect(c.snapshot.pr?.conversation.find((it) => it.kind === 'thread' && it.id === 'T_52_1')).toMatchObject({ resolved: true });
+    expect(sent.some((m) => m.type === 'toast' && m.text === 'Resolved the comment on WorkCard.tsx:44.')).toBe(true);
+  });
+
   it('sends an unresolved line comment to the agent', async () => {
     const { c, prompts } = setup();
     await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });

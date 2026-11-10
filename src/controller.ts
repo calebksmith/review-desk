@@ -83,6 +83,7 @@ export class Controller {
         case 'keepDraft': await this.saveDrafts(this.state.drafts.map((d) => (d.id === msg.id ? { ...d, from: 'you' } : d))); break;
         case 'deleteDraft': await this.saveDrafts(this.state.drafts.filter((d) => d.id !== msg.id)); break;
         case 'commentNow': await this.commentNow(msg.draft); break;
+        case 'resolveThread': await this.resolveThread(msg.id); break;
         case 'reviewWithAgent': await this.reviewWithAgent(); break;
         case 'dismissNotice': this.set({ notice: null }); break;
       }
@@ -316,6 +317,22 @@ export class Controller {
       this.set({ busy: null });
     }
     this.host.post({ type: 'toast', text: `Comment posted${sent.unresolved ? `.${notResolved(sent)}` : ''}` });
+    await this.loadPr(pr);
+  }
+
+  /** Resolves a thread right away, as GitHub's Resolve conversation does: not held back for the review. */
+  private async resolveThread(id: string): Promise<void> {
+    const pr = this.state.pr;
+    const thread = pr?.conversation.find((it) => it.kind === 'thread' && it.id === id);
+    if (!pr || thread?.kind !== 'thread' || thread.resolved || this.state.busy) return;
+    this.set({ busy: 'resolve' });
+    try {
+      await this.source.resolveThread(pr, id);
+      this.source.invalidate?.();
+    } finally {
+      this.set({ busy: null });
+    }
+    this.host.post({ type: 'toast', text: `Resolved the comment on ${thread.path.split('/').pop()}${thread.line ? `:${thread.line}` : ''}.` });
     await this.loadPr(pr);
   }
 

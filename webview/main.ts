@@ -583,7 +583,7 @@ function stepFiles(pr: PrDetail): string {
     ${fileSince ? `<div class="seg"><button data-onlynew="0" aria-pressed="${!view.onlyNew}">Whole change</button><button data-onlynew="1" aria-pressed="${view.onlyNew}">${since.kind === 'review' ? 'Since your review' : 'Since you looked'}</button></div>` : since.files[0] ? `<button class="btn sm" data-file="${esc(since.files[0].path)}" data-onlynew="1">Show it${I.chev}</button>` : ''}</div>` : '';
 
   const whole = file ? `<div class="dh"><span class="mono">${esc(file.path)}</span><label class="vt"><input type="checkbox" data-viewed="${esc(file.path)}" ${file.viewed === 'viewed' ? 'checked' : ''}> Viewed</label></div>
-        <div class="code">${lines ? renderDiff(file!.path, lines, pr) : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>';
+        <div class="code" data-path="${esc(file.path)}">${lines ? renderDiff(file!.path, lines, pr) : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>';
 
   return `${banner}${queueBar(q, cur, near)}
     <div class="split"><nav class="files" aria-label="Changed files">${pr.state === 'open' ? `<button class="btn sm fix agentrev" data-do="reviewWithAgent" title="Your agent reviews this PR adversarially; its findings come back as drafts">${I.spark}Review with agent</button>` : ''}<div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}</nav>
@@ -615,7 +615,7 @@ function nearDiff(q: QueueItem[], pr: PrDetail): string {
     const full = f?.lines ?? [];
     const here = q.filter((x) => x.path === path);
     return `<section class="nsec"><div class="dh"><span class="mono">${esc(path)}</span><span class="cnt">${plural(here.length, 'comment')}</span><span class="end"><button class="link" data-file="${esc(path)}">Whole file${I.chev}</button></span></div>
-      <div class="code">${renderDiff(path, nearLines(full, here), pr, full)}</div></section>`;
+      <div class="code" data-path="${esc(path)}">${renderDiff(path, nearLines(full, here), pr, full)}</div></section>`;
   }).join('');
 }
 
@@ -662,11 +662,11 @@ function threadCard(t: Thread, pr: PrDetail): string {
   const c = view.composer;
   const composing = c && c.replyTo === t.id && !c.editId;
   // Once you've answered it (a reply is held back), just offer another reply.
-  const acts = t.resolved ? '' : replies.length ? `<div class="tacts"><button class="link" data-reply="${esc(t.id)}">Reply</button></div>` : `<div class="tacts">
+  const acts = t.resolved ? '' : replies.length ? `<div class="tacts"><button class="link" data-reply="${esc(t.id)}">Reply</button><button class="link" data-resolvethread="${esc(t.id)}" ${h.busy ? 'disabled' : ''} title="Resolve this conversation now, as on GitHub">Resolve</button></div>` : `<div class="tacts">
       <button class="btn sm fix" data-thread="${esc(t.id)}" title="Send this finding to your AI agent to fix">${I.spark}Fix it</button>
       <button class="btn sm" data-reply="${esc(t.id)}" data-prefill="Agreed, please fix this. " title="Held back as a reply, sent with your review">Ask the author</button>
       <button class="btn sm" data-reply="${esc(t.id)}" data-resolve="1" data-prefill="Not an issue: " title="A reply that also resolves the thread when your review is sent">Not an issue</button>
-      <button class="link" data-reply="${esc(t.id)}">Reply</button></div>`;
+      <button class="link" data-reply="${esc(t.id)}">Reply</button><button class="link" data-resolvethread="${esc(t.id)}" ${h.busy ? 'disabled' : ''} title="Resolve this conversation now, as on GitHub">Resolve</button></div>`;
   return `<div class="tcard ${t.resolved ? 'resolved' : ''} ${view.finding === t.id ? 'current' : ''}" data-thread-id="${esc(t.id)}">
     <div class="tch">${I.com}${sevChip(t.severity)}<span class="pill ${t.resolved ? '' : 'need'}">${t.resolved ? 'Resolved' : 'Unresolved'}</span>${t.outdated ? '<span class="pill">Outdated</span>' : ''}${t.line ? `<span class="mono tl">line ${t.line}</span>` : ''}</div>
     ${t.comments.map((cm) => comment(cm, '')).join('')}${replies.map(draftCard).join('')}${composing ? composerBox(c!) : acts}</div>`;
@@ -790,7 +790,7 @@ function convItem(it: ConversationItem, firstNew = false): string {
   // On a thread you started, say whether it's been answered.
   const answered = !it.resolved && it.comments[0]?.author === me && last ? (last.author !== me ? `<span class="ck-s run">${I.com}${esc(who(last.author))} replied</span>` : '<span class="ck-s muted">No reply yet</span>') : '';
   const state = (it.resolved ? '<span class="pill">Resolved</span>' : '<span class="pill need">Unresolved</span>') + answered;
-  const fix = it.resolved ? '' : `<span class="end tacts-inline"><button class="btn sm fix" data-thread="${esc(it.id)}" title="Send this comment to your AI agent">${I.spark}Fix it</button><button class="btn sm" data-goto="${esc(it.id)}" title="Answer it in the diff: ask the author, or say it’s not an issue">Answer in diff</button></span>`;
+  const fix = it.resolved ? '' : `<span class="end tacts-inline"><button class="btn sm fix" data-thread="${esc(it.id)}" title="Send this comment to your AI agent">${I.spark}Fix it</button><button class="btn sm" data-goto="${esc(it.id)}" title="Answer it in the diff: ask the author, or say it’s not an issue">Answer in diff</button><button class="btn sm" data-resolvethread="${esc(it.id)}" ${host?.busy ? 'disabled' : ''} title="Resolve this conversation now, as on GitHub">Resolve</button></span>`;
   return `<article class="ci thread"${anchor} data-thread-id="${esc(it.id)}"><div class="cih">${I.com}${sevChip(it.severity)}<button class="link mono" data-goto="${esc(it.id)}" title="Show it in the diff">${esc(where)}</button>${state}${it.outdated ? '<span class="pill">Outdated</span>' : ''}${fix}</div>
     ${it.comments.map((c) => comment(c, '')).join('')}</article>`;
 }
@@ -831,22 +831,19 @@ function render(): void {
   });
   // Redrawing replaces every scrolling area; keep where each one was (refreshes happen on their own now).
   const scrolls = SCROLLERS.map((sel) => Array.from(app.querySelectorAll<HTMLElement>(sel)).map((el) => el.scrollTop));
-  // The comment you're on stays where it is on screen, even when the comments above it are gone (dealt with)
-  // or have grown (a reply box opened).
   // The diff keeps its place while it shows the same thing; another file starts at the top.
   const paneWas = app.querySelector<HTMLElement>('.diffpane');
-  const pane = paneWas && { shows: paneWas.dataset.shows, top: paneWas.scrollTop };
-  const curEl = view.finding ? cardFor(view.finding) : null;
-  const cur = curEl && { id: view.finding!, top: curEl.getBoundingClientRect().top };
+  const pane = paneWas && { shows: paneWas.dataset.shows, top: paneWas.scrollTop, anchor: diffAnchor(paneWas) };
   app.innerHTML = err + (host.view === 'pr' ? prView(host) : queue(host)) + (view.keys ? keysHelp() : '');
   applyVars();
   SCROLLERS.forEach((sel, i) => app.querySelectorAll<HTMLElement>(sel).forEach((el, j) => { const top = scrolls[i]![j]; if (top) el.scrollTop = top; }));
   const paneNow = app.querySelector<HTMLElement>('.diffpane');
-  if (pane && paneNow && paneNow.dataset.shows === pane.shows) paneNow.scrollTop = pane.top;
-  if (cur) {
-    const el = cardFor(cur.id);
-    const pane = el?.closest<HTMLElement>('.diffpane');
-    if (el && pane) pane.scrollTop += el.getBoundingClientRect().top - cur.top;
+  if (pane && paneNow && paneNow.dataset.shows === pane.shows) {
+    paneNow.scrollTop = pane.top;
+    // What you were reading stays put, even when things above it changed: a comment dealt with, a reply box
+    // opened, or a thread gone outdated and moved to the box at the top of the file.
+    const el = pane.anchor && findAnchor(paneNow, pane.anchor.key);
+    if (el) paneNow.scrollTop += el.getBoundingClientRect().top - paneNow.getBoundingClientRect().top - pane.anchor!.top;
   }
   placeMarks();
   for (const t of typing) {
@@ -861,6 +858,22 @@ function render(): void {
     if (box) { box.value = prefill; box.focus(); box.dispatchEvent(new Event('input', { bubbles: true })); prefill = null; }
   }
 }
+
+/**
+ * What's at the top of the diff on screen, and how far down the pane: the first code line you can see, or, when a
+ * comment fills the screen, that comment. A code line comes first because comments can move (an outdated thread
+ * goes to the box at the top of the file) and the code you were reading shouldn't move with them.
+ */
+function diffAnchor(pane: HTMLElement): { key: string; top: number } | null {
+  const top = pane.getBoundingClientRect().top;
+  const bottom = top + pane.clientHeight;
+  const seen = (el: HTMLElement) => { const r = el.getBoundingClientRect(); return r.bottom > top && r.top < bottom; };
+  const el = Array.from(pane.querySelectorAll<HTMLElement>('.ln')).find(seen) ?? Array.from(pane.querySelectorAll<HTMLElement>('[data-thread-id], [data-draft-id]')).find(seen);
+  return el ? { key: anchorKey(el), top: el.getBoundingClientRect().top - top } : null;
+}
+
+const anchorKey = (el: HTMLElement) => (el.dataset.threadId ? `t:${el.dataset.threadId}` : el.dataset.draftId ? `d:${el.dataset.draftId}` : `${el.closest<HTMLElement>('[data-path]')?.dataset.path}|${el.dataset.at}`);
+const findAnchor = (pane: HTMLElement, key: string) => Array.from(pane.querySelectorAll<HTMLElement>('.ln, [data-thread-id], [data-draft-id]')).find((el) => anchorKey(el) === key);
 
 /** A mark beside the diff's scrollbar for each comment to go through, at its place in the diff; click one to go there. */
 function placeMarks(): void {
@@ -974,12 +987,13 @@ document.addEventListener('click', (e) => {
     if (/^https?:/.test(a.href)) send({ type: 'openExternal', url: a.href });
     return;
   }
-  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-conv],[data-part],[data-layout],[data-cline],[data-reply],[data-edit],[data-del],[data-keep],[data-goto],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-q],[data-do]');
+  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-resolvethread],[data-open],[data-filter],[data-conv],[data-part],[data-layout],[data-cline],[data-reply],[data-edit],[data-del],[data-keep],[data-goto],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-q],[data-do]');
   if (!t || (t as HTMLButtonElement).disabled) return;
   // An action picked from a menu closes it.
   if (view.menu && t.closest('.pop') && !t.dataset.part && t.dataset.do !== 'cardOpen') view.menu = null;
   const d = t.dataset;
-  if (d.open) send({ type: 'openPr', key: d.open });
+  if (d.resolvethread) { send({ type: 'resolveThread', id: d.resolvethread }); advanceFrom(d.resolvethread); }
+  else if (d.open) send({ type: 'openPr', key: d.open });
   else if (d.filter) save({ filter: d.filter as Filter });
   else if (d.layout) save({ layout: d.layout as View['layout'], sel: 0 });
   else if (d.conv) save({ conv: d.conv as View['conv'], step: 'overview' });
