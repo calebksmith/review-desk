@@ -202,7 +202,8 @@ function open(context: vscode.ExtensionContext, key?: string): void {
   if (!source) return;
   if (panel && controller) {
     panel.reveal();
-    if (key !== undefined) void controller.handle({ type: 'openPr', key });
+    // A PR to open, or (from Open review queue) back to the queue from whatever PR is showing.
+    void controller.handle(key !== undefined ? { type: 'openPr', key } : { type: 'back' });
     return;
   }
   panel = vscode.window.createWebviewPanel('reviewDesk', 'Review Desk', vscode.ViewColumn.Active, {
@@ -282,15 +283,15 @@ class GroupItem extends vscode.TreeItem {
 
 class PrItem extends vscode.TreeItem {
   constructor(readonly pr: PrSummary, queue: readonly PrSummary[] = []) {
-    super(pr.title, vscode.TreeItemCollapsibleState.None);
+    // The number leads, as in the queue: "#102 Add the login API".
+    super(`#${pr.number} ${pr.title}`, vscode.TreeItemCollapsibleState.None);
     const status = prStatus(pr);
     this.id = `pr:${prKey(pr)}`;
     // Say the status only when it adds to the group's name ("Needs you" already means needs your review).
     const parent = parentOf(pr, queue);
     // With several repos in view, a number alone is ambiguous: say which repo.
     const multi = new Set(queue.map((p) => p.repo)).size > 1;
-    const ref = multi ? `${pr.repo.split('/')[1]}#${pr.number}` : `#${pr.number}`;
-    this.description = [ref, parent ? `on #${parent.number}` : '', status.quiet ? '' : status.label].filter(Boolean).join(' · ');
+    this.description = [multi ? pr.repo.split('/')[1] : '', parent ? `on #${parent.number}` : '', status.quiet ? '' : status.label].filter(Boolean).join(' · ');
     this.tooltip = new vscode.MarkdownString(`**${pr.repo}#${pr.number} ${pr.title}**\n\n${status.label} · by ${pr.author} · +${pr.additions} −${pr.deletions}`);
     const t = TONE[status.tone];
     this.iconPath = pr.state === 'merged' ? new vscode.ThemeIcon('git-merge') : new vscode.ThemeIcon(t.icon, t.color ? new vscode.ThemeColor(t.color) : undefined);

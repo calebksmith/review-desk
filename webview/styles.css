@@ -487,3 +487,10 @@ kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: ce
 span.lin { color: var(--fg-3) }
 
 .agentrev { justify-content: center; margin: 0 0 8px }
+
+/* Size beside the title, so the second row holds only who, where, and the decision */
+.prh .r1 { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap }
+.prh .r1 .rpo { flex-basis: 100% }
+.prh .r1 .ttl { min-width: 0 }
+.prh .r1 > .diffstat { flex-shrink: 0; color: var(--ok); font-size: 12px }
+.prh .r1 > .diffstat .d { color: var(--bad) }

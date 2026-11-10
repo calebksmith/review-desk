@@ -245,9 +245,9 @@ function bulkButton(h: HostState): string {
 /* ---------- PR ---------- */
 function crumb(pr: PrDetail, h: HostState): string {
   // Two rows, like GitHub: the title gets its own line (wrapping to two), the details and the decision share the next.
-  const meta = `<span class="who">${esc(pr.author)}</span> wants to merge <span class="br head" title="${esc(pr.headRef)}">${esc(pr.headRef)}</span> into <span class="br">${esc(pr.baseRef)}</span>${parentLink(pr)}<span class="diffstat"><span class="a">+${pr.additions}</span> <span class="d">−${pr.deletions}</span></span>`;
+  const meta = `<span class="who">${esc(pr.author)}</span> wants to merge <span class="br head" title="${esc(pr.headRef)}">${esc(pr.headRef)}</span> into <span class="br">${esc(pr.baseRef)}</span>${parentLink(pr)}`;
   return `<div class="crumb prh"><button class="back" data-do="back" aria-label="Back to the review queue" title="Back to the review queue (Esc)">${I.back}</button>
-    <div class="hd"><div class="r1">${host && multi(host) ? `<span class="rpo" title="Repository">${esc(pr.repo)}</span>` : ''}<button class="ttl" data-ext="${esc(pr.url)}" title="Open on GitHub"><b>${esc(pr.title)}</b> <span class="num">#${pr.number}</span>${I.ext}</button></div>
+    <div class="hd"><div class="r1">${host && multi(host) ? `<span class="rpo" title="Repository">${esc(pr.repo)}</span>` : ''}<button class="ttl" data-ext="${esc(pr.url)}" title="Open on GitHub"><b>${esc(pr.title)}</b> <span class="num">#${pr.number}</span>${I.ext}</button><span class="diffstat" title="Lines added and removed">+${pr.additions} <span class="d">−${pr.deletions}</span></span></div>
       <div class="r2"><span class="meta">${meta}</span><div class="end">${pr.state === 'merged' ? `<span role="status">${statusPill(pr)}</span>` : `${summary(pr, h)}${decision(pr, h)}`}</div></div></div></div>${pr.state === 'merged' ? '' : blockBar(pr)}`;
 }
 
