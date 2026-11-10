@@ -18,14 +18,14 @@ type Step = 'overview' | 'checks' | 'files';
 /** The comment box open in the diff: a new comment on a line (or range), a reply to a thread, or an edit. */
 interface Composer { path: string; line: number | null; side: 'RIGHT' | 'LEFT'; startLine?: number | null; replyTo?: string; resolve?: boolean; editId?: string; prefill?: string }
 type Thread = Extract<ConversationItem, { kind: 'thread' }>;
-interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; composer: Composer | null; finding: string | null; menu: 'checklist' | 'methods' | 'review' | null }
+interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; conv: 'all' | 'unresolved' | 'mine'; composer: Composer | null; finding: string | null; menu: 'checklist' | 'methods' | 'review' | null }
 
 let host: HostState | null = null;
 /** True while the reviewer moves through the queue with j/k; a mouse move hides the cursor again. */
 let kbd = false;
 /** Text to put in Overview's comment box on the next render. */
 let prefill: string | null = null;
-let view: View = { filter: 'all', repo: '', reviewEvent: null, composer: null, finding: null, showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
+let view: View = { filter: 'all', repo: '', reviewEvent: null, conv: 'all', composer: null, finding: null, showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
 // State saved by older versions named the files page "review".
 if (!['overview', 'checks', 'files'].includes(view.step)) view.step = 'files';
 // Older versions saved a bare PR number; keys are owner/name#number now.
@@ -398,7 +398,7 @@ function sidebar(pr: PrDetail): string {
   const filesSub = pr.myReview === 'approved' ? `Approved · ${seen} of ${pr.files.length} viewed` : `${seen} of ${plural(pr.files.length, 'file')} viewed`;
   return `<aside class="side" aria-label="Pull request pages"><ol class="steps">
     ${step('overview', 'Overview', 'info', overviewSub, 1)}${step('checks', 'Checks', c.cls, c.sub, 2)}${step('files', 'Files changed', filesDone ? 'done' : 'now', filesSub, 3)}</ol>
-    ${stackNav(pr)}
+    ${details(pr)}${stackNav(pr)}
     <button class="link keyslink" data-do="keys">Keyboard shortcuts <kbd>?</kbd></button></aside>`;
 }
 
@@ -425,6 +425,21 @@ function stackNav(pr: PrDetail): string {
     return `<li style="--depth:${r.depth}"><button class="snode ${here ? 'here' : ''}" ${here ? 'aria-current="true"' : `data-open="${esc(prKey(r.pr))}"`} title="#${r.pr.number} ${esc(r.pr.title)} · ${esc(st.label)}"><span class="sdot ${st.tone}"></span><span class="num">#${r.pr.number}</span><span class="stt">${esc(r.pr.title)}</span></button></li>`;
   }).join('');
   return `<div class="stacknav" title="Stacked PRs merge bottom first"><span class="lbl">${I.stack}Stack</span><span class="sbase mono">${esc(rows[0]!.pr.baseRef)}</span><ol>${items}</ol></div>`;
+}
+
+/** Who's reviewing and what the PR is attached to, like GitHub's sidebar: only what's set, reviewers always. */
+function details(pr: PrDetail): string {
+  const me = host?.user ?? '';
+  const state: Record<string, [string, string, string]> = {
+    approved: ['ok', I.check, 'Approved'], changes_requested: ['bad', I.x, 'Requested changes'], commented: ['muted', I.com, 'Commented'], requested: ['run', I.clock, 'Asked to review'],
+  };
+  const reviewers = pr.reviewers.length
+    ? pr.reviewers.map((r) => { const [tone, icon, what] = state[r.state]!; return `<li class="${tone}" title="${esc(what)}">${icon}<span>${r.login === me ? 'you' : esc(who(r.login))}</span><span class="sub">${what}</span></li>`; }).join('')
+    : '<li class="none">No reviewers</li>';
+  const ms = pr.milestone ? `<div class="dg"><span class="lbl">Milestone</span><span>${esc(pr.milestone.title)}${pr.milestone.dueOn ? `<span class="sub"> · due ${new Date(pr.milestone.dueOn).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>` : ''}</span></div>` : '';
+  const labels = pr.labels.length ? `<div class="dg"><span class="lbl">Labels</span><span class="labels">${pr.labels.map((l) => `<span class="chip">${esc(l)}</span>`).join('')}</span></div>` : '';
+  const linear = pr.linear ? `<div class="dg"><span class="lbl">Linear</span>${pr.linear.url ? `<a class="lin" href="${esc(pr.linear.url)}">${esc(pr.linear.key)}</a>` : `<span class="mono">${esc(pr.linear.key)}</span>`}</div>` : '';
+  return `<div class="details"><div class="dg"><span class="lbl">Reviewers</span><ul class="revs">${reviewers}</ul></div>${labels}${ms}${linear}</div>`;
 }
 
 function stepChecks(pr: PrDetail): string {
@@ -559,10 +574,10 @@ function stepOverview(pr: PrDetail): string {
   const n = conversationCounts(pr.conversation);
   const jump = n.fresh ? `<div class="ovmeta"><button class="link" data-do="jumpNew">Jump to ${plural(n.fresh, 'new comment')}${I.down}</button></div>` : '';
   return `<div class="ov">
-    ${jump}${isReReview(pr) ? yourComments(pr) : ''}
+    ${jump}
     <section class="ovdesc" aria-label="Description">${description(pr)}</section>
-    <section class="ovconv" aria-label="Conversation"><h3 class="lbl">Conversation${n.comments ? ` · ${n.comments}` : ''}${n.unresolved ? ` <span class="warnc">${I.alert}${plural(n.unresolved, 'unresolved thread')}</span>` : ''}</h3>
-      ${conversation(pr.conversation)}</section>
+    <section class="ovconv" aria-label="Conversation"><div class="convh"><h3 class="lbl">Conversation</h3>${convFilters(pr)}</div>
+      ${conversation(filtered(pr))}</section>
     ${compose(pr)}</div>`;
 }
 
@@ -606,19 +621,21 @@ function description(pr: PrDetail): string {
   return pr.bodyHtml.trim() ? `<div class="md">${safe(pr.bodyHtml)}</div>` : '<p class="none">The author didn’t write a description.</p>';
 }
 
-/** On a re-review: what became of each thread you started. Resolved, answered, or still waiting. */
-function yourComments(pr: PrDetail): string {
-  const me = host?.user ?? '';
-  const mine = pr.conversation.filter((it): it is Extract<ConversationItem, { kind: 'thread' }> => it.kind === 'thread' && it.comments[0]?.author === me);
-  if (!mine.length) return '';
-  const state = (t: (typeof mine)[number]) => {
-    if (t.resolved) return `<span class="ck-s ok">${I.check}Resolved</span>`;
-    const last = t.comments.at(-1)!;
-    return last.author !== me ? `<span class="ck-s run">${I.com}${esc(last.author)} replied</span>` : `<span class="ck-s muted">${I.minus}No reply yet</span>`;
+/** GitHub's comment filters: everything, what's still open, and what you wrote. With counts. */
+function convFilters(pr: PrDetail): string {
+  const f = (k: View['conv'], label: string) => {
+    const n = filtered(pr, k).length;
+    return `<button data-conv="${k}" aria-pressed="${view.conv === k}" ${!n && view.conv !== k ? 'disabled' : ''}>${label} <span class="n">${n}</span></button>`;
   };
-  const done = mine.filter((t) => t.resolved || t.comments.at(-1)!.author !== me).length;
-  return `<section class="since" aria-label="Your comments since your review"><span class="lbl">Your comments · ${done} of ${mine.length} answered</span>
-    <ul>${mine.map((t) => `<li>${state(t)}<button class="link mono" data-file="${esc(t.path)}">${esc(base(t.path))}${t.line ? `:${t.line}` : ''}</button><span class="sq">${esc(t.comments[0]!.text.slice(0, 90))}</span></li>`).join('')}</ul></section>`;
+  return `<div class="seg convf" role="group" aria-label="Show">${f('all', 'All')}${f('unresolved', 'Unresolved')}${f('mine', 'Mine')}</div>`;
+}
+
+/** The conversation under a filter: unresolved threads, or anything the reviewer wrote or started. */
+function filtered(pr: PrDetail, k: View['conv'] = view.conv): ConversationItem[] {
+  const me = host?.user ?? '';
+  if (k === 'unresolved') return pr.conversation.filter((it) => it.kind === 'thread' && !it.resolved);
+  if (k === 'mine') return pr.conversation.filter((it) => (it.kind === 'thread' ? it.comments.some((c) => c.author === me) : it.comment.author === me));
+  return pr.conversation;
 }
 
 /** Oldest first, as on GitHub; the first new comment is marked so "N new comments" can jump to it. */
@@ -642,7 +659,11 @@ function convItem(it: ConversationItem, firstNew = false): string {
   const anchor = firstNew ? ' id="firstnew"' : '';
   if (it.kind !== 'thread') return `<article class="ci"${anchor}>${comment(it.comment, it.kind === 'review' ? VERDICT[it.verdict] : '')}</article>`;
   const where = `${base(it.path)}${it.line ? `:${it.line}` : ''}`;
-  const state = it.resolved ? '<span class="pill">Resolved</span>' : '<span class="pill need">Unresolved</span>';
+  const me = host?.user ?? '';
+  const last = it.comments.at(-1);
+  // On a thread you started, say whether it's been answered.
+  const answered = !it.resolved && it.comments[0]?.author === me && last ? (last.author !== me ? `<span class="ck-s run">${I.com}${esc(who(last.author))} replied</span>` : '<span class="ck-s muted">No reply yet</span>') : '';
+  const state = (it.resolved ? '<span class="pill">Resolved</span>' : '<span class="pill need">Unresolved</span>') + answered;
   const fix = it.resolved ? '' : `<span class="end tacts-inline"><button class="btn sm fix" data-thread="${esc(it.id)}" title="Send this comment to your AI agent">${I.spark}Fix it</button><button class="btn sm" data-goto="${esc(it.id)}" title="Answer it in the diff: ask the author, or say it’s not an issue">Answer in diff</button></span>`;
   return `<article class="ci thread"${anchor} data-thread-id="${esc(it.id)}"><div class="cih">${I.com}${sevChip(it.severity)}<button class="link mono" data-goto="${esc(it.id)}" title="Show it in the diff">${esc(where)}</button>${state}${it.outdated ? '<span class="pill">Outdated</span>' : ''}${fix}</div>
     ${it.comments.map((c) => comment(c, '')).join('')}</article>`;
@@ -710,7 +731,8 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
     if (pr && prKey(pr) !== view.pr) {
       // First look, or new comments: start on Overview for the context. Otherwise pick up the files.
       const start: Step = !pr.seenBefore || conversationCounts(pr.conversation).fresh ? 'overview' : 'files';
-      view = { ...view, pr: prKey(pr), file: null, onlyNew: false, step: start, menu: null, composer: null, finding: null };
+      // A re-review opens the conversation on your own threads: what became of what you asked for.
+      view = { ...view, pr: prKey(pr), file: null, onlyNew: false, step: start, menu: null, composer: null, finding: null, conv: isReReview(pr) ? 'mine' : 'all' };
       vscode.setState(view);
     }
     host = msg.state;
@@ -756,7 +778,7 @@ document.addEventListener('click', (e) => {
     if (/^https?:/.test(a.href)) send({ type: 'openExternal', url: a.href });
     return;
   }
-  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-layout],[data-cline],[data-reply],[data-edit],[data-del],[data-keep],[data-goto],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
+  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-conv],[data-layout],[data-cline],[data-reply],[data-edit],[data-del],[data-keep],[data-goto],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
   if (!t || (t as HTMLButtonElement).disabled) return;
   // An action picked from a menu closes it.
   if (view.menu && t.closest('.pop')) view.menu = null;
@@ -764,6 +786,7 @@ document.addEventListener('click', (e) => {
   if (d.open) send({ type: 'openPr', key: d.open });
   else if (d.filter) save({ filter: d.filter as Filter });
   else if (d.layout) save({ layout: d.layout as View['layout'], sel: 0 });
+  else if (d.conv) save({ conv: d.conv as View['conv'] });
   else if (d.step) save({ step: d.step as Step });
   else if (d.fix) send({ type: 'fixWithAgent', check: d.fix });
   else if (d.thread) send({ type: 'fixThread', id: d.thread });

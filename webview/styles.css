@@ -438,11 +438,6 @@ kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: ce
 .rwarn { margin: 0; display: flex; gap: 6px; align-items: center; font-size: 12px; font-weight: 600; color: var(--warn) }
 .rwarn .ico { width: 14px; height: 14px }
 .ract { display: flex; justify-content: flex-end }
-/* Re-review: your earlier comments */
-.since { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--chrome) }
-.since ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px }
-.since li { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0 }
-.since .sq { color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0 }
 .ck-s { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; flex-shrink: 0; width: 120px }
 .ck-s .ico { width: 13px; height: 13px }
 .ck-s.ok { color: var(--ok) } .ck-s.run { color: var(--accent-ink) } .ck-s.muted { color: var(--fg-3) }
@@ -494,3 +489,23 @@ span.lin { color: var(--fg-3) }
 .prh .r1 .ttl { min-width: 0 }
 .prh .r1 > .diffstat { flex-shrink: 0; color: var(--ok); font-size: 12px }
 .prh .r1 > .diffstat .d { color: var(--bad) }
+
+/* Conversation filters */
+.convh { display: flex; align-items: center; gap: 12px; margin-bottom: 6px }
+.convh h3 { margin: 0 }
+.convf { margin-left: auto }
+.convf button { font-size: 12px; padding: 2px 10px }
+.convf button[disabled] { opacity: .45; cursor: default }
+.cih .ck-s { width: auto; font-size: 12px }
+/* Reviewers and details in the rail */
+.details { display: flex; flex-direction: column; gap: 12px; padding-top: 14px; margin-top: 10px; border-top: 1px solid var(--line-soft) }
+.dg { display: flex; flex-direction: column; gap: 4px; font-size: 12px; min-width: 0 }
+.revs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px }
+.revs li { display: flex; align-items: center; gap: 6px; min-width: 0 }
+.revs li .ico { width: 13px; height: 13px; flex-shrink: 0 }
+.revs li > span:first-of-type { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.revs li .sub { color: var(--fg-3); margin-left: auto; white-space: nowrap }
+.revs li.ok .ico { color: var(--ok) } .revs li.bad .ico { color: var(--bad) } .revs li.run .ico { color: var(--accent-ink) } .revs li.muted .ico { color: var(--fg-3) }
+.revs li.none, .dg .sub { color: var(--fg-3) }
+.labels { display: flex; gap: 4px; flex-wrap: wrap }
+@media (max-width: 760px) { .details { display: none } }

@@ -38,7 +38,8 @@ To install it as a normal extension, run `npm run package` and install the `.vsi
 - **Finish your review** from the header: Approve is one click; its ▾ opens a summary and GitHub's three verdicts (Comment, Approve, Request changes). Comments you've held back go with it ("Submit review · 3"). Approving with open P0/P1 findings asks first.
 - **Comment on lines** in Files changed: hover a line for **+** (shift-click another for a range), then **Add to review** or **Comment now**. Held-back comments show at their lines as **Pending**.
 - **Findings** (threads marked P0–P3, like Codex's) show at their lines with **Fix it**, **Ask the author** (a held-back reply), **Not an issue** (a held-back reply that resolves the thread when sent) and **Reply**. **]** and **[** step through open findings, most severe first.
-- **Re-review**: a PR you requested changes on comes back to Your turn when the author pushes or asks again, with a "since your review" diff and your earlier comments marked resolved, replied to, or waiting.
+- **Re-review**: a PR you requested changes on comes back to Your turn when the author pushes or asks again, with a "since your review" diff. Its conversation opens on **Mine**, and each thread you started says whether it was resolved, replied to, or is waiting.
+- **Conversation filters** on Overview, like GitHub's: All, Unresolved, Mine. The PR's rail shows its reviewers and their state, labels, milestone and Linear issue.
 - **Conflicts**: on a teammate's PR, **Ask them to resolve** fills in a comment for you to send (you can still approve the code); on Dependabot's, **Ask Dependabot to rebase**; on yours or an agent's, **Fix with agent**.
 - **Keys**: c comments on the line under the pointer, r replies to the current finding, ] and [ move between findings, ⌘⇧Enter finishes the review.
 
