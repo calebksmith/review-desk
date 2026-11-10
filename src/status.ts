@@ -245,6 +245,8 @@ export function bulkSkipReason(p: PrSummary): string | null {
   if (p.mergeable === null) return 'GitHub still checking for conflicts';
   if (p.checks.failed) return `${plural(p.checks.failed, 'check')} failing`;
   if (p.checks.pending) return 'checks still running';
+  // Zero checks is what a fresh push looks like before CI registers its runs, so it can't count as passed.
+  if (!p.checks.total) return 'no checks have run';
   return null;
 }
 
