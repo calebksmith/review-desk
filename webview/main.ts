@@ -387,19 +387,15 @@ const EVENTS: { event: ReviewEvent; label: string; note: string }[] = [
   { event: 'REQUEST_CHANGES', label: 'Request changes', note: 'Must be addressed before it merges.' },
 ];
 
-/**
- * The verdict the review panel has picked: the one you chose, or Comment when comments go with the review
- * (yours held back here, or a review in progress on GitHub), as GitHub defaults; otherwise Approve.
- */
-function verdict(pr: PrDetail, h: HostState): ReviewEvent {
+/** The verdict the review panel has picked: the one you chose, or Comment, as on GitHub. */
+function verdict(pr: PrDetail): ReviewEvent {
   if (pr.mine) return 'COMMENT';
-  const withComments = h.drafts.some((d) => d.from === 'you') || !!pr.pendingReview?.comments;
-  return view.reviewEvent ?? (withComments ? 'COMMENT' : 'APPROVE');
+  return view.reviewEvent ?? 'COMMENT';
 }
 
 function reviewPanel(pr: PrDetail, h: HostState): string {
   const own = pr.mine;
-  const event = verdict(pr, h);
+  const event = verdict(pr);
   const held = h.drafts.filter((d) => d.from === 'you').length;
   const agent = h.drafts.filter((d) => d.from === 'agent').length;
   const f = openFindings(pr);
@@ -1005,7 +1001,7 @@ function stepFinding(dir: 1 | -1): void {
 function submitReview(): void {
   const pr = host?.pr;
   if (!pr) return;
-  const event = verdict(pr, host!);
+  const event = verdict(pr);
   const box = document.getElementById('rbody') as HTMLTextAreaElement | null;
   send({ type: 'submitReview', event, body: box?.value ?? '' });
   if (event !== 'REQUEST_CHANGES' || box?.value.trim()) { if (box) box.value = ''; save({ menu: null }); }
