@@ -18,3 +18,13 @@ describe('sidebar', () => {
     expect(needsYou(queue.map((p) => ({ ...p, myReview: 'approved' as const })))).toBe(2);
   });
 });
+
+describe('sidebar with a team', () => {
+  it('groups your PRs apart and counts what needs you', async () => {
+    const queue = await new SampleSource('team').listPrs();
+    expect(queueGroups(queue).map((g) => g.label)).toEqual(['Needs you', 'Your PRs', 'Waiting on others', 'Approved', 'Merged']);
+    expect(queueGroups(queue).find((g) => g.bucket === 'mine')!.prs.map((p) => p.number).sort()).toEqual([122, 123, 124]);
+    // Review requests and unassigned PRs (102, 103, 112, 121, 125, 126, 127) plus your 123 (ready) and 124 (changes requested).
+    expect(needsYou(queue)).toBe(9);
+  });
+});

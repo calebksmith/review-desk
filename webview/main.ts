@@ -1,5 +1,6 @@
 import DOMPurify from 'dompurify';
 import { conversationCounts, startedAt } from '../src/conversation';
+import { parentOf, stackOf, stacks, type StackRow } from '../src/stacks';
 import type { CheckRun, Comment, CommentAction, ConversationItem, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
 import { bulkMergeable, isDependabot, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
 
@@ -12,12 +13,12 @@ const vscode = acquireVsCodeApi();
 
 type Filter = 'all' | Bucket;
 type Step = 'overview' | 'checks' | 'files';
-interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: number | null; sel: number; method: MergeMethod | null; keys: boolean; showPassed: boolean; menu: 'checklist' | 'methods' | null }
+interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: number | null; sel: number; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; menu: 'checklist' | 'methods' | null }
 
 let host: HostState | null = null;
 /** True while the reviewer moves through the queue with j/k; a mouse move hides the cursor again. */
 let kbd = false;
-let view: View = { filter: 'all', showPassed: false, step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
+let view: View = { filter: 'all', showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
 // State saved by older versions named the files page "review".
 if (!['overview', 'checks', 'files'].includes(view.step)) view.step = 'files';
 const send = (msg: FromWebview) => vscode.postMessage(msg);
@@ -40,6 +41,7 @@ const I = {
   alert: svg('M12 4l9 16H3zM12 10v4M12 17h.01'),
   com: svg('M4 5h16v11H9l-5 4z'),
   minus: svg('M6 12h12'),
+  stack: svg('M6 4v10a3 3 0 0 0 3 3h9M6 9h6M15 14l3 3-3 3'),
   down: svg('M7 10l5 5 5-5', 'ico caretico'),
   doc: svg('M7 4h7l4 4v12H7zM14 4v4h4M10 12h5M10 16h5'),
   spark: svg('M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z'),
@@ -64,7 +66,7 @@ function save(patch: Partial<View>): void {
 const bucket = (p: PrSummary): Bucket => prStatus(p).bucket;
 function urgency(p: PrSummary): number {
   const s = prStatus(p);
-  return { needs: s.tone === 'bad' ? 0 : 1, approved: 2, waiting: 3, merged: 9 }[s.bucket];
+  return { needs: s.tone === 'bad' ? 0 : 1, mine: s.who === 'you' ? 1 : 3, approved: 2, waiting: 3, merged: 9 }[s.bucket];
 }
 const PILL: Record<Tone, string> = { ok: 'ok', warn: 'need', bad: 'bad', run: 'run', muted: '' };
 
@@ -90,39 +92,73 @@ function listStatus(p: PrSummary): string {
   return statusPill(p);
 }
 
+/** The rows in the order they're shown, so j/k and Enter follow the screen in either layout. */
 function visibleQueue(h: HostState): PrSummary[] {
-  return h.queue
-    .filter((p) => view.filter === 'all' || bucket(p) === view.filter)
-    .sort((a, b) => urgency(a) - urgency(b) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  const byNeed = (a: PrSummary, b: PrSummary) => urgency(a) - urgency(b) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+  if (view.layout === 'stacks') {
+    const s = stacks(h.queue);
+    return [...s.stacks.flatMap((rows) => rows.map((r) => r.pr)), ...s.alone.sort(byNeed)];
+  }
+  return h.queue.filter((p) => view.filter === 'all' || bucket(p) === view.filter).sort(byNeed);
 }
 
 const EMPTY: Record<Filter, string> = {
   all: 'No open pull requests.',
   needs: 'You’re all caught up.',
-  waiting: 'Nothing is waiting on an author.',
+  mine: 'You have no open pull requests.',
+  waiting: 'Nothing is waiting on anyone else.',
   approved: 'Nothing approved and waiting to merge.',
   merged: 'Nothing merged recently.',
 };
 
+/** Who reviewed it, in a few words: whose changes are requested, or who approved. */
+function reviewNote(p: PrSummary): string {
+  const by = (state: string) => p.reviewers.filter((r) => r.state === state).map((r) => (r.login === host?.user ? 'you' : r.login));
+  const changes = by('changes_requested');
+  if (changes.length) return `<span class="rv warn">changes requested by ${esc(changes.join(', '))}</span>`;
+  const approved = by('approved');
+  if (approved.length) return `<span class="rv ok">${I.check}${esc(approved.join(', '))}</span>`;
+  return '';
+}
+
+/** One PR row. In the Stacks layout it's indented under the PR it's stacked on. */
+function row(p: PrSummary, i: number, h: HostState, depth = 0): string {
+  const parent = view.layout === 'list' ? parentOf(p, h.queue) : null;
+  const asked = p.reviewRequested && !p.myReview ? '<span class="chip ask">Review requested</span>' : '';
+  return `<button class="qrow ${kbd && i === view.sel ? 'sel' : ''} ${depth ? 'nested' : ''}" data-open="${p.number}" style="--depth:${depth}">
+      <span class="num">#${p.number}</span>
+      <span class="t"><span class="tl"><b>${esc(p.title)}</b>${checksIcon(p)}</span><span class="sub"><span class="diffstat"><span class="a">+${p.additions}</span> <span class="d">−${p.deletions}</span></span><span class="${p.mine ? 'you' : ''}">${p.mine ? 'you' : esc(p.author)}</span>${parent ? `<span class="on">on #${parent.number}</span>` : ''}${reviewNote(p)}</span></span>
+      ${asked}<span class="st">${listStatus(p)}</span><span class="when" title="Updated ${ago(p.updatedAt)} ago">${ago(p.updatedAt)}</span></button>`;
+}
+
+/** The Stacks layout: each stack as a tree in merge order, then the PRs that stand alone. */
+function stackedList(h: HostState): string {
+  const { stacks: all, alone } = stacks(h.queue);
+  let i = 0;
+  const tree = (rows: StackRow[]) => `<div class="stack"><div class="stackh">${I.stack}<span>${esc(rows[0]!.pr.author === host?.user ? 'Your' : `${rows[0]!.pr.author}’s`)} stack · ${plural(rows.length, 'PR')}</span><span class="mono">into ${esc(rows[0]!.pr.baseRef)}</span></div><div class="list">${rows.map((r) => row(r.pr, i++, h, r.depth)).join('')}</div></div>`;
+  const rest = visibleQueue(h).filter((p) => alone.includes(p));
+  return `${all.map(tree).join('') || '<div class="empty">No stacked pull requests. A PR is stacked when its base is another PR’s branch.</div>'}
+    ${rest.length ? `<span class="lbl stacklbl">Not stacked · ${rest.length}</span><div class="list">${rest.map((p) => row(p, i++, h)).join('')}</div>` : ''}`;
+}
+
 function queue(h: HostState): string {
-  const counts: Record<Filter, number> = { all: h.queue.length, needs: 0, waiting: 0, approved: 0, merged: 0 };
+  const counts: Record<Filter, number> = { all: h.queue.length, needs: 0, mine: 0, waiting: 0, approved: 0, merged: 0 };
   h.queue.forEach((p) => counts[bucket(p)]++);
   const rows = visibleQueue(h);
   if (view.sel >= rows.length) view.sel = Math.max(0, rows.length - 1);
   const f = (k: Filter, label: string) => `<button data-filter="${k}" aria-pressed="${view.filter === k}" ${!counts[k] && view.filter !== k ? 'disabled' : ''}>${label} <span class="n">${counts[k]}</span></button>`;
-  // The keyboard cursor only shows while the keyboard is in use, so the first row doesn't look special.
-  const list = rows.map((p, i) => `<button class="qrow ${kbd && i === view.sel ? 'sel' : ''}" data-open="${p.number}">
-      <span class="num">#${p.number}</span>
-      <span class="t"><span class="tl"><b>${esc(p.title)}</b>${checksIcon(p)}</span><span class="sub"><span class="diffstat"><span class="a">+${p.additions}</span> <span class="d">−${p.deletions}</span></span><span>${esc(p.author)}</span></span></span>
-      <span class="st">${listStatus(p)}</span><span class="when" title="Updated ${ago(p.updatedAt)} ago">${ago(p.updatedAt)}</span></button>`).join('');
+  // Your PRs only shows when you have some (a solo reviewer of agent PRs has none).
+  const mine = counts.mine || view.filter === 'mine' ? f('mine', 'Your PRs') : '';
+  const stacked = view.layout === 'stacks';
   const empty = h.loading ? '<div class="empty"><span class="spin"></span>Loading pull requests</div>' : `<div class="empty">${view.filter === 'needs' ? I.check : ''}${EMPTY[view.filter]}</div>`;
+  const layout = `<div class="seg layout" role="group" aria-label="Layout"><button data-layout="list" aria-pressed="${!stacked}" title="List by what each PR needs">List</button><button data-layout="stacks" aria-pressed="${stacked}" title="Stacked PRs as trees, in merge order">${I.stack}Stacks</button></div>`;
   return `<div class="crumb"><span class="home cur">${I.inbox}Review queue</span>
       <button class="reposw" data-do="switchRepo" title="Switch repository">${esc(h.repo)}${I.down}</button>${h.sample ? '<span class="chip">Sample data</span>' : ''}
       <div class="end">${bulkButton(h)}<button class="btn icon" data-do="refresh" aria-label="Refresh" title="Refresh (r)">${I.rerun}</button><button class="btn icon" data-do="keys" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button></div></div>
     ${h.notice ? `<div class="note" role="status">${I.check}<span>${esc(h.notice)}</span><button class="btn sm" data-do="dismissNotice">Dismiss</button></div>` : ''}
     <div class="pad">
-      <div class="toolbar"><div class="seg filters" role="group" aria-label="Filter">${f('all', 'All')}${f('needs', 'Needs you')}${f('waiting', 'Waiting on author')}${f('approved', 'Approved')}${f('merged', 'Merged')}</div></div>
-      <div class="list">${list || empty}</div>
+      <div class="toolbar">${stacked ? '' : `<div class="seg filters" role="group" aria-label="Filter">${f('all', 'All')}${f('needs', 'Needs you')}${mine}${f('waiting', 'Waiting on others')}${f('approved', 'Approved')}${f('merged', 'Merged')}</div>`}${layout}</div>
+      ${stacked ? (h.loading && !h.queue.length ? empty : stackedList(h)) : `<div class="list">${rows.map((p, i) => row(p, i, h)).join('') || empty}</div>`}
     </div>`;
 }
 
@@ -139,10 +175,16 @@ function bulkButton(h: HostState): string {
 /* ---------- PR ---------- */
 function crumb(pr: PrDetail, h: HostState): string {
   // Two rows, like GitHub: the title gets its own line (wrapping to two), the details and the decision share the next.
-  const meta = `<span class="who">${esc(pr.author)}</span> wants to merge <span class="br head" title="${esc(pr.headRef)}">${esc(pr.headRef)}</span> into <span class="br">${esc(pr.baseRef)}</span><span class="diffstat"><span class="a">+${pr.additions}</span> <span class="d">−${pr.deletions}</span></span>`;
+  const meta = `<span class="who">${esc(pr.author)}</span> wants to merge <span class="br head" title="${esc(pr.headRef)}">${esc(pr.headRef)}</span> into <span class="br">${esc(pr.baseRef)}</span>${parentLink(pr)}<span class="diffstat"><span class="a">+${pr.additions}</span> <span class="d">−${pr.deletions}</span></span>`;
   return `<div class="crumb prh"><button class="back" data-do="back" aria-label="Back to the review queue" title="Back to the review queue (Esc)">${I.back}</button>
     <div class="hd"><div class="r1"><button class="ttl" data-ext="${esc(pr.url)}" title="Open on GitHub"><b>${esc(pr.title)}</b> <span class="num">#${pr.number}</span>${I.ext}</button></div>
       <div class="r2"><span class="meta">${meta}</span><div class="end">${pr.state === 'merged' ? `<span role="status">${statusPill(pr)}</span>` : `${summary(pr, h)}${decision(pr, h)}`}</div></div></div></div>${pr.state === 'merged' ? '' : blockBar(pr)}`;
+}
+
+/** "(#101)" after a stacked PR's base branch, opening the PR it's stacked on. */
+function parentLink(pr: PrDetail): string {
+  const parent = parentOf(pr, host?.queue ?? []);
+  return parent ? `<button class="link" data-open="${parent.number}" title="Stacked on #${parent.number}: ${esc(parent.title)}">#${parent.number}</button>` : '';
 }
 
 const TONE_ICON: Record<Tone, string> = { ok: I.check, bad: I.x, warn: I.alert, run: '<span class="spin sm"></span>', muted: I.minus };
@@ -152,7 +194,7 @@ const TONE_ICON: Record<Tone, string> = { ok: I.check, bad: I.x, warn: I.alert, 
  * styled as text, that opens the merge checklist.
  */
 function summary(pr: PrDetail, h: HostState): string {
-  const s = mergeSummary(pr);
+  const s = mergeSummary(pr, h.queue, h.user);
   const open = view.menu === 'checklist';
   // When nothing needs attention the button already says so; the line shrinks to a quiet check.
   const quiet = s.tone === 'ok';
@@ -161,12 +203,13 @@ function summary(pr: PrDetail, h: HostState): string {
 
 /** GitHub's merge box, on demand: every condition, each with its fix. */
 function checklist(pr: PrDetail, h: HostState): string {
-  const rows = mergeReadiness(pr).map((it) => {
+  const rows = mergeReadiness(pr, h.queue, h.user).map((it) => {
     const act = it.action === 'updateBranch' ? `<button class="btn sm" data-do="updateBranch" ${h.busy ? 'disabled' : ''}>${h.busy === 'update' ? '<span class="spin sm"></span>' : ''}Update branch</button>`
       : it.action === 'showChecks' && it.tone !== 'ok' ? '<button class="link" data-step="checks">Show checks</button>'
       : it.action === 'openThreads' ? '<button class="link" data-do="threads">Show</button>'
+      : it.action === 'openPr' && it.pr ? `<button class="link" data-open="${it.pr}">Open #${it.pr}</button>`
       : it.action === 'fixConflicts' ? `<button class="btn sm fix" data-do="fixConflicts">${I.spark}Fix with agent</button>` : '';
-    return `<li class="ck ${it.tone}">${TONE_ICON[it.tone]}<span>${esc(it.text)}</span>${act}</li>`;
+    return `<li class="ck ${it.tone}">${TONE_ICON[it.tone]}<span class="ckt">${esc(it.text)}</span>${act}</li>`;
   }).join('');
   return `<div class="pop" role="dialog" aria-label="Merge checklist"><span class="lbl">Merge checklist</span><ul>${rows}</ul></div>`;
 }
@@ -180,8 +223,9 @@ const METHOD_NOTE: Record<MergeMethod, string> = {
 
 /** The one button that moves the PR forward: Approve, then GitHub's "Squash and merge ▾". */
 function decision(pr: PrDetail, h: HostState): string {
-  if (pr.myReview !== 'approved') return `<button class="btn pri" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
-  const blocker = mergeBlocker(pr);
+  // You can't approve your own PR; it goes straight to Merge, which waits for reviewers.
+  if (!pr.mine && pr.myReview !== 'approved') return `<button class="btn pri" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
+  const blocker = mergeBlocker(pr, h.queue);
   const method = view.method && pr.mergeMethods.includes(view.method) ? view.method : pr.mergeMethods[0]!;
   // With a check failing, Merge stays available but stops being the primary action and says "anyway".
   const warning = !blocker && mergeWarning(pr);
@@ -232,6 +276,7 @@ function sidebar(pr: PrDetail): string {
   const filesSub = pr.myReview === 'approved' ? `Approved · ${seen} of ${pr.files.length} viewed` : `${seen} of ${plural(pr.files.length, 'file')} viewed`;
   return `<aside class="side" aria-label="Pull request pages"><ol class="steps">
     ${step('overview', 'Overview', 'info', overviewSub, 1)}${step('checks', 'Checks', c.cls, c.sub, 2)}${step('files', 'Files changed', filesDone ? 'done' : 'now', filesSub, 3)}</ol>
+    ${stackNav(pr)}
     <button class="link keyslink" data-do="keys">Keyboard shortcuts <kbd>?</kbd></button></aside>`;
 }
 
@@ -248,6 +293,18 @@ function checkRow(r: CheckRun): string {
 }
 
 /** Failures and running checks in full; passing ones folded into one line, like GitHub's merge box. */
+/** The whole stack this PR is in, bottom first, so you can move along it. Nothing when it stands alone. */
+function stackNav(pr: PrDetail): string {
+  const rows = stackOf(pr, host?.queue ?? []);
+  if (rows.length < 2) return '';
+  const items = rows.map((r) => {
+    const st = prStatus(r.pr);
+    const here = r.pr.number === pr.number;
+    return `<li style="--depth:${r.depth}"><button class="snode ${here ? 'here' : ''}" ${here ? 'aria-current="true"' : `data-open="${r.pr.number}"`} title="#${r.pr.number} ${esc(r.pr.title)} · ${esc(st.label)}"><span class="sdot ${st.tone}"></span><span class="num">#${r.pr.number}</span><span class="stt">${esc(r.pr.title)}</span></button></li>`;
+  }).join('');
+  return `<div class="stacknav" title="Stacked PRs merge bottom first"><span class="lbl">${I.stack}Stack</span><span class="sbase mono">${esc(rows[0]!.pr.baseRef)}</span><ol>${items}</ol></div>`;
+}
+
 function stepChecks(pr: PrDetail): string {
   const byName = (a: CheckRun, b: CheckRun) => a.name.localeCompare(b.name);
   const failing = pr.checkRuns.filter(isFail).sort(byName);
@@ -474,13 +531,14 @@ document.addEventListener('click', (e) => {
     if (/^https?:/.test(a.href)) send({ type: 'openExternal', url: a.href });
     return;
   }
-  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
+  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-layout],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
   if (!t || (t as HTMLButtonElement).disabled) return;
   // An action picked from a menu closes it.
   if (view.menu && t.closest('.pop')) view.menu = null;
   const d = t.dataset;
   if (d.open) send({ type: 'openPr', number: Number(d.open) });
   else if (d.filter) save({ filter: d.filter as Filter });
+  else if (d.layout) save({ layout: d.layout as View['layout'], sel: 0 });
   else if (d.step) save({ step: d.step as Step });
   else if (d.fix) send({ type: 'fixWithAgent', check: d.fix });
   else if (d.thread) send({ type: 'fixThread', id: d.thread });

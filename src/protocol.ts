@@ -18,6 +18,17 @@ export interface PrSummary {
   labels: string[];
   /** The signed-in reviewer's latest review on this PR. */
   myReview: 'approved' | 'changes_requested' | 'commented' | null;
+  headRef: string;
+  /** The branch it merges into. Another open PR's branch when the PR is stacked on it. */
+  baseRef: string;
+  /** Opened by the signed-in reviewer, who can't approve it. */
+  mine: boolean;
+  /** GitHub's review decision. Null when the repo doesn't require reviews. */
+  reviewDecision: 'approved' | 'changes_requested' | 'review_required' | null;
+  /** Each reviewer's latest review, and who's been asked but hasn't reviewed yet. */
+  reviewers: Reviewer[];
+  /** The signed-in reviewer has been asked to review it. */
+  reviewRequested: boolean;
   checks: ChecksTally;
   /** False when the PR conflicts with its base. Null while GitHub is still working it out. */
   mergeable: boolean | null;
@@ -25,6 +36,8 @@ export interface PrSummary {
   mergeState: MergeState;
   unresolvedThreads: number;
 }
+
+export interface Reviewer { login: string; state: 'approved' | 'changes_requested' | 'commented' | 'requested' }
 
 export type MergeState = 'clean' | 'behind' | 'blocked' | 'dirty' | 'unstable' | 'draft' | 'unknown';
 export type MergeMethod = 'squash' | 'merge' | 'rebase';
@@ -95,8 +108,6 @@ export interface PrDetail extends PrSummary {
   conversation: ConversationItem[];
   /** Whether the reviewer has opened this PR before; set by the controller. */
   seenBefore?: boolean;
-  headRef: string;
-  baseRef: string;
   /** Merge methods the repo allows, the default first. */
   mergeMethods: MergeMethod[];
   files: FileDiff[];

@@ -98,15 +98,21 @@ export class Controller {
     const pr = this.state.pr;
     if (!pr || this.state.busy) return;
     this.set({ busy: 'approve' });
-    await this.source.approve(pr);
-    this.set({ busy: null, pr: { ...pr, myReview: 'approved' } });
-    this.host.post({ type: 'toast', text: `Approved #${pr.number}` });
+    try {
+      await this.source.approve(pr);
+    } finally {
+      this.set({ busy: null });
+    }
+    // Re-read it: on a team, GitHub's review decision may now be approved, or still need someone else.
+    const fresh = await this.source.getPr(pr.number, null);
+    this.set({ pr: { ...pr, ...fresh, myReview: 'approved', conversation: pr.conversation, seenBefore: pr.seenBefore, sinceLastLook: pr.sinceLastLook } });
+    this.host.post({ type: 'toast', text: fresh.reviewDecision === 'review_required' ? `Approved #${pr.number}. It needs another approval to merge.` : `Approved #${pr.number}` });
   }
 
   private async merge(method: MergeMethod): Promise<void> {
     const pr = this.state.pr;
     if (!pr || this.state.busy) return;
-    const blocker = mergeBlocker(pr);
+    const blocker = mergeBlocker(pr, this.state.queue);
     if (blocker) { this.host.post({ type: 'toast', text: blocker }); return; }
     if (!pr.mergeMethods.includes(method)) method = pr.mergeMethods[0]!;
     const verb = { squash: 'Squash and merge', merge: 'Merge', rebase: 'Rebase and merge' }[method];

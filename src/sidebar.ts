@@ -7,7 +7,8 @@ export interface QueueGroup { bucket: Bucket; label: string; prs: PrSummary[] }
 
 const GROUPS: { bucket: Bucket; label: string }[] = [
   { bucket: 'needs', label: 'Needs you' },
-  { bucket: 'waiting', label: 'Waiting on author' },
+  { bucket: 'mine', label: 'Your PRs' },
+  { bucket: 'waiting', label: 'Waiting on others' },
   { bucket: 'approved', label: 'Approved' },
   { bucket: 'merged', label: 'Merged' },
 ];
@@ -21,7 +22,7 @@ export function queueGroups(queue: PrSummary[]): QueueGroup[] {
   })).filter((g) => g.prs.length);
 }
 
-/** The number on the sidebar icon: open PRs waiting on the reviewer. */
+/** The number on the sidebar icon: review requests, plus the reviewer's own PRs where it's their move. */
 export function needsYou(queue: PrSummary[]): number {
-  return queue.filter((p) => prStatus(p).bucket === 'needs').length;
+  return queue.filter((p) => { const s = prStatus(p); return s.bucket === 'needs' || (s.bucket === 'mine' && s.who === 'you'); }).length;
 }

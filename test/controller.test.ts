@@ -214,4 +214,15 @@ describe('Controller', () => {
     await c.handle({ type: 'mergeDependabot' });
     expect(last().queue.find((p) => p.number === 60)?.state).toBe('merged');
   });
+
+  it('on a team, approving says when another approval is still needed', async () => {
+    const sent: { type: string; text?: string }[] = [];
+    const store = new Map<string, unknown>();
+    const host = { post: (m: never) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async () => 'clipboard' as const, choose: async () => undefined, switchRepository: () => {} };
+    const c = new Controller(new SampleSource('team'), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host);
+    await c.handle({ type: 'openPr', number: 102 });
+    await c.handle({ type: 'approve' });
+    expect(sent.some((m) => m.type === 'toast' && m.text === 'Approved #102')).toBe(true);
+    expect((c.snapshot.pr as { reviewDecision: string }).reviewDecision).toBe('approved');
+  });
 });

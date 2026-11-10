@@ -1,24 +1,12 @@
-import { parsePatch } from './patch';
-import type { CheckRun, Comment, ConversationItem, FileDiff, MergeMethod, PrDetail, PrSummary } from './protocol';
+import type { MergeMethod, PrDetail, PrSummary, Reviewer } from './protocol';
+import { ago, decide, file, pass, say, sized, type SamplePr } from './sample-kit';
+import { teamSeed } from './sample-team';
 import type { DataSource } from './source';
 
 // Sample PRs for demos, screenshots and tests. Content is made up; shapes match GitHub.
+// "solo" is one reviewer and their agents; "team" is several developers, stacked PRs and required approvals.
 
-const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
-
-const file = (path: string, patch: string, viewed: FileDiff['viewed'] = 'unviewed'): FileDiff => {
-  const lines = parsePatch(patch);
-  return { path, status: 'modified', viewed, lines,
-    additions: lines.filter((l) => l.kind === 'add').length,
-    deletions: lines.filter((l) => l.kind === 'del').length };
-};
-
-const pass = (name: string, app: string, summary: string | null = null): CheckRun => ({ name, app, status: 'completed', conclusion: 'success', url: 'https://github.com', summary, failedStep: null, excerpt: null });
-const say = (author: string, min: number, html: string): Comment => ({ author, createdAt: ago(min), html, text: html.replace(/<[^>]+>/g, ''), url: 'https://github.com', isNew: false });
-
-interface SamplePr { summary: PrSummary; files: FileDiff[]; checkRuns: CheckRun[]; body: string; bodyHtml: string; conversation: ConversationItem[]; headRef: string }
-
-function seed(): SamplePr[] {
+function soloSeed(): SamplePr[] {
   const prs: SamplePr[] = [
     {
       summary: { number: 55, title: 'Count access-link opens by company', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(8), headSha: '9d07f3e', isDraft: false, state: 'open', labels: ['review-desk'], myReview: null, checks: { passed: 4, failed: 1, pending: 0, total: 5 }, mergeable: true, mergeState: 'unstable', unresolvedThreads: 0 },
@@ -173,7 +161,7 @@ function seed(): SamplePr[] {
       ],
     },
     {
-      summary: { number: 48, title: 'Tighten homepage spacing', author: 'calebksmith', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(60 * 26), headSha: 'a71c2d0', isDraft: false, state: 'merged', labels: [], myReview: 'approved', checks: { passed: 5, failed: 0, pending: 0, total: 5 }, mergeable: null, mergeState: 'unknown', unresolvedThreads: 0 },
+      summary: { number: 48, title: 'Tighten homepage spacing', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(60 * 26), headSha: 'a71c2d0', isDraft: false, state: 'merged', labels: [], myReview: 'approved', checks: { passed: 5, failed: 0, pending: 0, total: 5 }, mergeable: null, mergeState: 'unknown', unresolvedThreads: 0 },
       body: 'Use the 8px scale on the homepage sections.',
       bodyHtml: '<p>Use the 8px scale on the homepage sections.</p>',
       conversation: [{ kind: 'review', verdict: 'approved', comment: say('calebksmith', 60 * 27, '') }],
@@ -182,21 +170,34 @@ function seed(): SamplePr[] {
       checkRuns: [pass('Lint', 'GitHub Actions'), pass('Tests', 'GitHub Actions')],
     },
   ];
-  for (const p of prs) {
-    p.summary.additions = p.files.reduce((n, f) => n + f.additions, 0);
-    p.summary.deletions = p.files.reduce((n, f) => n + f.deletions, 0);
-  }
-  return prs;
+  return sized(prs);
 }
 
+export type SampleKind = 'solo' | 'team';
+
+const SETS: Record<SampleKind, { repo: string; required: number; seed: () => SamplePr[] }> = {
+  solo: { repo: 'calebksmith/portfolio', required: 0, seed: soloSeed },
+  // One approval from someone other than the author before anything merges, like a protected main.
+  team: { repo: 'acme/storefront', required: 1, seed: teamSeed },
+};
+
 export class SampleSource implements DataSource {
-  readonly repo = 'calebksmith/portfolio';
+  readonly repo: string;
   readonly sample = true;
-  private prs = seed();
+  private readonly me = 'calebksmith';
+  private readonly required: number;
+  private prs: SamplePr[];
 
-  async viewer(): Promise<string> { return 'calebksmith'; }
+  constructor(readonly kind: SampleKind = 'solo') {
+    const set = SETS[kind];
+    this.repo = set.repo;
+    this.required = set.required;
+    this.prs = set.seed();
+  }
 
-  async listPrs(): Promise<PrSummary[]> { return this.prs.map((p) => ({ ...p.summary })); }
+  async viewer(): Promise<string> { return this.me; }
+
+  async listPrs(): Promise<PrSummary[]> { return this.prs.map((p) => this.summarize(p)); }
 
   async getPr(number: number, sinceSha: string | null): Promise<PrDetail> {
     const p = this.find(number);
@@ -205,7 +206,7 @@ export class SampleSource implements DataSource {
       ? { fromSha: sinceSha ?? 'c44e2b9', toSha: p.summary.headSha, commits: 1, files: p.files.filter((f) => f.path === 'src/lib/track.test.ts') }
       : null;
     return {
-      ...p.summary, nodeId: `PR_${number}`, body: p.body, bodyHtml: p.bodyHtml, conversation: structuredClone(p.conversation), headRef: p.headRef, baseRef: 'main',
+      ...this.summarize(p), nodeId: `PR_${number}`, body: p.body, bodyHtml: p.bodyHtml, conversation: structuredClone(p.conversation),
       mergeMethods: ['squash', 'rebase'], files: p.files.map((f) => ({ ...f })), checkRuns: p.checkRuns, sinceLastLook,
     };
   }
@@ -215,16 +216,45 @@ export class SampleSource implements DataSource {
     if (f) f.viewed = viewed ? 'viewed' : 'unviewed';
   }
 
-  async approve(pr: PrDetail): Promise<void> { this.find(pr.number).summary.myReview = 'approved'; }
+  async approve(pr: PrDetail): Promise<void> {
+    const p = this.find(pr.number);
+    if (p.summary.author === this.me) throw Object.assign(new Error('You can’t approve your own pull request.'), { status: 422 });
+    p.summary.myReview = 'approved';
+  }
 
-  async merge(pr: PrDetail, _method: MergeMethod): Promise<void> { this.find(pr.number).summary.state = 'merged'; }
+  /** Like GitHub: refuses without the required approvals, and moves PRs stacked on this one onto its base. */
+  async merge(pr: PrDetail, _method: MergeMethod): Promise<void> {
+    const p = this.find(pr.number);
+    const s = this.summarize(p);
+    if (this.required && s.reviewDecision !== 'approved') {
+      throw Object.assign(new Error(`At least ${this.required} approving review is required by reviewers with write access.`), { status: 405 });
+    }
+    p.summary.state = 'merged';
+    for (const child of this.prs) if (child.base === p.headRef && child.summary.state === 'open') child.base = p.base ?? 'main';
+  }
 
   async comment(pr: PrDetail, body: string): Promise<void> {
     const html = `<p>${body.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!)}</p>`;
-    this.find(pr.number).conversation.push({ kind: 'comment', comment: { ...say('calebksmith', 0, html), text: body } });
+    this.find(pr.number).conversation.push({ kind: 'comment', comment: { ...say(this.me, 0, html), text: body } });
   }
 
   async updateBranch(pr: PrDetail): Promise<void> { this.find(pr.number).summary.mergeState = 'clean'; }
+
+  /** Adds what GitHub works out: branches, whose PR it is, the viewer's review among the others, the decision. */
+  private summarize(p: SamplePr): PrSummary {
+    const s = p.summary;
+    const others = (p.reviewers ?? []).filter((r) => r.login !== this.me || !s.myReview);
+    const reviewers: Reviewer[] = s.myReview ? [...others, { login: this.me, state: s.myReview }] : others;
+    return {
+      ...s,
+      headRef: p.headRef,
+      baseRef: p.base ?? 'main',
+      mine: s.author === this.me,
+      reviewers,
+      reviewRequested: reviewers.some((r) => r.login === this.me && r.state === 'requested'),
+      reviewDecision: decide(reviewers, this.required, s.author),
+    };
+  }
 
   private find(number: number): SamplePr {
     const p = this.prs.find((x) => x.summary.number === number);

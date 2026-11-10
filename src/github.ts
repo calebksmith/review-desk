@@ -2,11 +2,13 @@ import { Octokit } from '@octokit/rest';
 import { COMMENT_FIELDS, toConversation, type RawComment, type RawReview, type RawThread } from './conversation';
 import { logExcerpt } from './logs';
 import { parsePatch } from './patch';
-import type { CheckConclusion, CheckRun, ChecksTally, FileDiff, MergeMethod, MergeState, PrDetail, PrSummary, ViewedState } from './protocol';
+import type { CheckConclusion, CheckRun, ChecksTally, FileDiff, MergeMethod, MergeState, PrDetail, PrSummary, Reviewer, ViewedState } from './protocol';
 import type { DataSource } from './source';
 
 const PR_FIELDS = `
   number title url additions deletions updatedAt isDraft state headRefOid mergeable mergeStateStatus
+  headRefName baseRefName reviewDecision
+  reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug } ... on Bot { login } } } }
   reviewThreads(first: 100) { nodes { isResolved } }
   author { login }
   labels(first: 10) { nodes { name } }
@@ -21,6 +23,8 @@ const PR_FIELDS = `
 interface RawPr {
   number: number; title: string; url: string; additions: number; deletions: number; updatedAt: string;
   isDraft: boolean; state: 'OPEN' | 'MERGED' | 'CLOSED'; headRefOid: string;
+  headRefName: string; baseRefName: string; reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null;
+  reviewRequests: { nodes: { requestedReviewer: { __typename: string; login?: string; slug?: string } | null }[] };
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN'; mergeStateStatus: string;
   reviewThreads: { nodes: { isResolved: boolean }[] };
   author: { login: string } | null;
@@ -67,7 +71,7 @@ export class GitHubSource implements DataSource {
   async getPr(number: number, sinceSha: string | null): Promise<PrDetail> {
     const me = await this.viewer();
     const data = await this.octokit.graphql<{ repository: { squashMergeAllowed: boolean; mergeCommitAllowed: boolean; rebaseMergeAllowed: boolean; pullRequest: RawPr & {
-      id: string; body: string; bodyHTML: string; headRefName: string; baseRefName: string;
+      id: string; body: string; bodyHTML: string;
       files: { nodes: { path: string; viewerViewedState: 'VIEWED' | 'UNVIEWED' | 'DISMISSED' }[] };
       comments: { nodes: RawComment[] };
       reviews: { nodes: RawReview[] };
@@ -75,7 +79,7 @@ export class GitHubSource implements DataSource {
     } } }>(
       `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) {
         squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
-        pullRequest(number: $number) { ${PR_FIELDS} id body bodyHTML headRefName baseRefName
+        pullRequest(number: $number) { ${PR_FIELDS} id body bodyHTML
           files(first: 100) { nodes { path viewerViewedState } }
           comments(last: 50) { nodes { ${COMMENT_FIELDS} } }
           reviews(last: 50) { nodes { author { login } state submittedAt body bodyHTML url } }
@@ -152,8 +156,6 @@ export class GitHubSource implements DataSource {
       body: raw.body,
       bodyHtml: raw.bodyHTML,
       conversation: toConversation(raw.comments.nodes, raw.reviews.nodes, raw.threads.nodes),
-      headRef: raw.headRefName,
-      baseRef: raw.baseRefName,
       mergeMethods: mergeMethods(data.repository),
       files,
       checkRuns,
@@ -204,10 +206,21 @@ function toViewed(s: 'VIEWED' | 'UNVIEWED' | 'DISMISSED'): ViewedState {
 
 function toSummary(p: RawPr, me: string): PrSummary {
   const mine = p.latestReviews.nodes.find((r) => r.author?.login === me)?.state;
+  const author = p.author?.login ?? 'ghost';
+  const reviewed: Reviewer[] = p.latestReviews.nodes
+    .filter((r) => r.author && r.author.login !== author && REVIEW_STATE[r.state])
+    .map((r) => ({ login: r.author!.login, state: REVIEW_STATE[r.state]! }));
+  const asked = p.reviewRequests.nodes.map((n) => n.requestedReviewer?.login ?? n.requestedReviewer?.slug).filter((l): l is string => !!l);
   return {
     number: p.number,
     title: p.title,
-    author: p.author?.login ?? 'ghost',
+    author,
+    headRef: p.headRefName,
+    baseRef: p.baseRefName,
+    mine: author === me,
+    reviewDecision: p.reviewDecision === 'APPROVED' ? 'approved' : p.reviewDecision === 'CHANGES_REQUESTED' ? 'changes_requested' : p.reviewDecision === 'REVIEW_REQUIRED' ? 'review_required' : null,
+    reviewers: [...reviewed, ...asked.filter((l) => !reviewed.some((r) => r.login === l)).map((login) => ({ login, state: 'requested' as const }))],
+    reviewRequested: asked.includes(me),
     url: p.url,
     additions: p.additions,
     deletions: p.deletions,
@@ -223,6 +236,8 @@ function toSummary(p: RawPr, me: string): PrSummary {
     unresolvedThreads: p.reviewThreads.nodes.filter((t) => !t.isResolved).length,
   };
 }
+
+const REVIEW_STATE: Record<string, Reviewer['state'] | undefined> = { APPROVED: 'approved', CHANGES_REQUESTED: 'changes_requested', COMMENTED: 'commented' };
 
 export function toMergeState(s: string): MergeState {
   const v = s.toLowerCase();

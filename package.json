@@ -14,6 +14,7 @@
     "commands": [
       { "command": "reviewDesk.open", "title": "Open review queue", "category": "Review Desk", "icon": "$(preview)" },
       { "command": "reviewDesk.openSample", "title": "Open with sample data", "category": "Review Desk" },
+      { "command": "reviewDesk.openTeamSample", "title": "Open with team sample data", "category": "Review Desk" },
       { "command": "reviewDesk.switchRepository", "title": "Switch repository", "category": "Review Desk", "icon": "$(repo)" },
       { "command": "reviewDesk.mergeDependabot", "title": "Merge passing Dependabot updates", "category": "Review Desk", "icon": "$(git-merge)" },
       { "command": "reviewDesk.signOut", "title": "Use a different GitHub account", "category": "Review Desk" },
@@ -32,7 +33,7 @@
       {
         "view": "reviewDesk.queue",
         "when": "!reviewDesk.connected",
-        "contents": "Review pull requests that agents wrote, beside your code.\n[Sign in with GitHub](command:reviewDesk.connect)\nNo GitHub repo handy? [Try it with sample data](command:reviewDesk.openSample)."
+        "contents": "Review pull requests that agents wrote, beside your code.\n[Sign in with GitHub](command:reviewDesk.connect)\nNo GitHub repo handy? Try it with [sample data](command:reviewDesk.openSample) or [a team’s sample data](command:reviewDesk.openTeamSample)."
       }
     ],
     "menus": {

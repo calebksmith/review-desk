@@ -6,6 +6,7 @@ import type { CommentAction, FromWebview, PrSummary } from './protocol';
 import { defaultRepository, githubRepos, parseRepositoryInput } from './repos';
 import { SampleSource } from './sample';
 import { needsYou, queueGroups, type QueueGroup } from './sidebar';
+import { parentOf } from './stacks';
 import { bulkMergeable, prStatus, type Tone } from './status';
 import type { DataSource } from './source';
 
@@ -45,6 +46,10 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('reviewDesk.openSample', () => {
       useSource(new SampleSource());
+      open(context);
+    }),
+    vscode.commands.registerCommand('reviewDesk.openTeamSample', () => {
+      useSource(new SampleSource('team'));
       open(context);
     }),
     command('reviewDesk.switchRepository', async () => {
@@ -249,12 +254,13 @@ class GroupItem extends vscode.TreeItem {
 }
 
 class PrItem extends vscode.TreeItem {
-  constructor(readonly pr: PrSummary) {
+  constructor(readonly pr: PrSummary, queue: readonly PrSummary[] = []) {
     super(pr.title, vscode.TreeItemCollapsibleState.None);
     const status = prStatus(pr);
     this.id = `pr:${pr.number}`;
     // Say the status only when it adds to the group's name ("Needs you" already means needs your review).
-    this.description = status.quiet ? `#${pr.number}` : `#${pr.number} · ${status.label}`;
+    const parent = parentOf(pr, queue);
+    this.description = [`#${pr.number}`, parent ? `on #${parent.number}` : '', status.quiet ? '' : status.label].filter(Boolean).join(' · ');
     this.tooltip = new vscode.MarkdownString(`**#${pr.number} ${pr.title}**\n\n${status.label} · by ${pr.author} · +${pr.additions} −${pr.deletions}`);
     const t = TONE[status.tone];
     this.iconPath = pr.state === 'merged' ? new vscode.ThemeIcon('git-merge') : new vscode.ThemeIcon(t.icon, t.color ? new vscode.ThemeColor(t.color) : undefined);
@@ -278,7 +284,7 @@ class QueueTree implements vscode.TreeDataProvider<vscode.TreeItem> {
   reveal(number: number): void {
     const pr = this.queue?.find((p) => p.number === number);
     if (!pr || !this.view?.visible) return;
-    void this.view.reveal(new PrItem(pr), { select: true, focus: false, expand: true }).then(undefined, () => {});
+    void this.view.reveal(new PrItem(pr, this.queue ?? []), { select: true, focus: false, expand: true }).then(undefined, () => {});
   }
 
   getParent(item: vscode.TreeItem): vscode.TreeItem | undefined {
@@ -336,7 +342,7 @@ class QueueTree implements vscode.TreeDataProvider<vscode.TreeItem> {
   getChildren(item?: vscode.TreeItem): vscode.TreeItem[] {
     if (!source) return [];
     if (!this.queue) return item ? [] : [Object.assign(new vscode.TreeItem('Loading pull requests…'), { iconPath: new vscode.ThemeIcon('loading~spin') })];
-    if (item instanceof GroupItem) return item.group.prs.map((p) => new PrItem(p));
+    if (item instanceof GroupItem) return item.group.prs.map((p) => new PrItem(p, this.queue ?? []));
     return item ? [] : queueGroups(this.queue).map((g) => new GroupItem(g));
   }
 }

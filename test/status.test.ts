@@ -6,9 +6,10 @@ import { bulkMergeable, bulkSkipReason, mergeBlocker, mergeReadiness, mergeSumma
 const base: PrSummary = {
   number: 1, title: 't', author: 'a', url: '', additions: 0, deletions: 0, updatedAt: '', headSha: 'abc', isDraft: false, state: 'open',
   labels: [], myReview: null, checks: { passed: 3, failed: 0, pending: 0, total: 3 }, mergeable: true, mergeState: 'clean', unresolvedThreads: 0,
+  headRef: 'h', baseRef: 'main', mine: false, reviewDecision: null, reviewers: [], reviewRequested: false,
 };
 const pr = (p: Partial<PrSummary> = {}): PrSummary => ({ ...base, ...p });
-const detail = (p: Partial<PrDetail> = {}): PrDetail => ({ ...base, nodeId: '', body: '', bodyHtml: '', conversation: [], headRef: 'h', baseRef: 'main', mergeMethods: ['squash'], files: [], checkRuns: [], sinceLastLook: null, ...p });
+const detail = (p: Partial<PrDetail> = {}): PrDetail => ({ ...base, nodeId: '', body: '', bodyHtml: '', conversation: [], mergeMethods: ['squash'], files: [], checkRuns: [], sinceLastLook: null, ...p });
 
 describe('prStatus', () => {
   it('names each state once', () => {
@@ -104,5 +105,41 @@ describe('bulk merge', () => {
     expect(bulkSkipReason(dep({ state: 'merged' }))).toBe('already merged');
     expect(bulkSkipReason(dep({ mergeState: 'behind' }))).toBeNull();
     expect(bulkMergeable([dep({ mergeable: false })])).toEqual([]);
+  });
+});
+
+describe('team reviews', () => {
+  const asked = (...logins: string[]) => logins.map((login) => ({ login, state: 'requested' as const }));
+  it('puts your own PRs in their own bucket, saying what’s next', () => {
+    expect(prStatus(pr({ mine: true, reviewDecision: 'review_required', reviewers: asked('priya') }))).toMatchObject({ bucket: 'mine', label: 'Waiting on priya', who: 'author' });
+    expect(prStatus(pr({ mine: true, reviewDecision: 'changes_requested' }))).toMatchObject({ bucket: 'mine', label: 'Changes requested', who: 'you' });
+    expect(prStatus(pr({ mine: true, reviewDecision: 'approved' }))).toMatchObject({ bucket: 'mine', label: 'Ready to merge' });
+    expect(prStatus(pr({ mine: true, checks: { passed: 0, failed: 1, pending: 0, total: 1 } }))).toMatchObject({ bucket: 'mine', label: '1 check failing' });
+  });
+
+  it('leaves a PR to the reviewer who was asked, and keeps yours in Needs you', () => {
+    expect(prStatus(pr({ reviewDecision: 'review_required', reviewers: asked('sam') }))).toMatchObject({ bucket: 'waiting', label: 'Waiting on sam' });
+    expect(prStatus(pr({ reviewDecision: 'review_required', reviewers: asked('sam', 'calebksmith'), reviewRequested: true }))).toMatchObject({ bucket: 'needs', label: 'Needs your review' });
+  });
+
+  it('waits for another approval after yours when the repo needs more', () => {
+    expect(prStatus(pr({ myReview: 'approved', reviewDecision: 'review_required' }))).toMatchObject({ bucket: 'waiting', label: 'Needs another approval' });
+    expect(prStatus(pr({ reviewDecision: 'approved' }))).toMatchObject({ bucket: 'approved', label: 'Ready to merge' });
+  });
+
+  it('blocks merging without approval, and a stacked PR before the one under it', () => {
+    expect(mergeBlocker(detail({ mine: true, reviewDecision: 'review_required' }))).toBe('It needs an approval from a reviewer first.');
+    expect(mergeBlocker(detail({ reviewDecision: 'changes_requested' }))).toMatch(/new approval/);
+    const parent = pr({ number: 7, headRef: 'base-branch' });
+    const child = detail({ number: 8, baseRef: 'base-branch', reviewDecision: 'approved' });
+    expect(mergeBlocker(child, [parent])).toBe('Merge #7 first. This PR is stacked on it.');
+    expect(mergeReadiness(child, [parent])[0]).toMatchObject({ key: 'stack', action: 'openPr', pr: 7 });
+  });
+
+  it('says who approved and who’s still asked', () => {
+    const items = mergeReadiness(detail({ reviewDecision: 'review_required', reviewers: [{ login: 'dana', state: 'approved' }, ...asked('sam')] }));
+    expect(items.find((i) => i.key === 'approval')?.text).toBe('Approved by dana; needs another approval (asked: sam)');
+    const me = mergeReadiness(detail({ reviewDecision: 'review_required', reviewers: asked('calebksmith') }), [], 'calebksmith');
+    expect(me.find((i) => i.key === 'approval')?.text).toBe('Needs an approval (asked: you)');
   });
 });

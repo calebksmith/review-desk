@@ -26,9 +26,15 @@ npm run build
 
 Then press F5 in VS Code to open an Extension Development Host. Click the Review Desk icon in the left rail: the **Pull requests** list groups PRs by what they need, with a badge for how many need you, and marks the one open in the panel. Click one to open it in the full panel, or run **Review Desk: Open review queue** from the Command Palette. The list's title bar has Open review queue, Refresh and Switch repository; the Needs you group offers the one-click Dependabot merge when updates qualify. It signs in with your GitHub account in VS Code and reviews the open folder's GitHub repo. If several folders are open, it asks which repo to review and remembers your choice for that workspace. To review a different one, click the repo name at the top of the queue, the repo icon in the sidebar, or run **Review Desk: Switch repository**: pick an open folder's repo or type any `owner/name`.
 
-**Review Desk: Open with sample data** works without GitHub. To see the UI in a browser instead, run `npm run preview` and open `.preview/index.html` (add `?theme=dark` for dark).
+**Review Desk: Open with sample data** works without GitHub, and **Open with team sample data** shows a team: several developers, an agent and Dependabot, one approval required to merge, and two stacks of PRs. To see the UI in a browser instead, run `npm run preview` and open `.preview/index.html` (add `?theme=dark` for dark, `?sample=team` for the team).
 
 To install it as a normal extension, run `npm run package` and install the `.vsix` with **Extensions: Install from VSIX…**.
+
+## Teams and stacked PRs
+
+- **Your PRs, review requests and everyone else's.** PRs you opened have their own group, saying what's next ("Waiting on priya", "Changes requested", "Ready to merge"). Needs you holds other people's PRs that need your review, with **Review requested** where you were asked by name. Waiting on others holds PRs assigned to someone else.
+- **Required approvals.** The merge checklist says who approved and who's still asked, and Merge waits for the approvals GitHub requires. You can't approve your own PR, so it goes straight to Merge.
+- **Stacks.** A PR whose base is another open PR's branch is stacked on it. **Stacks** in the queue shows each stack as a tree in merge order; a stacked PR's rail shows its whole stack, its header links the PR below, and Merge waits until that one has merged.
 
 ## Settings
 
@@ -54,8 +60,9 @@ The extension host talks to GitHub; the webview only renders. `src/controller.ts
 | `src/logs.ts` | The error lines from a failed GitHub Actions log |
 | `src/repos.ts` | Which repo to review: the setting, your last pick, or the folders that are open |
 | `src/protocol.ts` | Types shared by the host and the webview |
+| `src/stacks.ts` | Which PRs are stacked on which, and in what order they merge |
 | `src/sidebar.ts` | How the sidebar groups and counts PRs |
-| `src/sample.ts` | Sample PRs for demos and tests |
+| `src/sample.ts`, `src/sample-team.ts` | Sample PRs for demos and tests: solo, and a team |
 | `webview/` | The panel's UI, styled from the VS Code theme |
 
 `npm test` runs the unit tests; `npm run typecheck` checks both halves.
