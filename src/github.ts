@@ -6,12 +6,12 @@ import type { CheckConclusion, CheckRun, ChecksTally, Draft, FileDiff, MergeMeth
 import type { Budget } from './refresh';
 import { combine, scopeLabel, searchQueries, type Scope } from './scope';
 import { parseDependsOn, parseLinear } from './signals';
-import type { DataSource } from './source';
+import type { DataSource, Sent } from './source';
 
 const PR_FIELDS = `
   number title url additions deletions updatedAt isDraft state headRefOid mergeable mergeStateStatus
   repository { nameWithOwner }
-  headRefName baseRefName reviewDecision createdAt body
+  headRefName baseRefName isCrossRepository reviewDecision createdAt body
   milestone { title dueOn }
   timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 10) { nodes { ... on ReviewRequestedEvent { createdAt requestedReviewer { ... on User { login } } } } }
   reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Bot { login } } } }
@@ -27,13 +27,13 @@ const PR_FIELDS = `
   } } } } } }
 `;
 
-interface RawPr {
+export interface RawPr {
   repository: { nameWithOwner: string };
   number: number; title: string; url: string; additions: number; deletions: number; updatedAt: string;
   isDraft: boolean; state: 'OPEN' | 'MERGED' | 'CLOSED'; headRefOid: string;
   createdAt: string; body: string; milestone: { title: string; dueOn: string | null } | null;
   timelineItems: { nodes: { createdAt?: string; requestedReviewer?: { login?: string } | null }[] };
-  headRefName: string; baseRefName: string; reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null;
+  headRefName: string; baseRefName: string; isCrossRepository: boolean; reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null;
   reviewRequests: { nodes: { requestedReviewer: { __typename: string; login?: string } | null }[] };
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN'; mergeStateStatus: string;
   reviewThreads: { nodes: { isResolved: boolean }[] };
@@ -97,19 +97,26 @@ export class GitHubSource implements DataSource {
     );
     this.allowance = found.rateLimit;
     const { rateLimit: _, ...results } = found;
-    const searched = Object.values(results).flatMap((r) => (r as { nodes: (RawPr | Record<string, never>)[] }).nodes.filter((n): n is RawPr => 'number' in n)).map((p) => toSummary(p, me));
+    // review-requested:@me (search b) includes requests made to your teams, which the PR's reviewRequests can't
+    // tell apart from teams you aren't on without read:org. Every PR it finds is one you've been asked to review.
+    const asked = new Set((found.b?.nodes ?? []).filter((n): n is RawPr => 'number' in n).map((p) => `${p.repository.nameWithOwner}#${p.number}`));
+    const searched = Object.values(results).flatMap((r) => (r as { nodes: (RawPr | Record<string, never>)[] }).nodes.filter((n): n is RawPr => 'number' in n))
+      .map((p) => toSummary(p, me, asked.has(`${p.repository.nameWithOwner}#${p.number}`)));
     const full = await Promise.all(this.what.full.map((r) => this.repoPrs(r, me)));
     return combine([searched, ...full]);
   }
 
   private async repoPrs(repo: string, me: string): Promise<PrSummary[]> {
     const { owner, repo: name } = at(repo);
-    const data = await this.octokit.graphql<{ rateLimit: Budget; repository: { open: { nodes: RawPr[] }; merged: { nodes: RawPr[] } } }>(
-      `query($owner: String!, $name: String!) { rateLimit { remaining limit resetAt } repository(owner: $owner, name: $name) { ${REPO_PRS} } }`,
-      { owner, name },
+    // The same review-requested:@me search as the combined view, for team requests; numbers only, so it's cheap.
+    const data = await this.octokit.graphql<{ rateLimit: Budget; repository: { open: { nodes: RawPr[] }; merged: { nodes: RawPr[] } }; asked: { nodes: { number?: number }[] } }>(
+      `query($owner: String!, $name: String!, $asked: String!) { rateLimit { remaining limit resetAt } repository(owner: $owner, name: $name) { ${REPO_PRS} }
+        asked: search(query: $asked, type: ISSUE, first: 100) { nodes { ... on PullRequest { number } } } }`,
+      { owner, name, asked: requestedQuery(repo) },
     );
     this.allowance = data.rateLimit;
-    return [...data.repository.open.nodes, ...data.repository.merged.nodes].map((p) => toSummary(p, me));
+    const asked = new Set(data.asked.nodes.map((n) => n.number));
+    return [...data.repository.open.nodes, ...data.repository.merged.nodes].map((p) => toSummary(p, me, asked.has(p.number)));
   }
 
   async getPr(repo: string, number: number, sinceSha: string | null): Promise<PrDetail> {
@@ -256,8 +263,9 @@ export class GitHubSource implements DataSource {
     await this.octokit.graphql(`mutation($id: ID!, $path: String!) { ${mutation}(input: { pullRequestId: $id, path: $path }) { clientMutationId } }`, { id: pr.nodeId, path });
   }
 
+  /** Through your pending review, if you have one: GitHub allows one per person per PR, so a new review would fail. */
   async approve(pr: PrDetail): Promise<void> {
-    await this.octokit.pulls.createReview({ ...at(pr.repo), pull_number: pr.number, commit_id: pr.headSha, event: 'APPROVE' });
+    await this.submitReview(pr, 'APPROVE', '', []);
   }
 
   async merge(pr: PrDetail, method: MergeMethod): Promise<void> {
@@ -271,9 +279,10 @@ export class GitHubSource implements DataSource {
   /**
    * Sends a review the way github.com does: into your pending review (the one you may have started in the
    * browser, or a new one), with each held-back comment and reply, then submitted with the verdict. GitHub allows
-   * one pending review per person per PR, so starting a second would fail. Resolves follow the submit.
+   * one pending review per person per PR, so starting a second would fail. Resolves follow the submit; once it's
+   * submitted the review is sent, so a resolve that fails is counted rather than thrown (retrying would post twice).
    */
-  async submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<void> {
+  async submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<Sent> {
     const existing = await this.pendingReviewId(pr);
     const id = existing ?? (await this.startReview(pr));
     try {
@@ -284,14 +293,14 @@ export class GitHubSource implements DataSource {
       if (!existing) await this.discardReview(id);
       throw err;
     }
-    for (const d of drafts.filter((x) => x.replyTo && x.resolve)) await this.resolve(d.replyTo!);
+    return this.resolveAll(drafts);
   }
 
   /**
    * One comment or reply, posted now: a review with just that comment, submitted as a comment, which is what
    * GitHub's "Add single comment" does. Not while a review of yours is in progress: GitHub doesn't allow it either.
    */
-  async commentNow(pr: PrDetail, d: Draft): Promise<void> {
+  async commentNow(pr: PrDetail, d: Draft): Promise<Sent> {
     if (await this.pendingReviewId(pr)) throw new Error('You have a review in progress on this PR. Add this comment to your review and submit it, or finish that review first.');
     const id = await this.startReview(pr);
     try {
@@ -301,7 +310,16 @@ export class GitHubSource implements DataSource {
       await this.discardReview(id);
       throw err;
     }
-    if (d.replyTo && d.resolve) await this.resolve(d.replyTo);
+    return this.resolveAll([d]);
+  }
+
+  /** Resolves the threads replies asked to, after they're posted. Each is tried; the ones GitHub refused are counted. */
+  private async resolveAll(drafts: Draft[]): Promise<Sent> {
+    let unresolved = 0;
+    for (const d of drafts.filter((x) => x.replyTo && x.resolve)) {
+      try { await this.resolve(d.replyTo!); } catch { unresolved++; }
+    }
+    return { unresolved };
   }
 
   /** Your pending review on this PR, if you have one. GitHub only shows a pending review to its author. */
@@ -373,7 +391,11 @@ function toViewed(s: 'VIEWED' | 'UNVIEWED' | 'DISMISSED'): ViewedState {
   return s === 'VIEWED' ? 'viewed' : s === 'DISMISSED' ? 'changed' : 'unviewed';
 }
 
-function toSummary(p: RawPr, me: string): PrSummary {
+/** Open PRs in one repo where you, or a team you're on, have been asked to review. */
+export const requestedQuery = (repo: string) => `repo:${repo} is:pr is:open review-requested:@me`;
+
+/** `requested`: GitHub's review-requested:@me search found it, which counts requests to your teams. */
+export function toSummary(p: RawPr, me: string, requested = false): PrSummary {
   const myLatest = p.latestReviews.nodes.find((r) => r.author?.login === me);
   const mine = myLatest?.state;
   const author = p.author?.login ?? 'ghost';
@@ -388,11 +410,12 @@ function toSummary(p: RawPr, me: string): PrSummary {
     title: p.title,
     author,
     headRef: p.headRefName,
+    fromFork: p.isCrossRepository,
     baseRef: p.baseRefName,
     mine: author === me,
     reviewDecision: p.reviewDecision === 'APPROVED' ? 'approved' : p.reviewDecision === 'CHANGES_REQUESTED' ? 'changes_requested' : p.reviewDecision === 'REVIEW_REQUIRED' ? 'review_required' : null,
     reviewers: [...reviewed, ...asked.filter((l) => !reviewed.some((r) => r.login === l)).map((login) => ({ login, state: 'requested' as const }))],
-    reviewRequested: asked.includes(me),
+    reviewRequested: requested || asked.includes(me),
     createdAt: p.createdAt,
     requestedAt: p.timelineItems.nodes.filter((n) => n.requestedReviewer?.login === me).map((n) => n.createdAt!).sort().at(-1) ?? null,
     milestone: p.milestone,

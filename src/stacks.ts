@@ -1,15 +1,17 @@
 import { prKey, type PrSummary } from './protocol';
 
 // Stacked PRs: a PR whose base branch is another open PR's branch is stacked on it, and merges after it.
+// Only branches in the repo itself count: a fork's `main` is not this repo's `main`.
 
 const open = (queue: readonly PrSummary[]) => queue.filter((p) => p.state === 'open');
 
 /** The open PR this one is stacked on, or null when it merges into a normal branch. */
 export function parentOf(pr: Pick<PrSummary, 'repo' | 'baseRef' | 'number'>, queue: readonly PrSummary[]): PrSummary | null {
-  return open(queue).find((p) => p.repo === pr.repo && p.headRef === pr.baseRef && p.number !== pr.number) ?? null;
+  return open(queue).find((p) => !p.fromFork && p.repo === pr.repo && p.headRef === pr.baseRef && p.number !== pr.number) ?? null;
 }
 
-export function childrenOf(pr: Pick<PrSummary, 'repo' | 'headRef' | 'number'>, queue: readonly PrSummary[]): PrSummary[] {
+export function childrenOf(pr: Pick<PrSummary, 'repo' | 'headRef' | 'number' | 'fromFork'>, queue: readonly PrSummary[]): PrSummary[] {
+  if (pr.fromFork) return [];
   return open(queue).filter((p) => p.repo === pr.repo && p.baseRef === pr.headRef && p.number !== pr.number).sort((a, b) => a.number - b.number);
 }
 

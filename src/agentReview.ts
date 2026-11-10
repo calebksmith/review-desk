@@ -3,12 +3,16 @@ import type { ConversationItem, Draft, PrDetail } from './protocol';
 // "Review with agent": an independent, adversarial review by the reviewer's own agent. Its findings come
 // back through a JSON file Review Desk watches, and land as drafts the reviewer keeps, edits or drops.
 
-/** Where an agent writes its findings for a PR, relative to the repo's root. Ignored by git (local excludes). */
-export const findingsPath = (repo: string, number: number) => `.review-desk/${repo.replace('/', '-')}-${number}.json`;
+/**
+ * Where an agent writes its findings for a PR, relative to the repo's root. Ignored by git (local excludes).
+ * Owner and repo are joined by "__": GitHub owners can't contain "_", so the name reads back unambiguously
+ * even when both have hyphens ("my-org__web-app-102.json").
+ */
+export const findingsPath = (repo: string, number: number) => `.review-desk/${repo.replace('/', '__')}-${number}.json`;
 
 /** The PR a findings file is about, from its name; null for any other file. */
 export function findingsFor(fileName: string): { repo: string; number: number } | null {
-  const m = /([\w.-]+?)-([\w.-]+)-(\d+)\.json$/.exec(fileName.split(/[\\/]/).pop() ?? '');
+  const m = /^([A-Za-z0-9-]+)__([\w.-]+)-(\d+)\.json$/.exec(fileName.split(/[\\/]/).pop() ?? '');
   return m ? { repo: `${m[1]}/${m[2]}`, number: Number(m[3]) } : null;
 }
 

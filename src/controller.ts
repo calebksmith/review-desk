@@ -34,6 +34,12 @@ export interface Host {
 export class Controller {
   private state: HostState;
 
+  /**
+   * What the open PR is compared against, fixed when you open it: the commit you'd seen (or reviewed) and when.
+   * Background refreshes reuse it, so "since your last look" and the New tags last until you open the PR again.
+   */
+  private opened: { key: string; sinceSha: string | null; kind: 'review' | 'look'; seenAt: string | null } | null = null;
+
   /** PRs closed from here this session (by key); GitHub can list them as open for a few seconds after. */
   private readonly closed = new Set<string>();
 
@@ -124,17 +130,26 @@ export class Controller {
     // Keyed by repo and number, so "new since you looked" survives switching between repos and the combined view.
     const key = `lastSeen:${prKey(at)}`;
     const atKey = `lastSeenAt:${prKey(at)}`;
-    const seenAt = this.store.get<string>(atKey) ?? null;
-    // A re-review compares with the commit you reviewed, not the one you last opened.
-    const summary = this.state.queue.find((p) => prKey(p) === prKey(at));
-    const sinceReview = summary && isReReview(summary) && summary.myReviewSha ? summary.myReviewSha : null;
-    const [pr, me] = await Promise.all([this.source.getPr(at.repo, at.number, sinceReview ?? this.store.get<string>(key) ?? null), this.source.viewer()]);
-    if (pr.sinceLastLook) pr.sinceLastLook.kind = sinceReview ? 'review' : 'look';
-    // Seen means opened: the next push or comment after this is "new since you looked".
-    await this.store.set(key, pr.headSha);
-    await this.store.set(atKey, new Date().toISOString());
-    // A quiet refresh landing after you've moved on doesn't pull you back.
+    // A background refresh of the PR you're on keeps the comparison it was opened with; anything else starts one.
+    const kept = quiet && this.opened?.key === prKey(at) ? this.opened : null;
+    let since = kept;
+    if (!since) {
+      // A re-review compares with the commit you reviewed, not the one you last opened.
+      const summary = this.state.queue.find((p) => prKey(p) === prKey(at));
+      const sinceReview = summary && isReReview(summary) && summary.myReviewSha ? summary.myReviewSha : null;
+      since = { key: prKey(at), sinceSha: sinceReview ?? this.store.get<string>(key) ?? null, kind: sinceReview ? 'review' : 'look', seenAt: this.store.get<string>(atKey) ?? null };
+    }
+    const [pr, me] = await Promise.all([this.source.getPr(at.repo, at.number, since.sinceSha), this.source.viewer()]);
+    if (pr.sinceLastLook) pr.sinceLastLook.kind = since.kind;
+    // A quiet refresh landing after you've moved on doesn't pull you back, or mark anything seen.
     if (quiet && (this.state.view !== 'pr' || !this.state.pr || prKey(this.state.pr) !== prKey(at))) return;
+    // Seen means opened: the next push or comment after this is "new since you looked". Refreshing isn't looking.
+    if (!kept) {
+      await this.store.set(key, pr.headSha);
+      await this.store.set(atKey, new Date().toISOString());
+      this.opened = since;
+    }
+    const seenAt = since.seenAt;
     this.prAt = Date.now();
     this.set({ pr: { ...pr, conversation: markNew(pr.conversation, seenAt, me), seenBefore: seenAt !== null }, drafts: this.store.get<Draft[]>(`drafts:${prKey(at)}`) ?? [], loading: false, updatedAt: new Date(this.prAt).toISOString() });
   }
@@ -243,18 +258,19 @@ export class Controller {
     const f = openFindings(pr);
     if (event === 'APPROVE' && (f.p0 || f.p1) && !(await this.host.confirm(`${[f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ')} ${f.p0 + f.p1 === 1 ? 'finding is' : 'findings are'} still open. Approve anyway?`, 'Approve anyway'))) return;
     this.set({ busy: 'review' });
+    let sent = { unresolved: 0 };
     try {
       // Findings without a line can't sit in the diff on GitHub either: they go in the summary instead.
       const loose = send.filter((d) => !d.replyTo && d.line == null);
       const summary = [body.trim(), ...loose.map((d) => `- \`${d.path}\`: ${d.body}`)].filter(Boolean).join('\n\n');
-      await this.source.submitReview(pr, event, summary, send.filter((d) => !loose.includes(d)));
+      sent = await this.source.submitReview(pr, event, summary, send.filter((d) => !loose.includes(d)));
       this.source.invalidate?.();
     } finally {
       this.set({ busy: null });
     }
     await this.saveDrafts(this.state.drafts.filter((d) => d.from !== 'you'));
     const said = { APPROVE: 'Approved', REQUEST_CHANGES: 'Requested changes on', COMMENT: 'Sent your review of' }[event];
-    this.host.post({ type: 'toast', text: `${said} ${this.ref(pr)}${send.length ? ` with ${plural(send.length, 'comment')}` : ''}.` });
+    this.host.post({ type: 'toast', text: `${said} ${this.ref(pr)}${send.length ? ` with ${plural(send.length, 'comment')}` : ''}.${notResolved(sent)}` });
     await this.loadPr(pr);
   }
 
@@ -262,13 +278,14 @@ export class Controller {
     const pr = this.state.pr;
     if (!pr || !draft.body.trim() || this.state.busy) return;
     this.set({ busy: 'comment' });
+    let sent = { unresolved: 0 };
     try {
-      await this.source.commentNow(pr, { ...draft, id: newId(), from: 'you' });
+      sent = await this.source.commentNow(pr, { ...draft, id: newId(), from: 'you' });
       this.source.invalidate?.();
     } finally {
       this.set({ busy: null });
     }
-    this.host.post({ type: 'toast', text: 'Comment posted' });
+    this.host.post({ type: 'toast', text: `Comment posted${sent.unresolved ? `.${notResolved(sent)}` : ''}` });
     await this.loadPr(pr);
   }
 
@@ -402,6 +419,9 @@ export class Controller {
 
   private push(): void { this.host.post({ type: 'state', state: this.state }); }
 }
+
+/** After a send: the threads GitHub wouldn't resolve, so the reviewer resolves them there instead of sending again. */
+const notResolved = (s: { unresolved: number }) => (s.unresolved ? ` ${s.unresolved === 1 ? 'Its thread' : `${s.unresolved} threads`} couldn’t be resolved; resolve ${s.unresolved === 1 ? 'it' : 'them'} on GitHub.` : '');
 
 function message(err: unknown): string {
   if (err && typeof err === 'object' && 'status' in err && (err as { status: number }).status === 401) return 'GitHub sign-in expired. Run “Review Desk: Use a different GitHub account”.';

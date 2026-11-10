@@ -1,6 +1,6 @@
 import type { Draft, MergeMethod, PrDetail, PrSummary, ReviewEvent } from './protocol';
 import type { Budget } from './refresh';
-import type { DataSource } from './source';
+import type { DataSource, Sent } from './source';
 
 /**
  * One queue for the sidebar and the panel: loads within `ttl` of each other (or at the same moment) share one
@@ -32,6 +32,6 @@ export class SharedSource implements DataSource {
   merge(pr: PrDetail, method: MergeMethod): Promise<void> { return this.inner.merge(pr, method); }
   updateBranch(pr: PrDetail): Promise<void> { return this.inner.updateBranch(pr); }
   comment(pr: PrDetail, body: string): Promise<void> { return this.inner.comment(pr, body); }
-  submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<void> { return this.inner.submitReview(pr, event, body, drafts); }
-  commentNow(pr: PrDetail, draft: Draft): Promise<void> { return this.inner.commentNow(pr, draft); }
+  submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<Sent> { return this.inner.submitReview(pr, event, body, drafts); }
+  commentNow(pr: PrDetail, draft: Draft): Promise<Sent> { return this.inner.commentNow(pr, draft); }
 }

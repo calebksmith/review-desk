@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GitHubSource } from '../src/github';
+import { GitHubSource, requestedQuery, toSummary, type RawPr } from '../src/github';
 import type { Draft, PrDetail } from '../src/protocol';
 
 /** A GitHubSource whose GraphQL calls are recorded and answered by `reply`. */
@@ -51,5 +51,56 @@ describe('sending reviews to GitHub', () => {
     await free.src.commentNow(pr, reply);
     expect(free.calls).toEqual(['reviews(states: PENDING', 'addPullRequestReview', 'addPullRequestReviewThreadReply', 'submitPullRequestReview', 'resolveReviewThread']);
     await expect(fake('me').src.commentNow(pr, line)).rejects.toThrow(/review in progress/);
+  });
+
+  it('counts a thread it couldn’t resolve instead of failing a review that was sent', async () => {
+    const { src, calls } = fake(null, 'resolveReviewThread');
+    await expect(src.submitReview(pr, 'COMMENT', '', [reply])).resolves.toEqual({ unresolved: 1 });
+    expect(calls).toContain('submitPullRequestReview');
+    expect(calls).not.toContain('deletePullRequestReview');
+    await expect(fake(null, 'resolveReviewThread').src.commentNow(pr, reply)).resolves.toEqual({ unresolved: 1 });
+  });
+
+  it('approves through your pending review, so it doesn’t start a second one', async () => {
+    const { src, calls } = fake('me');
+    await src.approve(pr);
+    expect(calls).toEqual(['reviews(states: PENDING', 'submitPullRequestReview']);
+  });
+});
+
+const raw = (over: Partial<RawPr> = {}): RawPr => ({
+  repository: { nameWithOwner: 'acme/web' }, number: 5, title: 't', url: '', additions: 0, deletions: 0, updatedAt: '2026-11-01T00:00:00Z',
+  isDraft: false, state: 'OPEN', headRefOid: 'abc', createdAt: '2026-11-01T00:00:00Z', body: '', milestone: null,
+  timelineItems: { nodes: [] }, headRefName: 'feature', baseRefName: 'main', isCrossRepository: false, reviewDecision: 'REVIEW_REQUIRED',
+  reviewRequests: { nodes: [{ requestedReviewer: { __typename: 'Team' } }] }, mergeable: 'MERGEABLE', mergeStateStatus: 'BLOCKED',
+  reviewThreads: { nodes: [] }, recentThreads: { nodes: [] }, author: { login: 'sam' }, labels: { nodes: [] }, latestReviews: { nodes: [] },
+  commits: { nodes: [] }, ...over,
+});
+
+describe('reading PRs from GitHub', () => {
+  it('counts a team request as yours when GitHub’s review-requested:@me search found the PR', () => {
+    expect(toSummary(raw(), 'me').reviewRequested).toBe(false);
+    expect(toSummary(raw(), 'me', true)).toMatchObject({ reviewRequested: true, reviewers: [{ login: 'a team', state: 'requested' }] });
+    expect(toSummary(raw({ reviewRequests: { nodes: [{ requestedReviewer: { __typename: 'User', login: 'me' } }] } }), 'me').reviewRequested).toBe(true);
+  });
+
+  it('marks PRs from a fork', () => {
+    expect(toSummary(raw(), 'me').fromFork).toBe(false);
+    expect(toSummary(raw({ isCrossRepository: true, headRefName: 'main' }), 'me').fromFork).toBe(true);
+  });
+
+  it('asks for team requests in one repo with the same search', async () => {
+    const src = new GitHubSource('token', { kind: 'repo', repo: 'acme/web' });
+    Object.assign(src as object, { login: 'me' });
+    let vars: Record<string, unknown> = {};
+    (src as unknown as { octokit: unknown }).octokit = {
+      graphql: async (_q: string, v: Record<string, unknown>) => {
+        vars = v;
+        return { rateLimit: { remaining: 5000, limit: 5000, resetAt: '' }, repository: { open: { nodes: [raw(), raw({ number: 6 })] }, merged: { nodes: [] } }, asked: { nodes: [{ number: 5 }] } };
+      },
+    };
+    const prs = await src.listPrs();
+    expect(vars.asked).toBe(requestedQuery('acme/web'));
+    expect(prs.map((p) => [p.number, p.reviewRequested])).toEqual([[5, true], [6, false]]);
   });
 });

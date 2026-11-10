@@ -17,7 +17,7 @@ const vscode = acquireVsCodeApi();
 type Filter = 'all' | Bucket;
 type Step = 'overview' | 'checks' | 'files';
 /** The comment box open in the diff: a new comment on a line (or range), a reply to a thread, or an edit. */
-interface Composer { path: string; line: number | null; side: 'RIGHT' | 'LEFT'; startLine?: number | null; replyTo?: string; resolve?: boolean; editId?: string; prefill?: string }
+interface Composer { id?: string; path: string; line: number | null; side: 'RIGHT' | 'LEFT'; startLine?: number | null; replyTo?: string; resolve?: boolean; editId?: string; prefill?: string }
 type Thread = Extract<ConversationItem, { kind: 'thread' }>;
 interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; part: PartKey | null; cardOpen: boolean; conv: 'all' | 'unresolved' | 'mine'; composer: Composer | null; finding: string | null; menu: 'checklist' | 'methods' | 'review' | null }
 
@@ -162,7 +162,7 @@ function row(p: PrSummary, i: number, h: HostState, depth = 0, inStack = false, 
   const asked = p.reviewRequested && !p.myReview ? '<span class="chip ask">Review requested</span>' : '';
   const why = whyNow(p, h);
   const linear = p.linear ? (p.linear.url ? `<a class="lin" href="${esc(p.linear.url)}" title="Open in Linear">${esc(p.linear.key)}</a>` : `<span class="lin" title="Linear issue">${esc(p.linear.key)}</span>`) : '';
-  return `<button class="qrow ${kbd && i === view.sel ? 'sel' : ''} ${depth ? 'nested' : ''}" data-open="${esc(prKey(p))}" style="--depth:${depth}">
+  return `<button class="qrow ${kbd && i === view.sel ? 'sel' : ''} ${depth ? 'nested' : ''}" data-open="${esc(prKey(p))}" data-vars="--depth:${depth}">
       ${graph}<span class="num">#${p.number}</span>
       <span class="t"><span class="tl"><b>${esc(p.title)}</b>${checksIcon(p)}</span><span class="sub">${multi(h) && !inStack ? `<span class="rp" title="${esc(p.repo)}">${esc(short(p.repo))}</span>` : ''}<span class="diffstat"><span class="a">+${p.additions}</span> <span class="d">−${p.deletions}</span></span><span class="${p.mine ? 'you' : ''}">${p.mine ? 'you' : esc(p.author)}</span>${parent ? `<span class="on">on #${parent.number}</span>` : ''}${linear}${reviewNote(p)}</span>${why}</span>
       ${chip}${asked}<span class="st">${listStatus(p)}</span><span class="when" title="Updated ${ago(p.updatedAt)} ago">${ago(p.updatedAt)}</span></button>`;
@@ -172,13 +172,13 @@ function row(p: PrSummary, i: number, h: HostState, depth = 0, inStack = false, 
 function graphCell(t: TreeRow, lanes: number): string {
   const tone = prStatus(t.pr).tone;
   const parts = [
-    ...t.through.map((l) => `<i class="gl full" style="--l:${l}"></i>`),
-    t.up ? `<i class="gl top" style="--l:${t.lane}"></i>` : '',
-    `<i class="gl bot" style="--l:${t.lane}"></i>`,
-    ...t.joins.map((l) => `<i class="gj" style="--l:${l};--to:${t.lane}"></i>`),
-    `<i class="gd ${tone} ${t.pr.isDraft ? 'draft' : ''}" style="--l:${t.lane}"></i>`,
+    ...t.through.map((l) => `<i class="gl full" data-vars="--l:${l}"></i>`),
+    t.up ? `<i class="gl top" data-vars="--l:${t.lane}"></i>` : '',
+    `<i class="gl bot" data-vars="--l:${t.lane}"></i>`,
+    ...t.joins.map((l) => `<i class="gj" data-vars="--l:${l};--to:${t.lane}"></i>`),
+    `<i class="gd ${tone} ${t.pr.isDraft ? 'draft' : ''}" data-vars="--l:${t.lane}"></i>`,
   ];
-  return `<span class="graph" style="--lanes:${lanes}" aria-hidden="true">${parts.join('')}</span>`;
+  return `<span class="graph" data-vars="--lanes:${lanes}" aria-hidden="true">${parts.join('')}</span>`;
 }
 
 /**
@@ -194,7 +194,7 @@ function stackedList(h: HostState): string {
     const t = mergeTree(rows, h.queue);
     const who = root.author === host?.user ? 'Your' : `${root.author}’s`;
     const body = t.rows.map((r) => row(r.pr, i++, h, 0, true, graphCell(r, t.lanes), r.pr === root && !root.isDraft ? '<span class="chip next" title="The bottom of the stack merges before the PRs above it">Merges first</span>' : '')).join('');
-    const base = `<div class="trunk"><span class="graph" style="--lanes:${t.lanes}" aria-hidden="true"><i class="gl top" style="--l:0"></i><i class="gd base" style="--l:0"></i></span><span class="mono">${esc(root.baseRef)}</span><span class="sub">merges bottom up</span></div>`;
+    const base = `<div class="trunk"><span class="graph" data-vars="--lanes:${t.lanes}" aria-hidden="true"><i class="gl top" data-vars="--l:0"></i><i class="gd base" data-vars="--l:0"></i></span><span class="mono">${esc(root.baseRef)}</span><span class="sub">merges bottom up</span></div>`;
     return `<div class="stack"><div class="stackh">${I.stack}<span>${esc(who)} stack · ${plural(rows.length, 'PR')}</span>${multi(h) ? `<span class="mono">${esc(root.repo)}</span>` : ''}</div><div class="list tree">${body}${base}</div></div>`;
   };
   const rest = visibleQueue(h).filter((p) => alone.includes(p));
@@ -371,7 +371,8 @@ const METHOD_NOTE: Record<MergeMethod, string> = {
  * Request changes. With comments held back, the button sends them: "Submit review · 3".
  */
 function reviewButton(pr: PrDetail, h: HostState, primary: boolean): string {
-  const held = h.drafts.filter((d) => d.from === 'you').length;
+  // Comments held back here, plus any in a review you started on github.com: they all go with the review.
+  const held = h.drafts.filter((d) => d.from === 'you').length + (pr.pendingReview?.comments ?? 0);
   const open = view.menu === 'review';
   const cls = `btn ${primary ? 'pri' : ''}`;
   const main = held || !primary
@@ -386,9 +387,19 @@ const EVENTS: { event: ReviewEvent; label: string; note: string }[] = [
   { event: 'REQUEST_CHANGES', label: 'Request changes', note: 'Must be addressed before it merges.' },
 ];
 
+/**
+ * The verdict the review panel has picked: the one you chose, or Comment when comments go with the review
+ * (yours held back here, or a review in progress on GitHub), as GitHub defaults; otherwise Approve.
+ */
+function verdict(pr: PrDetail, h: HostState): ReviewEvent {
+  if (pr.mine) return 'COMMENT';
+  const withComments = h.drafts.some((d) => d.from === 'you') || !!pr.pendingReview?.comments;
+  return view.reviewEvent ?? (withComments ? 'COMMENT' : 'APPROVE');
+}
+
 function reviewPanel(pr: PrDetail, h: HostState): string {
   const own = pr.mine;
-  const event: ReviewEvent = own ? 'COMMENT' : view.reviewEvent ?? 'APPROVE';
+  const event = verdict(pr, h);
   const held = h.drafts.filter((d) => d.from === 'you').length;
   const agent = h.drafts.filter((d) => d.from === 'agent').length;
   const f = openFindings(pr);
@@ -499,7 +510,7 @@ function stackNav(pr: PrDetail): string {
   const items = rows.map((r) => {
     const st = prStatus(r.pr);
     const here = prKey(r.pr) === prKey(pr);
-    return `<li style="--depth:${r.depth}"><button class="snode ${here ? 'here' : ''}" ${here ? 'aria-current="true"' : `data-open="${esc(prKey(r.pr))}"`} title="#${r.pr.number} ${esc(r.pr.title)} · ${esc(st.label)}"><span class="sdot ${st.tone}"></span><span class="num">#${r.pr.number}</span><span class="stt">${esc(r.pr.title)}</span></button></li>`;
+    return `<li data-vars="--depth:${r.depth}"><button class="snode ${here ? 'here' : ''}" ${here ? 'aria-current="true"' : `data-open="${esc(prKey(r.pr))}"`} title="#${r.pr.number} ${esc(r.pr.title)} · ${esc(st.label)}"><span class="sdot ${st.tone}"></span><span class="num">#${r.pr.number}</span><span class="stt">${esc(r.pr.title)}</span></button></li>`;
   }).join('');
   return `<div class="stacknav" title="Stacked PRs merge bottom first"><span class="lbl">${I.stack}Stack</span><span class="sbase mono">${esc(rows[0]!.pr.baseRef)}</span><ol>${items}</ol></div>`;
 }
@@ -635,7 +646,7 @@ function composerBox(c: Composer): string {
   const editing = !!c.editId;
   const what = c.replyTo ? (c.resolve ? 'Reply and resolve' : 'Reply') : c.startLine && c.startLine !== c.line ? `Comment on lines ${c.startLine}–${c.line}` : `Comment on line ${c.line}`;
   return `<div class="composer"><span class="lbl">${editing ? 'Edit comment' : what}</span>
-    <textarea id="lbox" rows="3" placeholder="${c.replyTo ? 'Reply…' : 'Leave a comment'}" aria-label="${esc(what)}">${esc(c.prefill ?? '')}</textarea>
+    <textarea id="lbox" data-for="${esc(c.id ?? '')}" rows="3" placeholder="${c.replyTo ? 'Reply…' : 'Leave a comment'}" aria-label="${esc(what)}">${esc(c.prefill ?? '')}</textarea>
     <div class="cacts"><button class="link" data-do="composeCancel">Cancel</button>
       ${editing ? '<button class="btn sm pri" data-do="composeSave">Save</button>' : `<button class="btn sm" data-do="composeNow" ${host?.pr?.pendingReview ? 'disabled title="You have a review in progress on GitHub; add this to it instead"' : 'title="Post it right away, outside a review"'}>${c.replyTo ? 'Reply now' : 'Comment now'}</button><button class="btn sm pri" data-do="composeAdd" title="Hold it back and send it with your review">Add to review</button>`}</div></div>`;
 }
@@ -789,17 +800,20 @@ function render(): void {
   if (!host) return;
   const err = host.error ? `<div class="err" role="alert">${esc(host.error)}<button class="btn sm" data-do="refresh">Try again</button></div>` : '';
   // Re-rendering replaces the text boxes; keep what the reviewer was typing in each.
+  // A comment box in the diff is kept only if the same one is still open (data-for): opening another draft's
+  // editor or another reply mustn't fill it with the text of the one before.
   const typing = ['cbox', 'rbody', 'lbox'].map((id) => {
     const el = document.getElementById(id) as HTMLTextAreaElement | null;
-    return el ? { id, value: el.value, focused: document.activeElement === el, at: el.selectionStart } : null;
+    return el ? { id, owner: el.dataset.for ?? '', value: el.value, focused: document.activeElement === el, at: el.selectionStart } : null;
   });
   // Redrawing replaces every scrolling area; keep where each one was (refreshes happen on their own now).
   const scrolls = SCROLLERS.map((sel) => Array.from(app.querySelectorAll<HTMLElement>(sel)).map((el) => el.scrollTop));
   app.innerHTML = err + (host.view === 'pr' ? prView(host) : queue(host)) + (view.keys ? keysHelp() : '');
+  applyVars();
   SCROLLERS.forEach((sel, i) => app.querySelectorAll<HTMLElement>(sel).forEach((el, j) => { const top = scrolls[i]![j]; if (top) el.scrollTop = top; }));
   for (const t of typing) {
     const el = t && (document.getElementById(t.id) as HTMLTextAreaElement | null);
-    if (!el || !t) continue;
+    if (!el || !t || (el.dataset.for ?? '') !== t.owner) continue;
     el.value = t.value;
     if (t.focused && host.busy === null) { el.focus(); el.setSelectionRange(t.at, t.at); }
   }
@@ -808,6 +822,19 @@ function render(): void {
     const box = document.getElementById('cbox') as HTMLTextAreaElement | null;
     if (box) { box.value = prefill; box.focus(); box.dispatchEvent(new Event('input', { bubbles: true })); prefill = null; }
   }
+}
+
+/**
+ * The webview's CSP has no 'unsafe-inline', so style attributes in rendered HTML are dropped. Layout values
+ * (stack depth, merge-tree lanes) go in data-vars="--l:1;--to:0" and are set here, through the CSSOM, which it allows.
+ */
+function applyVars(): void {
+  app.querySelectorAll<HTMLElement>('[data-vars]').forEach((el) => {
+    for (const pair of el.dataset.vars!.split(';')) {
+      const [name, value] = pair.split(':');
+      if (name && value != null) el.style.setProperty(name.trim(), value.trim());
+    }
+  });
 }
 
 function keysHelp(): string {
@@ -826,7 +853,7 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
       // First look, or new comments: start on Overview for the context. Otherwise pick up the files.
       const start: Step = !pr.seenBefore || conversationCounts(pr.conversation).fresh ? 'overview' : 'files';
       // A re-review opens the conversation on your own threads: what became of what you asked for.
-      view = { ...view, pr: prKey(pr), file: null, onlyNew: false, step: start, menu: null, composer: null, finding: null, part: null, cardOpen: false, conv: isReReview(pr) ? 'mine' : 'all' };
+      view = { ...view, pr: prKey(pr), file: null, onlyNew: false, step: start, menu: null, reviewEvent: null, composer: null, finding: null, part: null, cardOpen: false, conv: isReReview(pr) ? 'mine' : 'all' };
       vscode.setState(view);
     }
     host = msg.state;
@@ -891,7 +918,7 @@ document.addEventListener('click', (e) => {
   else if (d.line && view.file) send({ type: 'openFile', path: view.file, line: Number(d.line) });
   else if (d.cline && view.file) openComposer(d.cline, (e as MouseEvent).shiftKey);
   else if (d.reply) save({ composer: replyTo(d.reply, d.resolve === '1', d.prefill), finding: d.reply });
-  else if (d.edit) { const dr = host?.drafts.find((x) => x.id === d.edit); if (dr) save({ composer: { path: dr.path, line: dr.line, side: dr.side, replyTo: dr.replyTo, resolve: dr.resolve, editId: dr.id, prefill: dr.body } }); }
+  else if (d.edit) { const dr = host?.drafts.find((x) => x.id === d.edit); if (dr) save({ composer: { id: composerId(), path: dr.path, line: dr.line, side: dr.side, replyTo: dr.replyTo, resolve: dr.resolve, editId: dr.id, prefill: dr.body } }); }
   else if (d.del) send({ type: 'deleteDraft', id: d.del });
   else if (d.keep) send({ type: 'keepDraft', id: d.keep });
   else if (d.goto) goToThread(d.goto);
@@ -931,8 +958,11 @@ document.addEventListener('click', (e) => {
 
 function replyTo(id: string, resolve: boolean, prefill?: string): Composer | null {
   const t = host?.pr && threads(host.pr).find((x) => x.id === id);
-  return t ? { path: t.path, line: t.line, side: 'RIGHT', replyTo: id, resolve, prefill } : null;
+  return t ? { id: composerId(), path: t.path, line: t.line, side: 'RIGHT', replyTo: id, resolve, prefill } : null;
 }
+
+/** Each comment box opened gets its own id, so a redraw knows whether the box on screen is still the same one. */
+const composerId = () => Math.random().toString(36).slice(2, 10);
 
 /** Opens the comment box on a diff line; shift-click with a box open on the same side makes it a range. */
 function openComposer(at: string, range: boolean): void {
@@ -941,7 +971,7 @@ function openComposer(at: string, range: boolean): void {
   const c = view.composer;
   if (range && c && !c.replyTo && !c.editId && c.path === view.file && c.side === side && c.line != null && c.line !== line) {
     save({ composer: { ...c, startLine: Math.min(c.line, line), line: Math.max(c.line, line) } });
-  } else save({ composer: { path: view.file!, line, side } });
+  } else save({ composer: { id: composerId(), path: view.file!, line, side } });
   document.getElementById('lbox')?.focus();
 }
 
@@ -975,7 +1005,7 @@ function stepFinding(dir: 1 | -1): void {
 function submitReview(): void {
   const pr = host?.pr;
   if (!pr) return;
-  const event: ReviewEvent = pr.mine ? 'COMMENT' : view.reviewEvent ?? 'APPROVE';
+  const event = verdict(pr, host!);
   const box = document.getElementById('rbody') as HTMLTextAreaElement | null;
   send({ type: 'submitReview', event, body: box?.value ?? '' });
   if (event !== 'REQUEST_CHANGES' || box?.value.trim()) { if (box) box.value = ''; save({ menu: null }); }
@@ -1059,8 +1089,8 @@ document.addEventListener('keydown', (e) => {
   else if (k === '2') save({ step: 'checks' });
   else if (k === '3') save({ step: 'files' });
   else if (k === 'a' && pr.state !== 'merged' && !pr.mine && (pr.myReview !== 'approved' || isReReview(pr))) {
-    // With comments held back, approving goes through the review so they're sent too.
-    if (host.drafts.some((d) => d.from === 'you')) save({ menu: 'review', reviewEvent: 'APPROVE' });
+    // With comments held back (here or in a review in progress on GitHub), approving opens the review so you see them go too.
+    if (host.drafts.some((d) => d.from === 'you') || pr.pendingReview?.comments) save({ menu: 'review', reviewEvent: 'APPROVE' });
     else send({ type: 'approve' });
   }
 });

@@ -7,17 +7,26 @@ const id = () => `x${++n}`;
 
 describe('review with agent', () => {
   it('names a findings file per PR, and reads the PR back from it', () => {
-    expect(findingsPath('acme/storefront', 102)).toBe('.review-desk/acme-storefront-102.json');
-    expect(findingsFor('/repo/.review-desk/acme-storefront-102.json')).toEqual({ repo: 'acme/storefront', number: 102 });
+    expect(findingsPath('acme/storefront', 102)).toBe('.review-desk/acme__storefront-102.json');
+    expect(findingsFor('/repo/.review-desk/acme__storefront-102.json')).toEqual({ repo: 'acme/storefront', number: 102 });
     expect(findingsFor('/repo/.review-desk/notes.txt')).toBeNull();
+    expect(findingsFor('/repo/.review-desk/acme-storefront-102.json')).toBeNull();
+  });
+
+  it('reads back repos whose owner and name have hyphens, dots and underscores', () => {
+    for (const repo of ['my-org/web', 'my/org-web', 'a-b/c-d-e', 'acme/web_app.v2', 'x/2024-api']) {
+      const file = findingsPath(repo, 7);
+      expect(findingsFor(`/repo/${file}`)).toEqual({ repo, number: 7 });
+    }
+    expect(findingsPath('my-org/web', 1)).not.toBe(findingsPath('my/org-web', 1));
   });
 
   it('asks for an adversarial review that skips what Codex already flagged', async () => {
     const pr = await new SampleSource('team').getPr('acme/storefront', 102, null);
-    const prompt = reviewPrompt(pr, '/repo/.review-desk/acme-storefront-102.json');
+    const prompt = reviewPrompt(pr, '/repo/.review-desk/acme__storefront-102.json');
     expect(prompt).toContain('Don’t change any code.');
     expect(prompt).toContain('- src/server/routes/login.ts:2 P1 Failed logins aren’t rate-limited');
-    expect(prompt).toContain('write your findings as JSON to /repo/.review-desk/acme-storefront-102.json');
+    expect(prompt).toContain('write your findings as JSON to /repo/.review-desk/acme__storefront-102.json');
     expect(reviewPrompt(pr, null)).toContain('reply with your findings as JSON');
   });
 

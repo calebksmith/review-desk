@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { PrSummary } from '../src/protocol';
 import { childrenOf, mergeTree, parentOf, stackOf, stacks } from '../src/stacks';
 
-const pr = (number: number, headRef: string, baseRef = 'main', state: PrSummary['state'] = 'open') => ({ repo: 'acme/web', number, headRef, baseRef, state }) as PrSummary;
+const pr = (number: number, headRef: string, baseRef = 'main', state: PrSummary['state'] = 'open') => ({ repo: 'acme/web', number, headRef, baseRef, state, fromFork: false }) as PrSummary;
 // main ← 1 ← 2 ← 3, and 2 also has 4; 5 stands alone; 6 is merged and stacked on 5's branch.
 const queue = [pr(3, 'c', 'b'), pr(1, 'a'), pr(2, 'b', 'a'), pr(4, 'd', 'b'), pr(5, 'e'), pr(6, 'f', 'e', 'merged')];
 
@@ -22,6 +22,18 @@ describe('stacks', () => {
     const s = stacks(queue);
     expect(s.stacks.map((st) => st.map((r) => r.pr.number))).toEqual([[1, 2, 3, 4]]);
     expect(s.alone.map((p) => p.number)).toEqual([5]);
+  });
+
+  it('doesn’t stack PRs on a fork’s branch that shares their base’s name', () => {
+    const fork = { ...pr(9, 'main'), fromFork: true };
+    const mine = pr(10, 'feature');
+    const q = [fork, mine];
+    expect(parentOf(mine, q)).toBeNull();
+    expect(childrenOf(fork, q)).toEqual([]);
+    expect(stacks(q).alone.map((p) => p.number)).toEqual([9, 10]);
+    // A fork PR can still be stacked on a same-repo branch: its base is in this repo.
+    const onA = { ...pr(11, 'x', 'a'), fromFork: true };
+    expect(parentOf(onA, [pr(1, 'a'), onA])?.number).toBe(1);
   });
 
   it('survives a loop of branches', () => {

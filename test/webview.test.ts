@@ -7,6 +7,11 @@ describe('webview markup', () => {
   it('has no attribute with a doubled quote before its value', () => {
     expect(src.match(/\s[\w-]+=""\$\{/g) ?? []).toEqual([]);
   });
+
+  // The webview's CSP has no 'unsafe-inline', so VS Code drops style attributes. Layout values go in data-vars.
+  it('sets no style attributes in markup', () => {
+    expect(src.match(/\sstyle="/g) ?? []).toEqual([]);
+  });
 });
 
 // VS Code's GitHub sign-in grants the "repo" scope only. Team fields need read:org, and asking for one

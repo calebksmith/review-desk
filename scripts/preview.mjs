@@ -18,9 +18,14 @@ const host = await esbuild.build({ entryPoints: ['webview/preview-host.ts'], bun
 const app = await readFile('dist/webview.js', 'utf8');
 const css = await readFile('dist/webview.css', 'utf8');
 await mkdir('.preview', { recursive: true });
+// The same rules as the extension's CSP (no inline styles or scripts beyond these tagged ones), so anything the
+// webview would refuse inside VS Code, like a style="" attribute, is refused here too.
+const nonce = 'preview';
+const csp = `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src https: data:;`;
 await writeFile('.preview/index.html', `<!doctype html><html><head><meta charset="utf-8"><title>Review Desk preview</title>
-<style>:root{${vars(light)};--vscode-font-family:-apple-system,"Segoe UI",system-ui,sans-serif;--vscode-editor-font-family:Menlo,Consolas,monospace}
+<meta http-equiv="Content-Security-Policy" content="${csp}">
+<style nonce="${nonce}">:root{${vars(light)};--vscode-font-family:-apple-system,"Segoe UI",system-ui,sans-serif;--vscode-editor-font-family:Menlo,Consolas,monospace}
 :root.dark{${vars(dark)}}${css}</style></head><body><div id="app"></div><div id="toast" class="toast" role="status"></div>
-<script>if (new URLSearchParams(location.search).get('theme') === 'dark') document.documentElement.classList.add('dark')</script>
-<script>${host.outputFiles[0].text}</script><script>${app}</script></body></html>`);
+<script nonce="${nonce}">if (new URLSearchParams(location.search).get('theme') === 'dark') document.documentElement.classList.add('dark')</script>
+<script nonce="${nonce}">${host.outputFiles[0].text}</script><script nonce="${nonce}">${app}</script></body></html>`);
 console.log('Wrote .preview/index.html');

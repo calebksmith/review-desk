@@ -4,7 +4,7 @@ import { countFindings } from './conversation';
 import { EVERYTHING } from './scope';
 import { parseDependsOn, parseLinear } from './signals';
 import { teamSeed } from './sample-team';
-import type { DataSource } from './source';
+import type { DataSource, Sent } from './source';
 
 // Sample PRs for demos, screenshots and tests. Content is made up; shapes match GitHub.
 // "solo" is one reviewer and their agents; "team" is several developers, stacked PRs and required approvals.
@@ -247,7 +247,7 @@ export class SampleSource implements DataSource {
   }
 
   /** Like GitHub: no approving or requesting changes on your own PR; line comments start threads, replies join theirs. */
-  async submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<void> {
+  async submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<Sent> {
     const p = this.find(pr.repo, pr.number);
     if (p.summary.author === this.me && event !== 'COMMENT') throw Object.assign(new Error(`Can not ${event === 'APPROVE' ? 'approve' : 'request changes on'} your own pull request`), { status: 422 });
     const verdict = { APPROVE: 'approved', REQUEST_CHANGES: 'changes_requested', COMMENT: 'commented' } as const;
@@ -256,9 +256,10 @@ export class SampleSource implements DataSource {
     p.reviewers = (p.reviewers ?? []).filter((r) => r.login !== this.me);
     if (body.trim() || event !== 'COMMENT') p.conversation.push({ kind: 'review', verdict: verdict[event], comment: { ...say(this.me, 0, body.trim() ? `<p>${esc(body)}</p>` : ''), text: body } });
     for (const d of drafts) this.post(p, d);
+    return { unresolved: 0 };
   }
 
-  async commentNow(pr: PrDetail, d: Draft): Promise<void> { this.post(this.find(pr.repo, pr.number), d); }
+  async commentNow(pr: PrDetail, d: Draft): Promise<Sent> { this.post(this.find(pr.repo, pr.number), d); return { unresolved: 0 }; }
 
   private post(p: SamplePr, d: Draft): void {
     const c = { ...say(this.me, 0, `<p>${esc(d.body)}</p>`), text: d.body };
@@ -287,6 +288,7 @@ export class SampleSource implements DataSource {
       myReviewSha: s.myReviewSha ?? (s.myReview ? s.headSha : null),
       repo: this.repoOf(p),
       headRef: p.headRef,
+      fromFork: false,
       baseRef: p.base ?? 'main',
       mine: s.author === this.me,
       reviewers,

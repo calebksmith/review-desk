@@ -23,6 +23,8 @@ export interface PrSummary {
   /** The commit that review was on, so a later push means "re-review". */
   myReviewSha: string | null;
   headRef: string;
+  /** Its branch is in a fork, so it can't be the base of another PR here, whatever it's called. */
+  fromFork: boolean;
   /** The branch it merges into. Another open PR's branch when the PR is stacked on it. */
   baseRef: string;
   /** Opened by the signed-in reviewer, who can't approve it. */

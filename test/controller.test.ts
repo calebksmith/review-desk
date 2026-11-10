@@ -105,6 +105,37 @@ describe('Controller', () => {
     expect(last().pr!.conversation.some((it) => it.kind === 'comment' && it.comment.isNew)).toBe(false);
   });
 
+  it('keeps “since your last look” and the New tags through background refreshes', async () => {
+    const { c, store, last } = setup();
+    store.set('lastSeen:calebksmith/portfolio#52', 'old0000');
+    store.set('lastSeenAt:calebksmith/portfolio#55', new Date(Date.now() - 30 * 60_000).toISOString());
+    const isNew = () => last().pr!.conversation.flatMap((it) => (it.kind === 'thread' ? it.comments : [it.comment])).filter((x) => x.isNew).length;
+
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });
+    expect(last().pr!.sinceLastLook).toMatchObject({ kind: 'look', fromSha: 'old0000' });
+    await c.autoRefresh('pr');
+    await c.autoRefresh('pr');
+    expect(last().pr!.sinceLastLook).toMatchObject({ kind: 'look', fromSha: 'old0000' });
+
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#55' });
+    expect(isNew()).toBe(2);
+    await c.autoRefresh('pr');
+    expect(isNew()).toBe(2);
+    // Opening it again is a new look.
+    await c.handle({ type: 'refresh' });
+    expect(isNew()).toBe(0);
+  });
+
+  it('doesn’t mark a PR seen when a background refresh lands after you’ve left it', async () => {
+    const { c, store } = setup();
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });
+    store.delete('lastSeenAt:calebksmith/portfolio#52');
+    const going = c.autoRefresh('pr');
+    await c.handle({ type: 'back' });
+    await going;
+    expect(store.has('lastSeenAt:calebksmith/portfolio#52')).toBe(false);
+  });
+
   it('marks nothing new the first time a PR is opened', async () => {
     const { c, last } = setup();
     await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#55' });
