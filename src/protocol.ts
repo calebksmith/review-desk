@@ -202,6 +202,8 @@ export interface HostState {
   blockerLabels: string[];
   /** The open PR's held-back comments, sent with the review. */
   drafts: Draft[];
+  /** When what's on screen (the queue, or the open PR) last loaded from GitHub. */
+  updatedAt: string | null;
   error: string | null;
 }
 

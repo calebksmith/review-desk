@@ -310,4 +310,48 @@ describe('Controller', () => {
     await c.handle({ type: 'reviewWithAgent' });
     expect(sent.at(-1)).toMatchObject({ text: 'Opened Claude Code with an adversarial review of #102. Open acme/storefront in VS Code to have its findings show up here; until then it replies with them.' });
   });
+
+  describe('refreshing on its own', () => {
+    const team = () => {
+      const sent: { type: string; text?: string; state?: { loading: boolean } }[] = [];
+      const store = new Map<string, unknown>();
+      const host = { post: (m: never) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async () => 'clipboard' as const, choose: async () => undefined, switchRepository: () => {}, findingsFile: async () => null };
+      const source = new SampleSource('team');
+      const c = new Controller(source, { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host);
+      return { c, sent, source };
+    };
+
+    it('tells you what arrived on the open PR, without a loading state', async () => {
+      const { c, sent, source } = team();
+      await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
+      // Codex reviews while you're away.
+      (source as unknown as { find: (r: string, n: number) => { conversation: unknown[] } }).find('acme/storefront', 121).conversation.push(
+        { kind: 'thread', id: 'T_new', path: '.nvmrc', line: 1, resolved: false, outdated: false, severity: 1, comments: [{ author: 'chatgpt-codex-connector', createdAt: new Date().toISOString(), html: '', text: 'P1 Pin it', url: 'n', isNew: false }] },
+      );
+      const mark = sent.length;
+      await c.autoRefresh('pr');
+      expect(sent.slice(mark).some((m) => m.type === 'state' && m.state!.loading)).toBe(false);
+      expect(sent.at(-1)).toMatchObject({ type: 'toast', text: 'Codex left 1 finding.' });
+      expect(c.snapshot.updatedAt).not.toBeNull();
+    });
+
+    it('doesn’t pull you back to a PR you’ve left', async () => {
+      const { c } = team();
+      await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
+      const going = c.autoRefresh('pr');
+      await c.handle({ type: 'back' });
+      await going;
+      expect(c.snapshot.view).toBe('queue');
+    });
+
+    it('says when more PRs became your turn', async () => {
+      const { c, sent, source } = team();
+      await c.handle({ type: 'ready' });
+      (source as unknown as { find: (r: string, n: number) => { summary: { myReview: string | null } } }).find('acme/storefront', 120).summary.myReview = null;
+      const s = source as unknown as { prs: { reviewers?: { login: string; state: string }[]; summary: { number: number } }[] };
+      s.prs.find((p) => p.summary.number === 111)!.reviewers = [{ login: 'calebksmith', state: 'requested' }];
+      await c.autoRefresh('queue');
+      expect(sent.at(-1)).toMatchObject({ type: 'toast', text: '1 more PR is your turn.' });
+    });
+  });
 });

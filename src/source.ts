@@ -1,4 +1,5 @@
 import type { Draft, MergeMethod, PrDetail, PrSummary, ReviewEvent } from './protocol';
+import type { Budget } from './refresh';
 
 /** Where review data comes from: GitHub, or the built-in sample PRs. */
 export interface DataSource {
@@ -20,6 +21,10 @@ export interface DataSource {
   submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<void>;
   /** Posts one line comment or reply right away, outside a review. */
   commentNow(pr: PrDetail, draft: Draft): Promise<void>;
+  /** GitHub's hourly allowance as of the last queue load; null when unknown (samples). */
+  budget?(): Budget | null;
+  /** Drops a cached queue so the next load fetches (after an action, or the Refresh button). */
+  invalidate?(): void;
 }
 
 /** Small key-value store; VS Code's workspaceState in the extension, a Map in tests. */

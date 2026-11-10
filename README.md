@@ -45,6 +45,10 @@ To install it as a normal extension, run `npm run package` and install the `.vsi
 - **Conflicts**: on a teammate's PR, **Ask them to resolve** fills in a comment for you to send (you can still approve the code); on Dependabot's, **Ask Dependabot to rebase**; on yours or an agent's, **Fix with agent**.
 - **Keys**: c comments on the line under the pointer, r replies to the current finding, ] and [ move between findings, ⌘⇧Enter finishes the review.
 
+## Staying current
+
+Review Desk refreshes on its own while VS Code has focus and Review Desk is on screen: the open PR every minute (every 30 seconds while checks run or a reviewer you asked hasn't replied), the queue every 5 minutes, and anything older than a minute when you come back. A notice says what arrived ("Codex left 2 findings", "dana pushed new commits", "checks passed", "1 more PR is your turn"), and "Updated 2m ago" shows how fresh it is. The sidebar and panel share one queue load. Refreshing pauses when less than a fifth of GitHub's hourly allowance (5,000 points per user) is left; a queue load costs about 17 points for one repo and 48 for everything involving you.
+
 ## Teams and stacked PRs
 
 - **Your PRs, review requests and everyone else's.** PRs you opened have their own group, saying what's next ("Waiting on priya", "Changes requested", "Ready to merge"). Needs you holds other people's PRs that need your review, with **Review requested** where you were asked by name. Waiting on others holds PRs assigned to someone else.

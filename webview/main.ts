@@ -74,6 +74,16 @@ function save(patch: Partial<View>): void {
   render();
 }
 
+/** "Updated 4m ago": when what's on screen last loaded. The text ticks without redrawing the page. */
+function updated(h: HostState): string {
+  return h.updatedAt ? `<span class="upd" data-at="${esc(h.updatedAt)}" title="Refreshes on its own while Review Desk is open">${since(h.updatedAt)}</span>` : '';
+}
+function since(iso: string): string {
+  const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+  return s < 45 ? 'Updated just now' : `Updated ${ago(iso)} ago`;
+}
+setInterval(() => document.querySelectorAll<HTMLElement>('.upd[data-at]').forEach((el) => { el.textContent = since(el.dataset.at!); }), 15_000);
+
 /* ---------- Queue ---------- */
 /** The queue spans more than one repo: rows say which, and a number alone needs its repo. */
 const multi = (h: HostState) => new Set(h.queue.map((p) => p.repo)).size > 1;
@@ -226,7 +236,7 @@ function queue(h: HostState): string {
   const layout = `<div class="seg layout" role="group" aria-label="Layout"><button data-layout="list" aria-pressed="${!stacked}" title="List by what each PR needs">List</button><button data-layout="stacks" aria-pressed="${stacked}" title="Stacked PRs as trees, in merge order">${I.stack}Stacks</button></div>`;
   return `<div class="crumb"><span class="home cur">${I.inbox}Review queue</span>
       <button class="reposw ${h.scope.startsWith('Everything') ? 'all' : ''}" data-do="switchRepo" title="Choose what to review">${h.scope.startsWith('Everything') ? I.globe : ''}${esc(h.scope)}${I.down}</button>${h.sample ? '<span class="chip">Sample data</span>' : ''}
-      <div class="end">${bulkButton(h)}<button class="btn icon" data-do="refresh" aria-label="Refresh" title="Refresh (r)">${I.rerun}</button><button class="btn icon" data-do="keys" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button></div></div>
+      <div class="end">${bulkButton(h)}${updated(h)}<button class="btn icon" data-do="refresh" aria-label="Refresh" title="Refresh (r)">${I.rerun}</button><button class="btn icon" data-do="keys" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button></div></div>
     ${h.notice ? `<div class="note" role="status">${I.check}<span>${esc(h.notice)}</span><button class="btn sm" data-do="dismissNotice">Dismiss</button></div>` : ''}
     <div class="pad">
       <div class="toolbar">${stacked ? '' : `<div class="seg filters" role="group" aria-label="Filter">${f('all', 'All')}${f('needs', 'Needs you')}${mine}${f('waiting', 'Waiting on others')}${f('approved', 'Approved')}${f('merged', 'Merged')}</div>`}${repoFilter(h)}${layout}</div>
@@ -466,7 +476,7 @@ function sidebar(pr: PrDetail): string {
   return `<aside class="side" aria-label="Pull request pages"><ol class="steps">
     ${step('overview', 'Overview', 'info', overviewSub, 1)}${step('checks', 'Checks', c.cls, c.sub, 2)}${step('files', 'Files changed', filesDone ? 'done' : 'now', filesSub, 3)}</ol>
     ${details(pr)}${stackNav(pr)}
-    <button class="link keyslink" data-do="keys">Keyboard shortcuts <kbd>?</kbd></button></aside>`;
+    <div class="railfoot">${updated(host!)}<button class="link keyslink" data-do="keys">Keyboard shortcuts <kbd>?</kbd></button></div></aside>`;
 }
 
 function checkRow(r: CheckRun): string {
@@ -773,6 +783,8 @@ function prView(h: HostState): string {
   return `${crumb(pr, h)}<div class="cols">${sidebar(pr)}<main>${view.step === 'checks' ? stepChecks(pr) : view.step === 'files' ? stepFiles(pr) : stepOverview(pr)}</main></div>`;
 }
 
+const SCROLLERS = ['main', '#app > .pad', '.code', '.files', '.side', '.sc-d', '.log', '.pop.review textarea'];
+
 function render(): void {
   if (!host) return;
   const err = host.error ? `<div class="err" role="alert">${esc(host.error)}<button class="btn sm" data-do="refresh">Try again</button></div>` : '';
@@ -781,7 +793,10 @@ function render(): void {
     const el = document.getElementById(id) as HTMLTextAreaElement | null;
     return el ? { id, value: el.value, focused: document.activeElement === el, at: el.selectionStart } : null;
   });
+  // Redrawing replaces every scrolling area; keep where each one was (refreshes happen on their own now).
+  const scrolls = SCROLLERS.map((sel) => Array.from(app.querySelectorAll<HTMLElement>(sel)).map((el) => el.scrollTop));
   app.innerHTML = err + (host.view === 'pr' ? prView(host) : queue(host)) + (view.keys ? keysHelp() : '');
+  SCROLLERS.forEach((sel, i) => app.querySelectorAll<HTMLElement>(sel).forEach((el, j) => { const top = scrolls[i]![j]; if (top) el.scrollTop = top; }));
   for (const t of typing) {
     const el = t && (document.getElementById(t.id) as HTMLTextAreaElement | null);
     if (!el || !t) continue;

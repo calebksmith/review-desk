@@ -3,9 +3,10 @@ import { conflictPrompt, fixPrompt, threadPrompt, type AgentRoute } from './agen
 import { parseFindings, reviewPrompt } from './agentReview';
 import { closeOptions, type CloseOption } from './dependabot';
 import { markNew } from './conversation';
+import { newlyYourTurn, waiting, whatArrived } from './refresh';
 import { DEFAULT_BLOCKER_LABELS } from './signals';
 import type { DataSource, Store } from './source';
-import { bulkMergeable, bulkSkipReason, isReReview, mergeBlocker, mergeWarning, openFindings, plural } from './status';
+import { bulkMergeable, bulkSkipReason, isReReview, mergeBlocker, mergeWarning, openFindings, plural, priority } from './status';
 
 export interface Host {
   post(msg: ToWebview): void;
@@ -37,7 +38,7 @@ export class Controller {
   private readonly closed = new Set<string>();
 
   constructor(private readonly source: DataSource, private readonly store: Store, private readonly host: Host, private readonly label = '', actions: CommentAction[] = [], blockerLabels: string[] = DEFAULT_BLOCKER_LABELS) {
-    this.state = { scope: source.scope, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, bulk: null, notice: null, actions, blockerLabels, drafts: [], error: null };
+    this.state = { scope: source.scope, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, bulk: null, notice: null, actions, blockerLabels, drafts: [], updatedAt: null, error: null };
   }
 
   get snapshot(): HostState { return this.state; }
@@ -46,7 +47,7 @@ export class Controller {
     try {
       switch (msg.type) {
         case 'ready': this.push(); await this.loadQueue(); break;
-        case 'refresh': await (this.state.view === 'pr' && this.state.pr ? this.loadPr(this.state.pr) : this.loadQueue()); break;
+        case 'refresh': this.source.invalidate?.(); await (this.state.view === 'pr' && this.state.pr ? this.loadPr(this.state.pr) : this.loadQueue()); break;
         case 'openPr': { const at = parseKey(msg.key); if (at) await this.loadPr(at); break; }
         case 'back': this.set({ view: 'queue', pr: null }); await this.loadQueue(); break;
         case 'setViewed': await this.setViewed(msg.path, msg.viewed); break;
@@ -76,15 +77,50 @@ export class Controller {
     }
   }
 
-  private async loadQueue(): Promise<void> {
-    this.set({ loading: true, error: null });
+  /** When the queue and the open PR last loaded, for refreshing on a schedule. */
+  queueAt = 0;
+  prAt = 0;
+
+  private async loadQueue(quiet = false): Promise<void> {
+    if (!quiet) this.set({ loading: true, error: null });
     const [user, prs] = await Promise.all([this.source.viewer(), this.source.listPrs()]);
     const queue = (this.label ? prs.filter((p) => p.labels.includes(this.label)) : prs).filter((p) => !this.closed.has(prKey(p)));
-    this.set({ user, queue, loading: false });
+    this.queueAt = Date.now();
+    this.set({ user, queue, loading: false, ...(this.state.view === 'queue' ? { updatedAt: new Date(this.queueAt).toISOString() } : {}) });
   }
 
-  private async loadPr(at: { repo: string; number: number }): Promise<void> {
-    this.set({ view: 'pr', loading: true, error: null, notice: null, pr: this.state.pr && prKey(this.state.pr) === prKey(at) ? this.state.pr : null });
+  /**
+   * A refresh on a schedule or on coming back: no loading state, nothing reset, and a notice when something
+   * arrived (Codex left findings, the author pushed, checks finished, more PRs are your turn).
+   */
+  async autoRefresh(part: 'queue' | 'pr'): Promise<void> {
+    if (this.state.busy) return;
+    try {
+      if (part === 'pr' && this.state.view === 'pr' && this.state.pr) {
+        const before = this.state.pr;
+        await this.loadPr(before, true);
+        const after = this.state.pr;
+        const said = after && prKey(after) === prKey(before) ? whatArrived(before, after, this.state.user) : null;
+        if (said) this.host.post({ type: 'toast', text: said });
+      } else if (part === 'queue') {
+        const before = this.state.queue;
+        await this.loadQueue(true);
+        const yours = (p: PrSummary) => priority(p).section === 'you';
+        const more = before.length ? newlyYourTurn(before, this.state.queue, yours) : 0;
+        if (more && this.state.view === 'queue') this.host.post({ type: 'toast', text: `${plural(more, 'more PR')} ${more === 1 ? 'is' : 'are'} your turn.` });
+      }
+    } catch {
+      // A failed background refresh stays quiet; the next one, or Refresh, will try again.
+    }
+  }
+
+  /** Something on the open PR is expected soon: checks running, or a reviewer you asked who hasn't replied. */
+  get waitingOnSomething(): boolean {
+    return !!this.state.pr && waiting(this.state.pr, this.state.actions, this.state.user);
+  }
+
+  private async loadPr(at: { repo: string; number: number }, quiet = false): Promise<void> {
+    if (!quiet) this.set({ view: 'pr', loading: true, error: null, notice: null, pr: this.state.pr && prKey(this.state.pr) === prKey(at) ? this.state.pr : null });
     // Keyed by repo and number, so "new since you looked" survives switching between repos and the combined view.
     const key = `lastSeen:${prKey(at)}`;
     const atKey = `lastSeenAt:${prKey(at)}`;
@@ -97,7 +133,10 @@ export class Controller {
     // Seen means opened: the next push or comment after this is "new since you looked".
     await this.store.set(key, pr.headSha);
     await this.store.set(atKey, new Date().toISOString());
-    this.set({ pr: { ...pr, conversation: markNew(pr.conversation, seenAt, me), seenBefore: seenAt !== null }, drafts: this.store.get<Draft[]>(`drafts:${prKey(at)}`) ?? [], loading: false });
+    // A quiet refresh landing after you've moved on doesn't pull you back.
+    if (quiet && (this.state.view !== 'pr' || !this.state.pr || prKey(this.state.pr) !== prKey(at))) return;
+    this.prAt = Date.now();
+    this.set({ pr: { ...pr, conversation: markNew(pr.conversation, seenAt, me), seenBefore: seenAt !== null }, drafts: this.store.get<Draft[]>(`drafts:${prKey(at)}`) ?? [], loading: false, updatedAt: new Date(this.prAt).toISOString() });
   }
 
   private async setViewed(path: string, viewed: boolean): Promise<void> {
@@ -123,6 +162,7 @@ export class Controller {
     this.set({ busy: 'approve' });
     try {
       await this.source.approve(pr);
+      this.source.invalidate?.();
     } finally {
       this.set({ busy: null });
     }
@@ -146,6 +186,7 @@ export class Controller {
     if (!ok) return;
     this.set({ busy: 'merge' });
     await this.source.merge(pr, method);
+    this.source.invalidate?.();
     // A merged PR is a dead end, so go back to the queue for the next one.
     this.set({ busy: null, view: 'queue', pr: null });
     this.host.post({ type: 'toast', text: `Merged ${this.ref(pr)} into ${pr.baseRef}` });
@@ -170,6 +211,7 @@ export class Controller {
     const merged: string[] = [];
     const skipped: string[] = [];
     this.set({ busy: 'bulk', bulk: { done: 0, total: picks.length }, notice: null, error: null });
+    this.source.invalidate?.();
     for (const [i, p] of picks.entries()) {
       this.set({ bulk: { done: i, total: picks.length } });
       try {
@@ -206,6 +248,7 @@ export class Controller {
       const loose = send.filter((d) => !d.replyTo && d.line == null);
       const summary = [body.trim(), ...loose.map((d) => `- \`${d.path}\`: ${d.body}`)].filter(Boolean).join('\n\n');
       await this.source.submitReview(pr, event, summary, send.filter((d) => !loose.includes(d)));
+      this.source.invalidate?.();
     } finally {
       this.set({ busy: null });
     }
@@ -221,6 +264,7 @@ export class Controller {
     this.set({ busy: 'comment' });
     try {
       await this.source.commentNow(pr, { ...draft, id: newId(), from: 'you' });
+      this.source.invalidate?.();
     } finally {
       this.set({ busy: null });
     }
@@ -302,6 +346,7 @@ export class Controller {
     this.set({ busy: 'comment' });
     try {
       await this.source.comment(pr, text);
+      this.source.invalidate?.();
     } finally {
       this.set({ busy: null });
     }
@@ -317,6 +362,7 @@ export class Controller {
     const pick: CloseOption | undefined = await this.host.choose(`Close ${this.ref(pr)}: ${pr.title}`, closeOptions(pr));
     if (!pick) return;
     await this.source.comment(pr, pick.comment);
+    this.source.invalidate?.();
     this.closed.add(prKey(pr));
     this.set({ view: 'queue', pr: null });
     this.host.post({ type: 'toast', text: `Asked Dependabot to close ${this.ref(pr)} (“${pick.label}”).` });
@@ -329,6 +375,7 @@ export class Controller {
     this.set({ busy: 'update' });
     try {
       await this.source.updateBranch(pr);
+      this.source.invalidate?.();
     } finally {
       this.set({ busy: null });
     }

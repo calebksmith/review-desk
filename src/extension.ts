@@ -7,7 +7,9 @@ import { GitHubSource } from './github';
 import { prKey, type CommentAction, type FromWebview, type PrSummary } from './protocol';
 import { defaultScope, EVERYTHING_PICK, githubRepos, parseRepositoryInput } from './repos';
 import { EVERYTHING, scopeLabel, type Scope } from './scope';
+import { budgetLow, due, dueOnReturn, QUEUE_EVERY, STALE_ON_RETURN } from './refresh';
 import { SampleSource } from './sample';
+import { SharedSource } from './shared';
 import { needsYou, queueGroups, repoGroups, type QueueGroup, type RepoGroup } from './sidebar';
 import { parentOf } from './stacks';
 import { bulkMergeable, prStatus, type Tone } from './status';
@@ -77,7 +79,50 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
   void connectQuietly(context);
+  startRefreshing(context);
 }
+
+/**
+ * Refreshing on its own: every 15 seconds, see what's due (the queue every 5 minutes, the open PR every
+ * minute, or every 30 seconds while you wait on checks or a reviewer), only while VS Code has focus and Review
+ * Desk is on screen, and never when GitHub's hourly allowance is low. Coming back catches up on anything
+ * older than a minute.
+ */
+function startRefreshing(context: vscode.ExtensionContext): void {
+  const onScreen = () => !!panel?.visible || !!treeView?.visible;
+  const tick = () => {
+    const now = Date.now();
+    const budget = source?.budget?.() ?? null;
+    const watching = vscode.window.state.focused && onScreen();
+    if (controller) {
+      const st = controller.snapshot;
+      const d = due({ now, watching, queueAt: controller.queueAt, prAt: st.view === 'pr' && st.pr ? controller.prAt : null, waiting: controller.waitingOnSomething, budget });
+      if (d.pr) void controller.autoRefresh('pr');
+      if (d.queue) void controller.autoRefresh('queue');
+    } else if (watching && treeView?.visible && !budgetLow(budget, now) && tree.age(now) >= QUEUE_EVERY) {
+      void tree.refresh();
+    }
+  };
+  const comeBack = () => {
+    if (!vscode.window.state.focused || !onScreen()) return;
+    const now = Date.now();
+    const budget = source?.budget?.() ?? null;
+    if (controller) {
+      const st = controller.snapshot;
+      const d = dueOnReturn({ now, queueAt: controller.queueAt, prAt: st.view === 'pr' && st.pr ? controller.prAt : null, budget });
+      if (d.pr) void controller.autoRefresh('pr');
+      if (d.queue) void controller.autoRefresh('queue');
+    } else if (treeView?.visible && !budgetLow(budget, now) && tree.age(now) >= STALE_ON_RETURN) {
+      void tree.refresh();
+    }
+  };
+  const timer = setInterval(tick, 15_000);
+  context.subscriptions.push({ dispose: () => clearInterval(timer) }, vscode.window.onDidChangeWindowState((w) => { if (w.focused) comeBack(); }));
+  watchReturn = comeBack;
+}
+
+/** Called when the panel comes back into view, to catch up the same way as on window focus. */
+let watchReturn: () => void = () => {};
 
 /** The scope settings and the workspace's last pick point at, without asking. */
 function currentScope(context: vscode.ExtensionContext): Scope {
@@ -112,7 +157,8 @@ async function ensureSource(context: vscode.ExtensionContext): Promise<boolean> 
 }
 
 function useSource(next: DataSource): void {
-  source = next;
+  // One queue for the sidebar and the panel: loads close together share one GitHub request.
+  source = new SharedSource(next);
   if (panel) { panel.dispose(); panel = undefined; controller = undefined; }
   tree.show(next);
   if (treeView) autoOpen(treeView.visible ? lastContext : undefined);
@@ -268,6 +314,7 @@ function open(context: vscode.ExtensionContext, key?: string): void {
   controller = c;
   webview.onDidReceiveMessage((msg: FromWebview) => c.handle(msg), undefined, context.subscriptions);
   panel.onDidDispose(() => { panel = undefined; controller = undefined; }, undefined, context.subscriptions);
+  panel.onDidChangeViewState((e) => { if (e.webviewPanel.visible) watchReturn(); }, undefined, context.subscriptions);
   webview.html = html(webview, context.extensionUri);
   // The webview asks for the queue when it's ready; a PR opened now shows once it's loaded.
   if (key !== undefined) void c.handle({ type: 'openPr', key });
@@ -387,8 +434,11 @@ class QueueTree implements vscode.TreeDataProvider<vscode.TreeItem> {
   }
 
   async refreshIfStale(): Promise<void> {
-    if (Date.now() - this.loadedAt > 2 * 60_000) await this.refresh();
+    if (this.age(Date.now()) >= STALE_ON_RETURN && !budgetLow(source?.budget?.() ?? null, Date.now())) await this.refresh();
   }
+
+  /** How long ago the sidebar's queue loaded. */
+  age(now: number): number { return now - this.loadedAt; }
 
   setQueue(queue: PrSummary[]): void {
     this.queue = queue;

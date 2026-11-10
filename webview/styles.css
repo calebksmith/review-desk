@@ -560,3 +560,9 @@ span.lin { color: var(--fg-3) }
 .pop.cardpop { width: 560px; padding: 0; border-radius: 8px; overflow: hidden }
 .pop.cardpop .scard { border: 0; border-radius: 0 }
 @media (max-width: 760px) { .sc-parts { grid-template-columns: repeat(2, minmax(0, 1fr)) } .sc-p:nth-child(3) { border-left: 0 } .sc-p:nth-child(n+3) { border-top: 1px solid var(--line-soft) } .pop.cardpop { width: min(560px, calc(100vw - 32px)) } }
+
+/* When it last updated */
+.upd { font-size: 11px; color: var(--fg-3); white-space: nowrap }
+.railfoot { margin-top: auto; display: flex; flex-direction: column; gap: 6px; padding-top: 8px }
+.railfoot .keyslink { margin-top: 0; padding-top: 0 }
+@media (max-width: 600px) { .crumb .upd { display: none } }

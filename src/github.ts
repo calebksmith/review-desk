@@ -3,6 +3,7 @@ import { COMMENT_FIELDS, countFindings, toConversation, type RawComment, type Ra
 import { logExcerpt } from './logs';
 import { parsePatch } from './patch';
 import type { CheckConclusion, CheckRun, ChecksTally, Draft, FileDiff, MergeMethod, MergeState, PrDetail, PrSummary, ReviewEvent, Reviewer, ViewedState } from './protocol';
+import type { Budget } from './refresh';
 import { combine, scopeLabel, searchQueries, type Scope } from './scope';
 import { parseDependsOn, parseLinear } from './signals';
 import type { DataSource } from './source';
@@ -14,7 +15,8 @@ const PR_FIELDS = `
   milestone { title dueOn }
   timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 10) { nodes { ... on ReviewRequestedEvent { createdAt requestedReviewer { ... on User { login } } } } }
   reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Bot { login } } } }
-  reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { body } } } }
+  reviewThreads(first: 100) { nodes { isResolved } }
+  recentThreads: reviewThreads(last: 20) { nodes { isResolved comments(first: 1) { nodes { body } } } }
   author { login }
   labels(first: 10) { nodes { name } }
   latestReviews(first: 20) { nodes { author { login } state commit { oid } } }
@@ -34,7 +36,9 @@ interface RawPr {
   headRefName: string; baseRefName: string; reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null;
   reviewRequests: { nodes: { requestedReviewer: { __typename: string; login?: string } | null }[] };
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN'; mergeStateStatus: string;
-  reviewThreads: { nodes: { isResolved: boolean; comments: { nodes: { body: string }[] } }[] };
+  reviewThreads: { nodes: { isResolved: boolean }[] };
+  /** The latest threads with their first comment, for the P0/P1 count. Reading every thread's comment cost ~80% of the queue. */
+  recentThreads: { nodes: { isResolved: boolean; comments: { nodes: { body: string }[] } }[] };
   author: { login: string } | null;
   labels: { nodes: { name: string }[] };
   latestReviews: { nodes: { author: { login: string } | null; state: string; commit: { oid: string } | null }[] };
@@ -60,6 +64,10 @@ export class GitHubSource implements DataSource {
   readonly scope: string;
   private readonly octokit: Octokit;
   private login: string | null = null;
+  private allowance: Budget | null = null;
+
+  /** GitHub's hourly allowance as of the last queue load. */
+  budget(): Budget | null { return this.allowance; }
 
   constructor(token: string, private readonly what: Scope) {
     this.octokit = new Octokit({ auth: token, userAgent: 'review-desk' });
@@ -77,8 +85,9 @@ export class GitHubSource implements DataSource {
     const me = await this.viewer();
     if (this.what.kind === 'repo') return this.repoPrs(this.what.repo, me);
     const q = searchQueries(new Date(Date.now() - 7 * 24 * 60 * 60_000));
-    const found = await this.octokit.graphql<Record<string, { nodes: (RawPr | Record<string, never>)[] }>>(
+    const found = await this.octokit.graphql<Record<string, { nodes: (RawPr | Record<string, never>)[] }> & { rateLimit: Budget }>(
       `query($a: String!, $b: String!, $c: String!, $m: String!) {
+        rateLimit { remaining limit resetAt }
         a: search(query: $a, type: ISSUE, first: 50) { nodes { ... on PullRequest { ${PR_FIELDS} } } }
         b: search(query: $b, type: ISSUE, first: 50) { nodes { ... on PullRequest { ${PR_FIELDS} } } }
         c: search(query: $c, type: ISSUE, first: 50) { nodes { ... on PullRequest { ${PR_FIELDS} } } }
@@ -86,17 +95,20 @@ export class GitHubSource implements DataSource {
       }`,
       { a: q.open[0], b: q.open[1], c: q.open[2], m: q.merged },
     );
-    const searched = Object.values(found).flatMap((r) => r.nodes.filter((n): n is RawPr => 'number' in n)).map((p) => toSummary(p, me));
+    this.allowance = found.rateLimit;
+    const { rateLimit: _, ...results } = found;
+    const searched = Object.values(results).flatMap((r) => (r as { nodes: (RawPr | Record<string, never>)[] }).nodes.filter((n): n is RawPr => 'number' in n)).map((p) => toSummary(p, me));
     const full = await Promise.all(this.what.full.map((r) => this.repoPrs(r, me)));
     return combine([searched, ...full]);
   }
 
   private async repoPrs(repo: string, me: string): Promise<PrSummary[]> {
     const { owner, repo: name } = at(repo);
-    const data = await this.octokit.graphql<{ repository: { open: { nodes: RawPr[] }; merged: { nodes: RawPr[] } } }>(
-      `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${REPO_PRS} } }`,
+    const data = await this.octokit.graphql<{ rateLimit: Budget; repository: { open: { nodes: RawPr[] }; merged: { nodes: RawPr[] } } }>(
+      `query($owner: String!, $name: String!) { rateLimit { remaining limit resetAt } repository(owner: $owner, name: $name) { ${REPO_PRS} } }`,
       { owner, name },
     );
+    this.allowance = data.rateLimit;
     return [...data.repository.open.nodes, ...data.repository.merged.nodes].map((p) => toSummary(p, me));
   }
 
@@ -386,7 +398,7 @@ function toSummary(p: RawPr, me: string): PrSummary {
     milestone: p.milestone,
     dependsOn: parseDependsOn(p.body),
     linear: parseLinear({ title: p.title, headRef: p.headRefName, body: p.body }),
-    findingCounts: countFindings(p.reviewThreads.nodes.filter((t) => !t.isResolved).map((t) => t.comments.nodes[0]?.body ?? '')),
+    findingCounts: countFindings(p.recentThreads.nodes.filter((t) => !t.isResolved).map((t) => t.comments.nodes[0]?.body ?? '')),
     url: p.url,
     additions: p.additions,
     deletions: p.deletions,
