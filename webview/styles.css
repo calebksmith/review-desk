@@ -446,3 +446,34 @@ kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: ce
 .ck-s { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; flex-shrink: 0; width: 120px }
 .ck-s .ico { width: 13px; height: 13px }
 .ck-s.ok { color: var(--ok) } .ck-s.run { color: var(--accent-ink) } .ck-s.muted { color: var(--fg-3) }
+
+/* Comments in the diff */
+.ln { position: relative }
+.addc { position: absolute; left: 2px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; padding: 0; border: 0; border-radius: 3px; background: var(--accent); color: var(--accent-fg); font-weight: 700; font-size: 12px; line-height: 16px; cursor: pointer; opacity: 0; z-index: 1 }
+.ln:hover .addc, .addc:focus-visible { opacity: 1 }
+.tcard, .drf, .composer { margin: 6px 12px 8px 64px; border: 1px solid var(--line); border-radius: 8px; background: var(--win); font-family: var(--ui); font-size: 13px; line-height: 20px; white-space: normal }
+.tcard { padding: 8px 12px; display: flex; flex-direction: column; gap: 6px }
+.tcard.current { box-shadow: 0 0 0 2px var(--focus) }
+.tcard.resolved { opacity: .7 }
+.tch { display: flex; align-items: center; gap: 8px }
+.tch > .ico { width: 14px; height: 14px; color: var(--fg-3) }
+.tch .tl { font-size: 11px; color: var(--fg-3) }
+.tacts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-top: 4px; border-top: 1px solid var(--line-soft) }
+.tacts-inline { display: inline-flex; gap: 6px }
+.sev { font-family: var(--mono); font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 4px; line-height: 16px; background: var(--chrome); color: var(--fg-2) }
+.sev.s0 { background: var(--bad); color: var(--win) } .sev.s1 { background: var(--warn-soft); color: var(--warn) }
+.drf { padding: 8px 12px; border-style: dashed; border-color: color-mix(in srgb, var(--accent) 50%, transparent) }
+.drf.agent { border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft) }
+.tcard .drf { margin: 0 }
+.drh { display: flex; align-items: center; gap: 6px; flex-wrap: wrap }
+.drh .end { margin-left: auto; display: inline-flex; gap: 10px; align-items: center }
+.drb { white-space: pre-wrap; margin-top: 4px }
+.chip.pend { font-family: var(--ui); background: var(--accent-soft); color: var(--accent-ink); border-color: transparent; font-weight: 600 }
+.chip.agent { font-family: var(--ui); display: inline-flex; gap: 4px; align-items: center }
+.chip.agent .ico { width: 12px; height: 12px }
+.composer { padding: 8px 12px; display: flex; flex-direction: column; gap: 6px }
+.tcard .composer { margin: 0 }
+.composer textarea { font: inherit; color: var(--fg); background: var(--input); border: 1px solid var(--btn-line); border-radius: 4px; padding: 6px 8px; resize: vertical; min-height: 56px }
+.cacts { display: flex; justify-content: flex-end; align-items: center; gap: 8px }
+.outside { padding: 8px 0; border-bottom: 1px solid var(--line-soft) }
+.outside .lbl { display: block; padding: 0 12px 0 64px }

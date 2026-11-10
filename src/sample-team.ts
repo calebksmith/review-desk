@@ -51,9 +51,15 @@ export function teamSeed(): SamplePr[] {
     pr({ n: 101, title: 'Add a session store', author: 'marco', min: 60 * 20, head: 'marco/session-store', reviewers: [rev('dana', 'approved')],
       body: 'Stores sessions in Redis with a 30-day expiry. The login work stacked on this needs it.',
       path: 'src/server/session.ts', patch: ['@@ -0,0 +1,4 @@', '+export async function createSession(userId: string) {', '+  const id = randomId()', '+  await redis.set(`session:${id}`, userId, { ex: 60 * 60 * 24 * 30 })', '+}'] }),
-    pr({ n: 102, title: 'Add the login API', author: 'marco', min: 60 * 6, head: 'marco/login-api', base: 'marco/session-store', reviewers: req('calebksmith'),
+    // Codex reviewed this one first: a P1 and a P2 for the lead to rule on.
+    pr({ n: 102, title: 'Add the login API', author: 'marco', min: 60 * 6, head: 'marco/login-api', base: 'marco/session-store', reviewers: [...req('calebksmith'), rev('chatgpt-codex-connector', 'commented')], threads: 2,
       body: 'POST /api/login checks the password and starts a session. Stacked on #101.',
-      path: 'src/server/routes/login.ts', patch: ['@@ -0,0 +1,4 @@', '+export async function login(req: Request) {', '+  const user = await verifyPassword(await req.json())', '+  return startSession(user.id)', '+}'] }),
+      path: 'src/server/routes/login.ts', patch: ['@@ -0,0 +1,4 @@', '+export async function login(req: Request) {', '+  const user = await verifyPassword(await req.json())', '+  return startSession(user.id)', '+}'],
+      conversation: [
+        { kind: 'review', verdict: 'commented', comment: say('chatgpt-codex-connector', 60 * 5, '<p>Codex review: 2 findings.</p>') },
+        { kind: 'thread', id: 'T_102_1', path: 'src/server/routes/login.ts', line: 2, resolved: false, outdated: false, severity: 1, comments: [say('chatgpt-codex-connector', 60 * 5, '<p><strong>P1</strong> Failed logins aren’t rate-limited, so a password can be guessed without limit. Count failures per account and IP and slow them down.</p>')] },
+        { kind: 'thread', id: 'T_102_2', path: 'src/server/routes/login.ts', line: 3, resolved: false, outdated: false, severity: 2, comments: [say('chatgpt-codex-connector', 60 * 5, '<p><strong>P2</strong> A wrong password and an unknown email give different errors, which tells an attacker which emails have accounts.</p>')] },
+      ] }),
     pr({ n: 103, title: 'Build the login form', author: 'marco', min: 90, head: 'marco/login-form', base: 'marco/login-api', reviewers: [...req('calebksmith'), rev('priya', 'commented')],
       checks: [pass('Lint', 'GitHub Actions'), pass('Types', 'GitHub Actions'), running('Tests', 'GitHub Actions'), pass('Preview', 'Vercel', 'Preview ready')],
       body: 'The sign-in page, with errors under each field. Stacked on #102.',

@@ -2,7 +2,7 @@ import DOMPurify from 'dompurify';
 import { conversationCounts, startedAt } from '../src/conversation';
 import { mergeTree, parentOf, stackOf, stacks, type StackRow, type TreeRow } from '../src/stacks';
 import { parseKey, prKey } from '../src/protocol';
-import type { CheckRun, Comment, CommentAction, ConversationItem, ReviewEvent, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
+import type { CheckRun, Comment, CommentAction, ConversationItem, Draft, ReviewEvent, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
 import { bulkMergeable, byPriority, isDependabot, isReReview, openFindings, priority, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
 
 // The webview only renders. Everything it knows comes from the host's state messages;
@@ -14,12 +14,15 @@ const vscode = acquireVsCodeApi();
 
 type Filter = 'all' | Bucket;
 type Step = 'overview' | 'checks' | 'files';
-interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; menu: 'checklist' | 'methods' | 'review' | null }
+/** The comment box open in the diff: a new comment on a line (or range), a reply to a thread, or an edit. */
+interface Composer { path: string; line: number | null; side: 'RIGHT' | 'LEFT'; startLine?: number | null; replyTo?: string; resolve?: boolean; editId?: string; prefill?: string }
+type Thread = Extract<ConversationItem, { kind: 'thread' }>;
+interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; composer: Composer | null; finding: string | null; menu: 'checklist' | 'methods' | 'review' | null }
 
 let host: HostState | null = null;
 /** True while the reviewer moves through the queue with j/k; a mouse move hides the cursor again. */
 let kbd = false;
-let view: View = { filter: 'all', repo: '', reviewEvent: null, showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
+let view: View = { filter: 'all', repo: '', reviewEvent: null, composer: null, finding: null, showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
 // State saved by older versions named the files page "review".
 if (!['overview', 'checks', 'files'].includes(view.step)) view.step = 'files';
 // Older versions saved a bare PR number; keys are owner/name#number now.
@@ -257,6 +260,7 @@ function checklist(pr: PrDetail, h: HostState): string {
       : it.action === 'showChecks' && it.tone !== 'ok' ? '<button class="link" data-step="checks">Show checks</button>'
       : it.action === 'openThreads' ? '<button class="link" data-do="threads">Show</button>'
       : it.action === 'openPr' && it.pr ? `<button class="link" data-open="${esc(it.pr)}">Open #${parseKey(it.pr)?.number ?? ''}</button>`
+      : it.action === 'nextFinding' ? '<button class="link" data-do="nextFinding">Show</button>'
       : it.action === 'fixConflicts' ? `<button class="btn sm fix" data-do="fixConflicts">${I.spark}Fix with agent</button>` : '';
     return `<li class="ck ${it.tone}">${TONE_ICON[it.tone]}<span class="ckt">${esc(it.text)}</span>${act}</li>`;
   }).join('');
@@ -434,7 +438,75 @@ function stepFiles(pr: PrDetail): string {
   return `${banner}
     <div class="split"><nav class="files" aria-label="Changed files"><div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}</nav>
       <section class="diffpane" aria-label="Diff">${file ? `<div class="dh"><span class="mono">${esc(file.path)}</span><label class="vt"><input type="checkbox" data-viewed="${esc(file.path)}" ${file.viewed === 'viewed' ? 'checked' : ''}> Viewed</label></div>
-        <div class="code">${lines ? lines.map(diffLine).join('') : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>'}</section></div>`;
+        <div class="code">${lines ? renderDiff(file!.path, lines, pr) : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>'}</section></div>`;
+}
+
+/* ---------- Comments in the diff ---------- */
+
+const SEV = ['P0', 'P1', 'P2', 'P3'];
+const sevChip = (n: number | null | undefined) => (n == null ? '' : `<span class="sev s${n}" title="Severity ${SEV[n]}">${SEV[n]}</span>`);
+const threads = (pr: PrDetail) => pr.conversation.filter((it): it is Thread => it.kind === 'thread');
+
+/** Open findings, most severe first (unmarked last), then by file and line: what ] and [ step through. */
+function findings(pr: PrDetail): Thread[] {
+  return threads(pr).filter((t) => !t.resolved).sort((a, b) => (a.severity ?? 9) - (b.severity ?? 9) || a.path.localeCompare(b.path) || (a.line ?? 0) - (b.line ?? 0));
+}
+
+/** The diff with comments woven in: threads and held-back comments under their lines, and the comment box. */
+function renderDiff(path: string, lines: DiffLine[], pr: PrDetail): string {
+  const h = host!;
+  const here = threads(pr).filter((t) => t.path === path);
+  const drafts = h.drafts.filter((d) => d.path === path && !d.replyTo);
+  const shown = new Set<string>();
+  const out = lines.map((l) => {
+    let html = diffLine(l);
+    if (l.kind === 'gap') return html;
+    const side: 'RIGHT' | 'LEFT' = l.kind === 'del' ? 'LEFT' : 'RIGHT';
+    const no = side === 'LEFT' ? l.oldNo : l.newNo;
+    for (const t of here.filter((x) => side === 'RIGHT' && x.line === no)) { html += threadCard(t, pr); shown.add(t.id); }
+    for (const d of drafts.filter((x) => x.side === side && x.line === no)) html += draftCard(d);
+    const c = view.composer;
+    if (c && !c.replyTo && !c.editId && c.path === path && c.side === side && c.line === no) html += composerBox(c);
+    return html;
+  }).join('');
+  // Threads on lines this diff doesn't show (outdated, or outside the changed hunks) still need a home.
+  const elsewhere = here.filter((t) => !shown.has(t.id));
+  return (elsewhere.length ? `<div class="outside"><span class="lbl">Comments on lines not shown here</span>${elsewhere.map((t) => threadCard(t, pr)).join('')}</div>` : '') + out;
+}
+
+/** An existing thread in the diff: its finding's severity, the conversation, and what you can do about it. */
+function threadCard(t: Thread, pr: PrDetail): string {
+  const h = host!;
+  const replies = h.drafts.filter((d) => d.replyTo === t.id);
+  const c = view.composer;
+  const composing = c && c.replyTo === t.id && !c.editId;
+  // Once you've answered it (a reply is held back), just offer another reply.
+  const acts = t.resolved ? '' : replies.length ? `<div class="tacts"><button class="link" data-reply="${esc(t.id)}">Reply</button></div>` : `<div class="tacts">
+      <button class="btn sm fix" data-thread="${esc(t.id)}" title="Send this finding to your AI agent to fix">${I.spark}Fix it</button>
+      <button class="btn sm" data-reply="${esc(t.id)}" data-prefill="Agreed, please fix this. " title="Held back as a reply, sent with your review">Ask the author</button>
+      <button class="btn sm" data-reply="${esc(t.id)}" data-resolve="1" data-prefill="Not an issue: " title="A reply that also resolves the thread when your review is sent">Not an issue</button>
+      <button class="link" data-reply="${esc(t.id)}">Reply</button></div>`;
+  return `<div class="tcard ${t.resolved ? 'resolved' : ''} ${view.finding === t.id ? 'current' : ''}" data-thread-id="${esc(t.id)}">
+    <div class="tch">${I.com}${sevChip(t.severity)}<span class="pill ${t.resolved ? '' : 'need'}">${t.resolved ? 'Resolved' : 'Unresolved'}</span>${t.outdated ? '<span class="pill">Outdated</span>' : ''}${t.line ? `<span class="mono tl">line ${t.line}</span>` : ''}</div>
+    ${t.comments.map((cm) => comment(cm, '')).join('')}${replies.map(draftCard).join('')}${composing ? composerBox(c!) : acts}</div>`;
+}
+
+/** A held-back comment, marked Pending; your agent's suggestions also say so and need keeping. */
+function draftCard(d: Draft): string {
+  const c = view.composer;
+  if (c?.editId === d.id) return composerBox(c);
+  return `<div class="drf ${d.from}"><div class="drh"><span class="chip pend">Pending</span>${d.from === 'agent' ? `<span class="chip agent">${I.spark}From your agent</span>` : ''}${sevChip(d.severity)}${d.resolve ? '<span class="chip">Resolves the thread</span>' : ''}
+    <span class="end"><button class="link" data-edit="${esc(d.id)}">Edit</button><button class="link" data-del="${esc(d.id)}">Delete</button>${d.from === 'agent' ? `<button class="btn sm" data-keep="${esc(d.id)}">Keep</button>` : ''}</span></div>
+    <div class="drb">${esc(d.body)}</div></div>`;
+}
+
+function composerBox(c: Composer): string {
+  const editing = !!c.editId;
+  const what = c.replyTo ? (c.resolve ? 'Reply and resolve' : 'Reply') : c.startLine && c.startLine !== c.line ? `Comment on lines ${c.startLine}–${c.line}` : `Comment on line ${c.line}`;
+  return `<div class="composer"><span class="lbl">${editing ? 'Edit comment' : what}</span>
+    <textarea id="lbox" rows="3" placeholder="${c.replyTo ? 'Reply…' : 'Leave a comment'}" aria-label="${esc(what)}">${esc(c.prefill ?? '')}</textarea>
+    <div class="cacts"><button class="link" data-do="composeCancel">Cancel</button>
+      ${editing ? '<button class="btn sm pri" data-do="composeSave">Save</button>' : `<button class="btn sm" data-do="composeNow" title="Post it right away, outside a review">${c.replyTo ? 'Reply now' : 'Comment now'}</button><button class="btn sm pri" data-do="composeAdd" title="Hold it back and send it with your review">Add to review</button>`}</div></div>`;
 }
 
 function diffLine(l: DiffLine): string {
@@ -442,7 +514,10 @@ function diffLine(l: DiffLine): string {
   const n = l.newNo ?? l.oldNo;
   const mark = l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ' ';
   const num = l.newNo != null ? `<button class="n" data-line="${l.newNo}" title="Open at line ${l.newNo}">${n}</button>` : `<span class="n">${n}</span>`;
-  return `<div class="ln ${l.kind}">${num}<span class="m">${mark}</span><span class="tx">${esc(l.text) || ' '}</span></div>`;
+  const side = l.kind === 'del' ? 'LEFT' : 'RIGHT';
+  const at = side === 'LEFT' ? l.oldNo : l.newNo;
+  const add = at != null ? `<button class="addc" data-cline="${side}:${at}" aria-label="Comment on line ${at}" title="Comment on this line (shift-click another to comment on a range)">+</button>` : '';
+  return `<div class="ln ${l.kind}" data-at="${side}:${at ?? ''}">${add}${num}<span class="m">${mark}</span><span class="tx">${esc(l.text) || ' '}</span></div>`;
 }
 
 const base = (p: string) => p.split('/').pop() ?? p;
@@ -541,13 +616,16 @@ function convItem(it: ConversationItem, firstNew = false): string {
   if (it.kind !== 'thread') return `<article class="ci"${anchor}>${comment(it.comment, it.kind === 'review' ? VERDICT[it.verdict] : '')}</article>`;
   const where = `${base(it.path)}${it.line ? `:${it.line}` : ''}`;
   const state = it.resolved ? '<span class="pill">Resolved</span>' : '<span class="pill need">Unresolved</span>';
-  const fix = it.resolved ? '' : `<button class="btn sm fix end" data-thread="${esc(it.id)}" title="Send this comment to your AI agent">${I.spark}Fix with agent</button>`;
-  return `<article class="ci thread"${anchor} data-thread-id="${esc(it.id)}"><div class="cih">${I.com}<button class="link mono" data-file="${esc(it.path)}" title="Show ${esc(it.path)} in the diff">${esc(where)}</button>${state}${it.outdated ? '<span class="pill">Outdated</span>' : ''}${fix}</div>
+  const fix = it.resolved ? '' : `<span class="end tacts-inline"><button class="btn sm fix" data-thread="${esc(it.id)}" title="Send this comment to your AI agent">${I.spark}Fix it</button><button class="btn sm" data-goto="${esc(it.id)}" title="Answer it in the diff: ask the author, or say it’s not an issue">Answer in diff</button></span>`;
+  return `<article class="ci thread"${anchor} data-thread-id="${esc(it.id)}"><div class="cih">${I.com}${sevChip(it.severity)}<button class="link mono" data-goto="${esc(it.id)}" title="Show it in the diff">${esc(where)}</button>${state}${it.outdated ? '<span class="pill">Outdated</span>' : ''}${fix}</div>
     ${it.comments.map((c) => comment(c, '')).join('')}</article>`;
 }
 
+/** Bots by their product name: "Codex", not "chatgpt-codex-connector". */
+const who = (login: string) => (/codex/i.test(login) ? 'Codex' : login.replace(/\[bot\]$/, ''));
+
 function comment(c: Comment, badge: string): string {
-  return `<div class="cm ${c.isNew ? 'new' : ''}"><div class="cmh"><b>${esc(c.author)}</b>${badge}<span class="when">${ago(c.createdAt)} ago</span>${c.isNew ? '<span class="newtag">New</span>' : ''}
+  return `<div class="cm ${c.isNew ? 'new' : ''}"><div class="cmh"><b title="${esc(c.author)}">${esc(who(c.author))}</b>${badge}<span class="when">${ago(c.createdAt)} ago</span>${c.isNew ? '<span class="newtag">New</span>' : ''}
     <button class="link gh" data-ext="${esc(c.url)}" aria-label="Open this comment on GitHub">${I.ext}</button></div>${c.html.trim() ? `<div class="md">${safe(c.html)}</div>` : ''}</div>`;
 }
 
@@ -589,7 +667,7 @@ function keysHelp(): string {
   const r = (ks: string[], t: string) => `<div class="kr">${ks.map((k) => `<kbd>${k}</kbd>`).join('')}<span>${t}</span></div>`;
   return `<div class="keys" data-do="keys"><div class="kp" role="dialog" aria-label="Keyboard shortcuts"><b>Keyboard shortcuts</b>
     <span class="lbl">Queue</span>${r(['j', 'k'], 'Move down or up')}${r(['Enter'], 'Open the pull request')}${r(['r'], 'Refresh')}
-    <span class="lbl">Pull request</span>${r(['j', 'k'], 'Next or previous pull request')}${r(['n', 'p'], 'Next or previous file')}${r(['v'], 'Toggle viewed on this file')}${r(['1', '2', '3'], 'Overview, Checks, Files changed')}${r(['a'], 'Approve')}${r(['Esc'], 'Back to the queue')}${r(['?'], 'Show or hide this list')}</div></div>`;
+    <span class="lbl">Pull request</span>${r(['j', 'k'], 'Next or previous pull request')}${r(['n', 'p'], 'Next or previous file')}${r(['v'], 'Toggle viewed on this file')}${r(['1', '2', '3'], 'Overview, Checks, Files changed')}${r(['c'], 'Comment on a line')}${r([']', '['], 'Next or previous finding')}${r(['r'], 'Reply to the finding')}${r(['⌘⇧↵'], 'Finish your review')}${r(['a'], 'Approve')}${r(['Esc'], 'Back to the queue')}${r(['?'], 'Show or hide this list')}</div></div>`;
 }
 
 /* ---------- Events ---------- */
@@ -600,7 +678,7 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
     if (pr && prKey(pr) !== view.pr) {
       // First look, or new comments: start on Overview for the context. Otherwise pick up the files.
       const start: Step = !pr.seenBefore || conversationCounts(pr.conversation).fresh ? 'overview' : 'files';
-      view = { ...view, pr: prKey(pr), file: null, onlyNew: false, step: start, menu: null };
+      view = { ...view, pr: prKey(pr), file: null, onlyNew: false, step: start, menu: null, composer: null, finding: null };
       vscode.setState(view);
     }
     host = msg.state;
@@ -646,7 +724,7 @@ document.addEventListener('click', (e) => {
     if (/^https?:/.test(a.href)) send({ type: 'openExternal', url: a.href });
     return;
   }
-  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-layout],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
+  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-layout],[data-cline],[data-reply],[data-edit],[data-del],[data-keep],[data-goto],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-do]');
   if (!t || (t as HTMLButtonElement).disabled) return;
   // An action picked from a menu closes it.
   if (view.menu && t.closest('.pop')) view.menu = null;
@@ -661,6 +739,12 @@ document.addEventListener('click', (e) => {
   else if (d.file) save({ file: d.file, step: 'files', onlyNew: d.onlynew === '1' });
   else if (d.onlynew) save({ onlyNew: d.onlynew === '1' });
   else if (d.line && view.file) send({ type: 'openFile', path: view.file, line: Number(d.line) });
+  else if (d.cline && view.file) openComposer(d.cline, (e as MouseEvent).shiftKey);
+  else if (d.reply) save({ composer: replyTo(d.reply, d.resolve === '1', d.prefill), finding: d.reply });
+  else if (d.edit) { const dr = host?.drafts.find((x) => x.id === d.edit); if (dr) save({ composer: { path: dr.path, line: dr.line, side: dr.side, replyTo: dr.replyTo, resolve: dr.resolve, editId: dr.id, prefill: dr.body } }); }
+  else if (d.del) send({ type: 'deleteDraft', id: d.del });
+  else if (d.keep) send({ type: 'keepDraft', id: d.keep });
+  else if (d.goto) goToThread(d.goto);
   else if (d.ext) send({ type: 'openExternal', url: d.ext });
   else if (d.do === 'back') send({ type: 'back' });
   else if (d.do === 'refresh') send({ type: 'refresh' });
@@ -676,6 +760,9 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'closeDependabot') send({ type: 'closeDependabot' });
   else if (d.do === 'comment') postComment();
   else if (d.do === 'submitReview') submitReview();
+  else if (d.do === 'composeCancel') save({ composer: null });
+  else if (d.do === 'composeAdd' || d.do === 'composeNow' || d.do === 'composeSave') finishComposer(d.do);
+  else if (d.do === 'nextFinding') stepFinding(1);
   else if (d.do === 'dismissNotice') send({ type: 'dismissNotice' });
   else if (d.do === 'threads') {
     save({ step: 'overview' });
@@ -683,6 +770,49 @@ document.addEventListener('click', (e) => {
     open?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }
 });
+
+function replyTo(id: string, resolve: boolean, prefill?: string): Composer | null {
+  const t = host?.pr && threads(host.pr).find((x) => x.id === id);
+  return t ? { path: t.path, line: t.line, side: 'RIGHT', replyTo: id, resolve, prefill } : null;
+}
+
+/** Opens the comment box on a diff line; shift-click with a box open on the same side makes it a range. */
+function openComposer(at: string, range: boolean): void {
+  const [side, n] = at.split(':') as ['RIGHT' | 'LEFT', string];
+  const line = Number(n);
+  const c = view.composer;
+  if (range && c && !c.replyTo && !c.editId && c.path === view.file && c.side === side && c.line != null && c.line !== line) {
+    save({ composer: { ...c, startLine: Math.min(c.line, line), line: Math.max(c.line, line) } });
+  } else save({ composer: { path: view.file!, line, side } });
+  document.getElementById('lbox')?.focus();
+}
+
+function finishComposer(how: 'composeAdd' | 'composeNow' | 'composeSave'): void {
+  const c = view.composer;
+  const body = (document.getElementById('lbox') as HTMLTextAreaElement | null)?.value.trim() ?? '';
+  if (!c || !body) { document.getElementById('lbox')?.focus(); return; }
+  const draft = { path: c.path, line: c.line, side: c.side, startLine: c.startLine ?? null, replyTo: c.replyTo, resolve: c.resolve, body };
+  if (how === 'composeSave' && c.editId) send({ type: 'editDraft', id: c.editId, body });
+  else send({ type: how === 'composeNow' ? 'commentNow' : 'addDraft', draft });
+  save({ composer: null });
+}
+
+/** Shows a thread in the diff: its file, scrolled to it. */
+function goToThread(id: string): void {
+  const t = host?.pr && threads(host.pr).find((x) => x.id === id);
+  if (!t) return;
+  save({ step: 'files', file: t.path, onlyNew: false, finding: id });
+  document.querySelector(`.tcard[data-thread-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'center' });
+}
+
+/** ] and [: the next or previous open finding, most severe first. */
+function stepFinding(dir: 1 | -1): void {
+  const list = host?.pr ? findings(host.pr) : [];
+  if (!list.length) { return; }
+  const at = list.findIndex((t) => t.id === view.finding);
+  const next = list[(at < 0 ? (dir > 0 ? 0 : list.length - 1) : (at + dir + list.length) % list.length)]!;
+  goToThread(next.id);
+}
 
 function submitReview(): void {
   const pr = host?.pr;
@@ -701,6 +831,10 @@ function postComment(): void {
   box.value = '';
 }
 
+/** The diff line under the pointer, for c. */
+let hovered: string | undefined;
+document.addEventListener('mouseover', (e) => { const ln = (e.target as HTMLElement).closest<HTMLElement>('.ln'); if (ln) hovered = ln.dataset.at; });
+
 document.addEventListener('mousemove', () => {
   if (!kbd) return;
   kbd = false;
@@ -709,8 +843,17 @@ document.addEventListener('mousemove', () => {
 
 /* ---------- Keyboard ---------- */
 document.addEventListener('keydown', (e) => {
-  // ⌘/Ctrl+Enter posts the comment being typed.
-  if ((e.target as HTMLElement).id === 'cbox' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); postComment(); return; }
+  // ⌘/Ctrl+Enter posts the comment being typed; in the diff's box it adds it to your review.
+  const tid = (e.target as HTMLElement).id;
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && e.shiftKey && host?.pr) {
+    // ⌘⇧Enter: finish the review (open the panel, or send it when it's open).
+    e.preventDefault();
+    if (view.menu === 'review') submitReview(); else save({ menu: 'review' });
+    return;
+  }
+  if (tid === 'cbox' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); postComment(); return; }
+  if (tid === 'lbox' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); finishComposer(view.composer?.editId ? 'composeSave' : 'composeAdd'); return; }
+  if (tid === 'lbox' && e.key === 'Escape') { save({ composer: null }); return; }
   if (!host || e.metaKey || e.ctrlKey || e.altKey) return;
   const tag = (e.target as HTMLElement).tagName;
   if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
@@ -748,7 +891,13 @@ document.addEventListener('keydown', (e) => {
   } else if (k === 'v' && view.step === 'files' && view.file) {
     const f = pr.files.find((x) => x.path === view.file);
     if (f) send({ type: 'setViewed', path: f.path, viewed: f.viewed !== 'viewed' });
-  } else if (k === '1') save({ step: 'overview' });
+  } else if (k === ']' || k === '[') stepFinding(k === ']' ? 1 : -1);
+  else if (k === 'c' && view.step === 'files') {
+    // Comment on the line under the pointer, or the first changed line of this file.
+    const at = hovered ?? document.querySelector<HTMLElement>('.ln.add, .ln.del')?.dataset.at;
+    if (at && !at.endsWith(':')) { e.preventDefault(); openComposer(at, false); }
+  } else if (k === 'r' && view.finding) { e.preventDefault(); save({ step: 'files', composer: replyTo(view.finding, false) }); document.getElementById('lbox')?.focus(); }
+  else if (k === '1') save({ step: 'overview' });
   else if (k === '2') save({ step: 'checks' });
   else if (k === '3') save({ step: 'files' });
   else if (k === 'a' && pr.state !== 'merged' && !pr.mine && (pr.myReview !== 'approved' || isReReview(pr))) {
