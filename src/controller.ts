@@ -7,7 +7,7 @@ import { inDiff } from './patch';
 import { newlyYourTurn, waiting, whatArrived } from './refresh';
 import { DEFAULT_BLOCKER_LABELS } from './signals';
 import type { DataSource, Store } from './source';
-import { bulkMergeable, bulkSkipReason, isReReview, mergeBlocker, mergeWarning, openFindings, plural, priority } from './status';
+import { bulkMergeable, bulkSkipReason, isReReview, mergeBlocker, mergeWarning, openFindings, plural, priority, stillOpen } from './status';
 
 export interface Host {
   post(msg: ToWebview): void;
@@ -185,7 +185,7 @@ export class Controller {
     if (!pr || this.state.busy) return;
     // Codex (or anyone) marked something P0/P1 and nobody has settled it: say so before approving.
     const f = openFindings(pr);
-    if ((f.p0 || f.p1) && !(await this.host.confirm(`${[f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ')} ${f.p0 + f.p1 === 1 ? 'finding is' : 'findings are'} still open on ${this.ref(pr)}. Approve anyway?`, 'Approve anyway'))) return;
+    if ((f.p0 || f.p1) && !(await this.host.confirm(`${stillOpen(f)} on ${this.ref(pr)}. Approve anyway?`, 'Approve anyway'))) return;
     this.set({ busy: 'approve' });
     try {
       await this.source.approve(pr);
@@ -272,7 +272,7 @@ export class Controller {
     if (event === 'REQUEST_CHANGES' && !body.trim()) { this.host.post({ type: 'toast', text: 'Say what needs to change in the summary first.' }); return; }
     if (event === 'COMMENT' && !body.trim() && !send.length) { this.host.post({ type: 'toast', text: 'Write a summary or add a comment first.' }); return; }
     const f = openFindings(pr);
-    if (event === 'APPROVE' && (f.p0 || f.p1) && !(await this.host.confirm(`${[f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ')} ${f.p0 + f.p1 === 1 ? 'finding is' : 'findings are'} still open. Approve anyway?`, 'Approve anyway'))) return;
+    if (event === 'APPROVE' && (f.p0 || f.p1) && !(await this.host.confirm(`${stillOpen(f)}. Approve anyway?`, 'Approve anyway'))) return;
     this.set({ busy: 'review' });
     let sent = { unresolved: 0 };
     try {

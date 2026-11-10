@@ -153,8 +153,7 @@ export function mergeReadiness(pr: PrDetail, queue: readonly PrSummary[] = [], m
 
   const f = openFindings(pr);
   if (f.p0 || f.p1) {
-    const parts = [f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ');
-    items.push({ key: 'findings', tone: f.p0 ? 'bad' : 'warn', text: `${parts} ${f.p0 + f.p1 === 1 ? 'finding' : 'findings'} open`, action: 'nextFinding' });
+    items.push({ key: 'findings', tone: f.p0 ? 'bad' : 'warn', text: `${p0p1(f)} ${f.p0 + f.p1 === 1 ? 'finding' : 'findings'} open`, action: 'nextFinding' });
   }
 
   if (c.failed) items.push({ key: 'checks', tone: 'bad', text: plural(c.failed, 'check') + ' failing', action: 'showChecks' });
@@ -196,6 +195,11 @@ export function openFindings(pr: PrDetail): { p0: number; p1: number } {
   const sev = (n: number) => open.filter((it) => it.kind === 'thread' && it.severity === n).length;
   return { p0: sev(0), p1: sev(1) };
 }
+
+const p0p1 = (f: { p0: number; p1: number }) => [f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ');
+
+/** "1 P0 and 2 P1 findings are still open": what approving asks about first. */
+export const stillOpen = (f: { p0: number; p1: number }) => `${p0p1(f)} ${f.p0 + f.p1 === 1 ? 'finding is' : 'findings are'} still open`;
 
 /**
  * Why Merge can't run at all, or null: conflicts and missing approvals (GitHub refuses both), and a stack

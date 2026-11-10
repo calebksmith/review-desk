@@ -223,6 +223,9 @@ async function gitRepos(): Promise<{ name: string; root: vscode.Uri }[]> {
   return repos.flatMap((r) => githubRepos([r]).map((name) => ({ name, root: r.rootUri })));
 }
 
+/** Where a repo is open in this workspace, if it is. GitHub's names ignore case. */
+const rootOf = async (repo: string) => (await gitRepos()).find((r) => r.name.toLowerCase() === repo.toLowerCase())?.root;
+
 /** Everything that involves you, an open folder's repo, or one typed in. EVERYTHING_PICK means everything. */
 async function pickScope(candidates: string[], now: Scope): Promise<string | undefined> {
   const other = 'Another repository…';
@@ -288,7 +291,7 @@ function open(context: vscode.ExtensionContext, key?: string): void {
     },
     openFile: async (repo, path, line) => {
       // The PR's repo has to be open here to jump into its files; with several repos in view, find the right folder.
-      const root = (await gitRepos()).find((r) => r.name.toLowerCase() === repo.toLowerCase())?.root;
+      const root = await rootOf(repo);
       if (!root) { void vscode.window.showInformationMessage(`Open ${repo} in VS Code to jump to its files.`); return; }
       const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(root, path));
       const pos = new vscode.Position(Math.max(0, (line ?? 1) - 1), 0);
@@ -300,7 +303,7 @@ function open(context: vscode.ExtensionContext, key?: string): void {
     choose: async (title, options) => vscode.window.showQuickPick(options, { title, placeHolder: 'Pick one' }),
     switchRepository: () => { void vscode.commands.executeCommand('reviewDesk.switchRepository'); },
     findingsFile: async (repo, number) => {
-      const root = (await gitRepos()).find((r) => r.name.toLowerCase() === repo.toLowerCase())?.root;
+      const root = await rootOf(repo);
       if (!root) return null;
       await excludeReviewDesk(root);
       await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(root, '.review-desk'));

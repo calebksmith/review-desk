@@ -5,9 +5,10 @@ import { mergeTree, parentOf, stackOf, stacks, type StackRow, type TreeRow } fro
 import { inDiff } from '../src/patch';
 import { parseKey, prKey } from '../src/protocol';
 import type { CheckRun, Comment, CommentAction, ConversationItem, Draft, ReviewEvent, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
+import { askAndReply, who } from '../src/refresh';
 import { reasons } from '../src/signals';
 import { fileMarks, nearLines, reviewQueue, stepQueue, type QueueItem } from '../src/queue';
-import { bulkMergeable, isDependabot, isReReview, openFindings, priority, priorityOrder, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
+import { bulkMergeable, isDependabot, isReReview, openFindings, priority, priorityOrder, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural, prStatus, stillOpen, type Bucket, type Tone } from '../src/status';
 
 // The webview only renders. Everything it knows comes from the host's state messages;
 // what it remembers on its own is view state (filter, step, open file).
@@ -62,7 +63,6 @@ const I = {
   spark: svg('M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z'),
 };
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-const plural = (n: number, one: string, many = one + 's') => `${n} ${n === 1 ? one : many}`;
 
 function ago(iso: string): string {
   const min = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60_000));
@@ -253,8 +253,8 @@ function bulkButton(h: HostState): string {
   const ready = bulkMergeable(h.queue);
   if (!ready.length) return '';
   const held = h.queue.filter((p) => isDependabot(p) && p.state === 'open' && !ready.includes(p)).length;
-  const tip = `Approves and merges ${ready.map((p) => (multi(h) ? `${short(p.repo)}#${p.number}` : `#${p.number}`)).join(', ')}, one at a time.${held ? ` ${count(held, 'other Dependabot update')} ${held === 1 ? 'has' : 'have'} conflicts or failing checks; open ${held === 1 ? 'it' : 'them'} to review.` : ''}`;
-  return `<button class="btn pri" data-do="mergeDependabot" title="${esc(tip)}" ${h.busy ? 'disabled' : ''}>${I.merge}<span class="long">Merge ${count(ready.length, 'Dependabot update')}</span><span class="short">Merge ${count(ready.length, 'update')}</span></button>`;
+  const tip = `Approves and merges ${ready.map((p) => (multi(h) ? `${short(p.repo)}#${p.number}` : `#${p.number}`)).join(', ')}, one at a time.${held ? ` ${plural(held, 'other Dependabot update')} ${held === 1 ? 'has' : 'have'} conflicts or failing checks; open ${held === 1 ? 'it' : 'them'} to review.` : ''}`;
+  return `<button class="btn pri" data-do="mergeDependabot" title="${esc(tip)}" ${h.busy ? 'disabled' : ''}>${I.merge}<span class="long">Merge ${plural(ready.length, 'Dependabot update')}</span><span class="short">Merge ${plural(ready.length, 'update')}</span></button>`;
 }
 
 /* ---------- PR ---------- */
@@ -402,7 +402,7 @@ function reviewPanel(pr: PrDetail, h: HostState): string {
   const held = h.drafts.filter((d) => d.from === 'you').length;
   const agent = h.drafts.filter((d) => d.from === 'agent').length;
   const f = openFindings(pr);
-  const warn = event === 'APPROVE' && (f.p0 || f.p1) ? `<p class="rwarn">${I.alert}${[f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ')} ${f.p0 + f.p1 === 1 ? 'finding is' : 'findings are'} still open.</p>` : '';
+  const warn = event === 'APPROVE' && (f.p0 || f.p1) ? `<p class="rwarn">${I.alert}${stillOpen(f)}.</p>` : '';
   const radios = EVENTS.map((e) => {
     const off = own && e.event !== 'COMMENT';
     return `<label class="rv-opt ${off ? 'off' : ''}"><input type="radio" name="revent" value="${e.event}" ${e.event === event ? 'checked' : ''} ${off ? 'disabled' : ''}><span><b>${e.label}</b><span class="sub">${off ? 'Not on your own pull request.' : e.note}</span></span></label>`;
@@ -501,7 +501,6 @@ function checkRow(r: CheckRun): string {
     <span class="res">${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ''}${fail ? `<button class="btn sm fix" data-fix="${esc(r.name)}" title="Send the failure to your AI agent to diagnose and fix">${I.spark}Fix with agent</button>` : ''}${r.url ? `<button class="btn sm" data-ext="${esc(r.url)}">${fail ? 'Open log' : 'Details'}${I.ext}</button>` : ''}</span></div>${why}</div>`;
 }
 
-/** Failures and running checks in full; passing ones folded into one line, like GitHub's merge box. */
 /** The whole stack this PR is in, bottom first, so you can move along it. Nothing when it stands alone. */
 function stackNav(pr: PrDetail): string {
   const rows = stackOf(pr, host?.queue ?? []);
@@ -736,25 +735,12 @@ function compose(pr: PrDetail): string {
  * or answered (with Ask again).
  */
 function actionState(pr: PrDetail, a: CommentAction, i: number, h: HostState): string {
-  const asked = lastComment(pr.conversation, (c) => c.author === h.user && c.text.trim() === a.comment.trim());
-  const reply = a.reviewer ? lastReplyFrom(pr.conversation, a.reviewer) : null;
+  const { asked, reply } = askAndReply(pr.conversation, a, h.user);
   const replied = reply && (!asked || Date.parse(reply.createdAt) >= Date.parse(asked.createdAt));
   const btn = (label: string, cls: string) => `<button class="btn sm ${cls}" data-action="${i}" ${h.busy ? 'disabled' : ''} title="Posts “${esc(a.comment)}”">${esc(label)}</button>`;
   if (replied) return `<span class="act"><span class="sub">${I.check}${esc(who(reply!.author))} replied ${ago(reply!.createdAt)} ago</span>${btn('Ask again', 'link-ish')}</span>`;
   if (asked && a.reviewer) return `<span class="act"><span class="sub"><span class="spin sm"></span>Asked ${ago(asked.createdAt)} ago · waiting for a reply</span></span>`;
   return `<span class="act">${btn(a.label, 'fix')}</span>`;
-}
-
-function lastComment(items: ConversationItem[], match: (c: Comment) => boolean): Comment | null {
-  const all = items.flatMap((it) => (it.kind === 'thread' ? it.comments : [it.comment])).filter(match);
-  return all.sort((x, y) => Date.parse(y.createdAt) - Date.parse(x.createdAt))[0] ?? null;
-}
-
-/** The latest comment from an account; "chatgpt-codex-connector" matches its bot login too. */
-function lastReplyFrom(items: ConversationItem[], reviewer: string): Comment | null {
-  const who = (s: string) => s.toLowerCase().replace(/\[bot\]$/, '');
-  const mine = items.flatMap((it) => (it.kind === 'thread' ? it.comments : [it.comment])).filter((c) => who(c.author) === who(reviewer));
-  return mine.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0] ?? null;
 }
 
 function description(pr: PrDetail): string {
@@ -808,9 +794,6 @@ function convItem(it: ConversationItem, firstNew = false): string {
   return `<article class="ci thread"${anchor} data-thread-id="${esc(it.id)}"><div class="cih">${I.com}${sevChip(it.severity)}<button class="link mono" data-goto="${esc(it.id)}" title="Show it in the diff">${esc(where)}</button>${state}${it.outdated ? '<span class="pill">Outdated</span>' : ''}${fix}</div>
     ${it.comments.map((c) => comment(c, '')).join('')}</article>`;
 }
-
-/** Bots by their product name: "Codex", not "chatgpt-codex-connector". */
-const who = (login: string) => (/codex/i.test(login) ? 'Codex' : login.replace(/\[bot\]$/, ''));
 
 function comment(c: Comment, badge: string): string {
   return `<div class="cm ${c.isNew ? 'new' : ''}"><div class="cmh"><b title="${esc(c.author)}">${esc(who(c.author))}</b>${badge}<span class="when">${ago(c.createdAt)} ago</span>${c.isNew ? '<span class="newtag">New</span>' : ''}
@@ -932,6 +915,8 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
       // A re-review opens the conversation on your own threads: what became of what you asked for.
       view = { ...view, pr: prKey(pr), file: null, onlyNew: false, step: start, menu: null, reviewEvent: null, composer: null, finding: null, part: null, cardOpen: false, conv: isReReview(pr) ? 'mine' : 'all' };
       vscode.setState(view);
+      // Another PR's comments won't be shown again soon: don't keep their cleaned HTML for the whole session.
+      cleaned.clear();
     }
     host = msg.state;
     render();
