@@ -1,8 +1,9 @@
 import DOMPurify from 'dompurify';
 import { conversationCounts, startedAt } from '../src/conversation';
-import { parentOf, stackOf, stacks, type StackRow } from '../src/stacks';
+import { mergeTree, parentOf, stackOf, stacks, type StackRow, type TreeRow } from '../src/stacks';
+import { parseKey, prKey } from '../src/protocol';
 import type { CheckRun, Comment, CommentAction, ConversationItem, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
-import { bulkMergeable, isDependabot, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
+import { bulkMergeable, byPriority, isDependabot, priority, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
 
 // The webview only renders. Everything it knows comes from the host's state messages;
 // what it remembers on its own is view state (filter, step, open file).
@@ -13,14 +14,16 @@ const vscode = acquireVsCodeApi();
 
 type Filter = 'all' | Bucket;
 type Step = 'overview' | 'checks' | 'files';
-interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: number | null; sel: number; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; menu: 'checklist' | 'methods' | null }
+interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; menu: 'checklist' | 'methods' | null }
 
 let host: HostState | null = null;
 /** True while the reviewer moves through the queue with j/k; a mouse move hides the cursor again. */
 let kbd = false;
-let view: View = { filter: 'all', showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
+let view: View = { filter: 'all', repo: '', showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
 // State saved by older versions named the files page "review".
 if (!['overview', 'checks', 'files'].includes(view.step)) view.step = 'files';
+// Older versions saved a bare PR number; keys are owner/name#number now.
+if (typeof view.pr !== 'string') view.pr = null;
 const send = (msg: FromWebview) => vscode.postMessage(msg);
 const app = document.getElementById('app')!;
 
@@ -41,6 +44,7 @@ const I = {
   alert: svg('M12 4l9 16H3zM12 10v4M12 17h.01'),
   com: svg('M4 5h16v11H9l-5 4z'),
   minus: svg('M6 12h12'),
+  globe: svg('M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18'),
   stack: svg('M6 4v10a3 3 0 0 0 3 3h9M6 9h6M15 14l3 3-3 3'),
   down: svg('M7 10l5 5 5-5', 'ico caretico'),
   doc: svg('M7 4h7l4 4v12H7zM14 4v4h4M10 12h5M10 16h5'),
@@ -63,11 +67,11 @@ function save(patch: Partial<View>): void {
 }
 
 /* ---------- Queue ---------- */
+/** The queue spans more than one repo: rows say which, and a number alone needs its repo. */
+const multi = (h: HostState) => new Set(h.queue.map((p) => p.repo)).size > 1;
+const short = (repo: string) => repo.split('/')[1] ?? repo;
+
 const bucket = (p: PrSummary): Bucket => prStatus(p).bucket;
-function urgency(p: PrSummary): number {
-  const s = prStatus(p);
-  return { needs: s.tone === 'bad' ? 0 : 1, mine: s.who === 'you' ? 1 : 3, approved: 2, waiting: 3, merged: 9 }[s.bucket];
-}
 const PILL: Record<Tone, string> = { ok: 'ok', warn: 'need', bad: 'bad', run: 'run', muted: '' };
 
 /** Checks as a small icon by the title, like GitHub's list; the count is in the tooltip. */
@@ -94,12 +98,12 @@ function listStatus(p: PrSummary): string {
 
 /** The rows in the order they're shown, so j/k and Enter follow the screen in either layout. */
 function visibleQueue(h: HostState): PrSummary[] {
-  const byNeed = (a: PrSummary, b: PrSummary) => urgency(a) - urgency(b) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+  const byNeed = byPriority;
   if (view.layout === 'stacks') {
     const s = stacks(h.queue);
-    return [...s.stacks.flatMap((rows) => rows.map((r) => r.pr)), ...s.alone.sort(byNeed)];
+    return [...s.stacks.flatMap((rows) => mergeTree(rows, h.queue).rows.map((r) => r.pr)), ...s.alone.sort(byNeed)].filter((p) => !view.repo || p.repo === view.repo);
   }
-  return h.queue.filter((p) => view.filter === 'all' || bucket(p) === view.filter).sort(byNeed);
+  return h.queue.filter((p) => (view.filter === 'all' || bucket(p) === view.filter) && (!view.repo || p.repo === view.repo)).sort(byNeed);
 }
 
 const EMPTY: Record<Filter, string> = {
@@ -122,23 +126,68 @@ function reviewNote(p: PrSummary): string {
 }
 
 /** One PR row. In the Stacks layout it's indented under the PR it's stacked on. */
-function row(p: PrSummary, i: number, h: HostState, depth = 0): string {
+function row(p: PrSummary, i: number, h: HostState, depth = 0, inStack = false, graph = '', chip = ''): string {
   const parent = view.layout === 'list' ? parentOf(p, h.queue) : null;
   const asked = p.reviewRequested && !p.myReview ? '<span class="chip ask">Review requested</span>' : '';
-  return `<button class="qrow ${kbd && i === view.sel ? 'sel' : ''} ${depth ? 'nested' : ''}" data-open="${p.number}" style="--depth:${depth}">
-      <span class="num">#${p.number}</span>
-      <span class="t"><span class="tl"><b>${esc(p.title)}</b>${checksIcon(p)}</span><span class="sub"><span class="diffstat"><span class="a">+${p.additions}</span> <span class="d">−${p.deletions}</span></span><span class="${p.mine ? 'you' : ''}">${p.mine ? 'you' : esc(p.author)}</span>${parent ? `<span class="on">on #${parent.number}</span>` : ''}${reviewNote(p)}</span></span>
-      ${asked}<span class="st">${listStatus(p)}</span><span class="when" title="Updated ${ago(p.updatedAt)} ago">${ago(p.updatedAt)}</span></button>`;
+  return `<button class="qrow ${kbd && i === view.sel ? 'sel' : ''} ${depth ? 'nested' : ''}" data-open="${esc(prKey(p))}" style="--depth:${depth}">
+      ${graph}<span class="num">#${p.number}</span>
+      <span class="t"><span class="tl"><b>${esc(p.title)}</b>${checksIcon(p)}</span><span class="sub">${multi(h) && !inStack ? `<span class="rp" title="${esc(p.repo)}">${esc(short(p.repo))}</span>` : ''}<span class="diffstat"><span class="a">+${p.additions}</span> <span class="d">−${p.deletions}</span></span><span class="${p.mine ? 'you' : ''}">${p.mine ? 'you' : esc(p.author)}</span>${parent ? `<span class="on">on #${parent.number}</span>` : ''}${reviewNote(p)}</span></span>
+      ${chip}${asked}<span class="st">${listStatus(p)}</span><span class="when" title="Updated ${ago(p.updatedAt)} ago">${ago(p.updatedAt)}</span></button>`;
 }
 
-/** The Stacks layout: each stack as a tree in merge order, then the PRs that stand alone. */
+/** One row's slice of a merge tree: the lines passing by or joining, and this PR's dot. */
+function graphCell(t: TreeRow, lanes: number): string {
+  const tone = prStatus(t.pr).tone;
+  const parts = [
+    ...t.through.map((l) => `<i class="gl full" style="--l:${l}"></i>`),
+    t.up ? `<i class="gl top" style="--l:${t.lane}"></i>` : '',
+    `<i class="gl bot" style="--l:${t.lane}"></i>`,
+    ...t.joins.map((l) => `<i class="gj" style="--l:${l};--to:${t.lane}"></i>`),
+    `<i class="gd ${tone} ${t.pr.isDraft ? 'draft' : ''}" style="--l:${t.lane}"></i>`,
+  ];
+  return `<span class="graph" style="--lanes:${lanes}" aria-hidden="true">${parts.join('')}</span>`;
+}
+
+/**
+ * The Stacks layout: each stack as a merge tree, like a git graph. Newest PRs on top, each above the PR it's
+ * stacked on, branches in their own columns, all flowing down into the base branch; the bottom PR merges next.
+ * Then the PRs that stand alone.
+ */
 function stackedList(h: HostState): string {
-  const { stacks: all, alone } = stacks(h.queue);
+  const { stacks: all, alone } = stacks(view.repo ? h.queue.filter((p) => p.repo === view.repo) : h.queue);
   let i = 0;
-  const tree = (rows: StackRow[]) => `<div class="stack"><div class="stackh">${I.stack}<span>${esc(rows[0]!.pr.author === host?.user ? 'Your' : `${rows[0]!.pr.author}’s`)} stack · ${plural(rows.length, 'PR')}</span><span class="mono">into ${esc(rows[0]!.pr.baseRef)}</span></div><div class="list">${rows.map((r) => row(r.pr, i++, h, r.depth)).join('')}</div></div>`;
+  const tree = (rows: StackRow[]) => {
+    const root = rows[0]!.pr;
+    const t = mergeTree(rows, h.queue);
+    const who = root.author === host?.user ? 'Your' : `${root.author}’s`;
+    const body = t.rows.map((r) => row(r.pr, i++, h, 0, true, graphCell(r, t.lanes), r.pr === root && !root.isDraft ? '<span class="chip next" title="The bottom of the stack merges before the PRs above it">Merges first</span>' : '')).join('');
+    const base = `<div class="trunk"><span class="graph" style="--lanes:${t.lanes}" aria-hidden="true"><i class="gl top" style="--l:0"></i><i class="gd base" style="--l:0"></i></span><span class="mono">${esc(root.baseRef)}</span><span class="sub">merges bottom up</span></div>`;
+    return `<div class="stack"><div class="stackh">${I.stack}<span>${esc(who)} stack · ${plural(rows.length, 'PR')}</span>${multi(h) ? `<span class="mono">${esc(root.repo)}</span>` : ''}</div><div class="list tree">${body}${base}</div></div>`;
+  };
   const rest = visibleQueue(h).filter((p) => alone.includes(p));
   return `${all.map(tree).join('') || '<div class="empty">No stacked pull requests. A PR is stacked when its base is another PR’s branch.</div>'}
     ${rest.length ? `<span class="lbl stacklbl">Not stacked · ${rest.length}</span><div class="list">${rest.map((p) => row(p, i++, h)).join('')}</div>` : ''}`;
+}
+
+/** With several repos in view, narrow the list to one. */
+function repoFilter(h: HostState): string {
+  if (!multi(h)) return '';
+  const repos = [...new Set(h.queue.map((p) => p.repo))].sort();
+  if (view.repo && !repos.includes(view.repo)) view.repo = '';
+  return `<select id="repofilter" class="repofilter" aria-label="Repository"><option value="">All repos · ${repos.length}</option>${repos.map((r) => `<option value="${esc(r)}" ${r === view.repo ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>`;
+}
+
+/** "All", split by who acts next: your turn first, then what waits on someone else (dimmed), then merged. */
+function sections(rows: PrSummary[], h: HostState): string {
+  const parts: { key: 'you' | 'others' | 'merged'; label: string }[] = [
+    { key: 'you', label: 'Your turn' }, { key: 'others', label: 'Waiting on others' }, { key: 'merged', label: 'Merged' },
+  ];
+  let i = 0;
+  return parts.map(({ key, label }) => {
+    const prs = rows.filter((p) => priority(p).section === key);
+    if (!prs.length) return key === 'you' ? `<span class="lbl sect">${label}</span><div class="list"><div class="empty">${I.check}You’re all caught up.</div></div>` : '';
+    return `<span class="lbl sect">${label} · ${prs.length}</span><div class="list ${key === 'you' ? '' : 'later'}">${prs.map((p) => row(p, i++, h)).join('')}</div>`;
+  }).join('');
 }
 
 function queue(h: HostState): string {
@@ -153,12 +202,12 @@ function queue(h: HostState): string {
   const empty = h.loading ? '<div class="empty"><span class="spin"></span>Loading pull requests</div>' : `<div class="empty">${view.filter === 'needs' ? I.check : ''}${EMPTY[view.filter]}</div>`;
   const layout = `<div class="seg layout" role="group" aria-label="Layout"><button data-layout="list" aria-pressed="${!stacked}" title="List by what each PR needs">List</button><button data-layout="stacks" aria-pressed="${stacked}" title="Stacked PRs as trees, in merge order">${I.stack}Stacks</button></div>`;
   return `<div class="crumb"><span class="home cur">${I.inbox}Review queue</span>
-      <button class="reposw" data-do="switchRepo" title="Switch repository">${esc(h.repo)}${I.down}</button>${h.sample ? '<span class="chip">Sample data</span>' : ''}
+      <button class="reposw ${h.scope.startsWith('Everything') ? 'all' : ''}" data-do="switchRepo" title="Choose what to review">${h.scope.startsWith('Everything') ? I.globe : ''}${esc(h.scope)}${I.down}</button>${h.sample ? '<span class="chip">Sample data</span>' : ''}
       <div class="end">${bulkButton(h)}<button class="btn icon" data-do="refresh" aria-label="Refresh" title="Refresh (r)">${I.rerun}</button><button class="btn icon" data-do="keys" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button></div></div>
     ${h.notice ? `<div class="note" role="status">${I.check}<span>${esc(h.notice)}</span><button class="btn sm" data-do="dismissNotice">Dismiss</button></div>` : ''}
     <div class="pad">
-      <div class="toolbar">${stacked ? '' : `<div class="seg filters" role="group" aria-label="Filter">${f('all', 'All')}${f('needs', 'Needs you')}${mine}${f('waiting', 'Waiting on others')}${f('approved', 'Approved')}${f('merged', 'Merged')}</div>`}${layout}</div>
-      ${stacked ? (h.loading && !h.queue.length ? empty : stackedList(h)) : `<div class="list">${rows.map((p, i) => row(p, i, h)).join('') || empty}</div>`}
+      <div class="toolbar">${stacked ? '' : `<div class="seg filters" role="group" aria-label="Filter">${f('all', 'All')}${f('needs', 'Needs you')}${mine}${f('waiting', 'Waiting on others')}${f('approved', 'Approved')}${f('merged', 'Merged')}</div>`}${repoFilter(h)}${layout}</div>
+      ${stacked ? (h.loading && !h.queue.length ? empty : stackedList(h)) : view.filter === 'all' && rows.length ? sections(rows, h) : `<div class="list">${rows.map((p, i) => row(p, i, h)).join('') || empty}</div>`}
     </div>`;
 }
 
@@ -168,7 +217,7 @@ function bulkButton(h: HostState): string {
   const ready = bulkMergeable(h.queue);
   if (!ready.length) return '';
   const held = h.queue.filter((p) => isDependabot(p) && p.state === 'open' && !ready.includes(p)).length;
-  const tip = `Approves and merges ${ready.map((p) => `#${p.number}`).join(', ')}, one at a time.${held ? ` ${count(held, 'other Dependabot update')} ${held === 1 ? 'has' : 'have'} conflicts or failing checks; open ${held === 1 ? 'it' : 'them'} to review.` : ''}`;
+  const tip = `Approves and merges ${ready.map((p) => (multi(h) ? `${short(p.repo)}#${p.number}` : `#${p.number}`)).join(', ')}, one at a time.${held ? ` ${count(held, 'other Dependabot update')} ${held === 1 ? 'has' : 'have'} conflicts or failing checks; open ${held === 1 ? 'it' : 'them'} to review.` : ''}`;
   return `<button class="btn pri" data-do="mergeDependabot" title="${esc(tip)}" ${h.busy ? 'disabled' : ''}>${I.merge}<span class="long">Merge ${count(ready.length, 'Dependabot update')}</span><span class="short">Merge ${count(ready.length, 'update')}</span></button>`;
 }
 
@@ -177,14 +226,14 @@ function crumb(pr: PrDetail, h: HostState): string {
   // Two rows, like GitHub: the title gets its own line (wrapping to two), the details and the decision share the next.
   const meta = `<span class="who">${esc(pr.author)}</span> wants to merge <span class="br head" title="${esc(pr.headRef)}">${esc(pr.headRef)}</span> into <span class="br">${esc(pr.baseRef)}</span>${parentLink(pr)}<span class="diffstat"><span class="a">+${pr.additions}</span> <span class="d">−${pr.deletions}</span></span>`;
   return `<div class="crumb prh"><button class="back" data-do="back" aria-label="Back to the review queue" title="Back to the review queue (Esc)">${I.back}</button>
-    <div class="hd"><div class="r1"><button class="ttl" data-ext="${esc(pr.url)}" title="Open on GitHub"><b>${esc(pr.title)}</b> <span class="num">#${pr.number}</span>${I.ext}</button></div>
+    <div class="hd"><div class="r1">${host && multi(host) ? `<span class="rpo" title="Repository">${esc(pr.repo)}</span>` : ''}<button class="ttl" data-ext="${esc(pr.url)}" title="Open on GitHub"><b>${esc(pr.title)}</b> <span class="num">#${pr.number}</span>${I.ext}</button></div>
       <div class="r2"><span class="meta">${meta}</span><div class="end">${pr.state === 'merged' ? `<span role="status">${statusPill(pr)}</span>` : `${summary(pr, h)}${decision(pr, h)}`}</div></div></div></div>${pr.state === 'merged' ? '' : blockBar(pr)}`;
 }
 
 /** "(#101)" after a stacked PR's base branch, opening the PR it's stacked on. */
 function parentLink(pr: PrDetail): string {
   const parent = parentOf(pr, host?.queue ?? []);
-  return parent ? `<button class="link" data-open="${parent.number}" title="Stacked on #${parent.number}: ${esc(parent.title)}">#${parent.number}</button>` : '';
+  return parent ? `<button class="link" data-open="${esc(prKey(parent))}" title=""Stacked on #${parent.number}: ${esc(parent.title)}">#${parent.number}</button>` : '';
 }
 
 const TONE_ICON: Record<Tone, string> = { ok: I.check, bad: I.x, warn: I.alert, run: '<span class="spin sm"></span>', muted: I.minus };
@@ -207,7 +256,7 @@ function checklist(pr: PrDetail, h: HostState): string {
     const act = it.action === 'updateBranch' ? `<button class="btn sm" data-do="updateBranch" ${h.busy ? 'disabled' : ''}>${h.busy === 'update' ? '<span class="spin sm"></span>' : ''}Update branch</button>`
       : it.action === 'showChecks' && it.tone !== 'ok' ? '<button class="link" data-step="checks">Show checks</button>'
       : it.action === 'openThreads' ? '<button class="link" data-do="threads">Show</button>'
-      : it.action === 'openPr' && it.pr ? `<button class="link" data-open="${it.pr}">Open #${it.pr}</button>`
+      : it.action === 'openPr' && it.pr ? `<button class="link" data-open="${esc(it.pr)}">Open #${parseKey(it.pr)?.number ?? ''}</button>`
       : it.action === 'fixConflicts' ? `<button class="btn sm fix" data-do="fixConflicts">${I.spark}Fix with agent</button>` : '';
     return `<li class="ck ${it.tone}">${TONE_ICON[it.tone]}<span class="ckt">${esc(it.text)}</span>${act}</li>`;
   }).join('');
@@ -299,8 +348,8 @@ function stackNav(pr: PrDetail): string {
   if (rows.length < 2) return '';
   const items = rows.map((r) => {
     const st = prStatus(r.pr);
-    const here = r.pr.number === pr.number;
-    return `<li style="--depth:${r.depth}"><button class="snode ${here ? 'here' : ''}" ${here ? 'aria-current="true"' : `data-open="${r.pr.number}"`} title="#${r.pr.number} ${esc(r.pr.title)} · ${esc(st.label)}"><span class="sdot ${st.tone}"></span><span class="num">#${r.pr.number}</span><span class="stt">${esc(r.pr.title)}</span></button></li>`;
+    const here = prKey(r.pr) === prKey(pr);
+    return `<li style="--depth:${r.depth}"><button class="snode ${here ? 'here' : ''}" ${here ? 'aria-current="true"' : `data-open="${esc(prKey(r.pr))}"`} title="#${r.pr.number} ${esc(r.pr.title)} · ${esc(st.label)}"><span class="sdot ${st.tone}"></span><span class="num">#${r.pr.number}</span><span class="stt">${esc(r.pr.title)}</span></button></li>`;
   }).join('');
   return `<div class="stacknav" title="Stacked PRs merge bottom first"><span class="lbl">${I.stack}Stack</span><span class="sbase mono">${esc(rows[0]!.pr.baseRef)}</span><ol>${items}</ol></div>`;
 }
@@ -484,10 +533,10 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
   const msg = e.data;
   if (msg.type === 'state') {
     const pr = msg.state.pr;
-    if (pr && pr.number !== view.pr) {
+    if (pr && prKey(pr) !== view.pr) {
       // First look, or new comments: start on Overview for the context. Otherwise pick up the files.
       const start: Step = !pr.seenBefore || conversationCounts(pr.conversation).fresh ? 'overview' : 'files';
-      view = { ...view, pr: pr.number, file: null, onlyNew: false, step: start, menu: null };
+      view = { ...view, pr: prKey(pr), file: null, onlyNew: false, step: start, menu: null };
       vscode.setState(view);
     }
     host = msg.state;
@@ -512,7 +561,8 @@ document.addEventListener('input', (e) => {
 
 document.addEventListener('change', (e) => {
   const t = e.target as HTMLInputElement | HTMLSelectElement;
-  if (t.id === 'method') save({ method: t.value as MergeMethod });
+  if (t.id === 'repofilter') save({ repo: (t as HTMLSelectElement).value, sel: 0 });
+  else if (t.id === 'method') save({ method: t.value as MergeMethod });
   else if (t instanceof HTMLInputElement && t.dataset.viewed) send({ type: 'setViewed', path: t.dataset.viewed, viewed: t.checked });
 });
 
@@ -536,7 +586,7 @@ document.addEventListener('click', (e) => {
   // An action picked from a menu closes it.
   if (view.menu && t.closest('.pop')) view.menu = null;
   const d = t.dataset;
-  if (d.open) send({ type: 'openPr', number: Number(d.open) });
+  if (d.open) send({ type: 'openPr', key: d.open });
   else if (d.filter) save({ filter: d.filter as Filter });
   else if (d.layout) save({ layout: d.layout as View['layout'], sel: 0 });
   else if (d.step) save({ step: d.step as Step });
@@ -603,7 +653,7 @@ document.addEventListener('keydown', (e) => {
       save({ sel: shown ? Math.min(rows.length - 1, Math.max(0, view.sel + step)) : view.sel });
       e.preventDefault();
     }
-    else if (k === 'Enter' && kbd && rows[view.sel] && !(e.target as HTMLElement).closest('button')) send({ type: 'openPr', number: rows[view.sel]!.number });
+    else if (k === 'Enter' && kbd && rows[view.sel] && !(e.target as HTMLElement).closest('button')) send({ type: 'openPr', key: prKey(rows[view.sel]!) });
     else if (k === 'r') send({ type: 'refresh' });
     return;
   }
@@ -612,10 +662,10 @@ document.addEventListener('keydown', (e) => {
   if (k === 'Escape') send({ type: 'back' });
   else if (k === 'j' || k === 'k') {
     if (!rows.length) return;
-    const at = rows.findIndex((p) => p.number === pr.number);
+    const at = rows.findIndex((p) => prKey(p) === prKey(pr));
     const next = rows[(at + (k === 'j' ? 1 : -1) + rows.length) % rows.length]!;
     view.sel = rows.indexOf(next);
-    send({ type: 'openPr', number: next.number });
+    send({ type: 'openPr', key: prKey(next) });
   } else if (k === 'n' || k === 'p') {
     const i = Math.max(0, pr.files.findIndex((f) => f.path === view.file));
     const f = pr.files[Math.min(pr.files.length - 1, Math.max(0, i + (k === 'n' ? 1 : -1)))];

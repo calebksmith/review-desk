@@ -34,20 +34,20 @@ describe('Controller', () => {
 
   it('remembers the head the reviewer saw', async () => {
     const { c, store } = setup();
-    await c.handle({ type: 'openPr', number: 52 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });
     expect(store.get('lastSeen:calebksmith/portfolio#52')).toBe('0b8e4f1');
   });
 
   it('marks a file viewed', async () => {
     const { c, last } = setup();
-    await c.handle({ type: 'openPr', number: 55 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#55' });
     await c.handle({ type: 'setViewed', path: 'src/lib/track.ts', viewed: true });
     expect(last().pr?.files.find((f) => f.path === 'src/lib/track.ts')?.viewed).toBe('viewed');
   });
 
   it('approves, then merges only after confirming', async () => {
     const { c, last, refuse, sent } = setup();
-    await c.handle({ type: 'openPr', number: 57 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#57' });
     await c.handle({ type: 'approve' });
     expect(last().pr?.myReview).toBe('approved');
     refuse();
@@ -58,7 +58,7 @@ describe('Controller', () => {
 
   it('merges with the method the reviewer picked, once confirmed', async () => {
     const { c, last, sent } = setup();
-    await c.handle({ type: 'openPr', number: 52 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });
     await c.handle({ type: 'approve' });
     await c.handle({ type: 'merge', method: 'rebase' });
     expect(sent.some((m) => m.type === 'toast' && m.text === 'Merged #52 into main')).toBe(true);
@@ -71,7 +71,7 @@ describe('Controller', () => {
   it('merges with a failing check only after a warning that names it', async () => {
     const asked: [string, string][] = [];
     const { c, last, sent, refuse } = setup(undefined, (q, a) => asked.push([q, a]));
-    await c.handle({ type: 'openPr', number: 55 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#55' });
     await c.handle({ type: 'approve' });
     refuse();
     await c.handle({ type: 'merge', method: 'squash' });
@@ -82,7 +82,7 @@ describe('Controller', () => {
 
   it('updates a branch that is behind its base, then reloads it', async () => {
     const { c, last } = setup();
-    await c.handle({ type: 'openPr', number: 57 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#57' });
     expect(last().pr?.mergeState).toBe('behind');
     await c.handle({ type: 'updateBranch' });
     expect(last().pr?.mergeState).toBe('clean');
@@ -91,14 +91,14 @@ describe('Controller', () => {
 
   it('shows an error instead of throwing', async () => {
     const { c, last } = setup();
-    await c.handle({ type: 'openPr', number: 999 });
-    expect(last().error).toBe('No sample PR #999');
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#999' });
+    expect(last().error).toBe('No sample PR calebksmith/portfolio#999');
   });
 
   it('marks comments posted since the last look as new', async () => {
     const { c, store, last } = setup();
     store.set('lastSeenAt:calebksmith/portfolio#55', new Date(Date.now() - 30 * 60_000).toISOString());
-    await c.handle({ type: 'openPr', number: 55 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#55' });
     const comments = last().pr!.conversation.flatMap((it) => (it.kind === 'thread' ? it.comments : [it.comment]));
     expect(comments.filter((x) => x.isNew).map((x) => x.author)).toEqual(['claude', 'claude']);
     await c.handle({ type: 'refresh' });
@@ -107,7 +107,7 @@ describe('Controller', () => {
 
   it('marks nothing new the first time a PR is opened', async () => {
     const { c, last } = setup();
-    await c.handle({ type: 'openPr', number: 55 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#55' });
     expect(JSON.stringify(last().pr!.conversation)).not.toContain('"isNew":true');
   });
 
@@ -133,7 +133,7 @@ describe('Controller', () => {
     await c.handle({ type: 'ready' });
     const source = (c as unknown as { source: SampleSource }).source;
     const real = source.getPr.bind(source);
-    source.getPr = async (n, s) => ({ ...(await real(n, s)), mergeable: false });
+    source.getPr = async (r, n, s) => ({ ...(await real(r, n, s)), mergeable: false });
     await c.handle({ type: 'mergeDependabot' });
     expect(last().notice).toBe('Merged nothing. Skipped #60 (conflicts with its base).');
   });
@@ -149,7 +149,7 @@ describe('Controller', () => {
 
   it('hands a failing check to the agent and says where the prompt went', async () => {
     const { c, sent, prompts } = setup();
-    await c.handle({ type: 'openPr', number: 55 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#55' });
     await c.handle({ type: 'fixWithAgent', check: 'Tests' });
     expect(prompts).toHaveLength(1);
     expect(prompts[0]).toContain('The "Tests" check is failing');
@@ -159,7 +159,7 @@ describe('Controller', () => {
 
   it('posts a comment and shows it in the conversation', async () => {
     const { c, last, sent } = setup();
-    await c.handle({ type: 'openPr', number: 57 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#57' });
     await c.handle({ type: 'comment', body: '  Looks good, thanks.  ' });
     const latest = last().pr!.conversation.at(-1)!;
     expect(latest).toMatchObject({ kind: 'comment', comment: { author: 'calebksmith', text: 'Looks good, thanks.' } });
@@ -169,7 +169,7 @@ describe('Controller', () => {
 
   it('ignores an empty comment', async () => {
     const { c, last } = setup();
-    await c.handle({ type: 'openPr', number: 57 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#57' });
     const before = last().pr!.conversation.length;
     await c.handle({ type: 'comment', body: '   ' });
     expect(last().pr!.conversation).toHaveLength(before);
@@ -177,7 +177,7 @@ describe('Controller', () => {
 
   it('sends an unresolved line comment to the agent', async () => {
     const { c, prompts } = setup();
-    await c.handle({ type: 'openPr', number: 52 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });
     await c.handle({ type: 'fixThread', id: 'T_52_1' });
     expect(prompts[0]).toContain('review comment on src/components/WorkCard.tsx:44');
     expect(prompts[0]).toContain('> calebksmith: Should the medal name sit under the summary instead?');
@@ -185,21 +185,21 @@ describe('Controller', () => {
 
   it('closes a Dependabot PR with the command picked, then leaves it out of the queue', async () => {
     const { c, last, sent, choosePick } = setup();
-    await c.handle({ type: 'openPr', number: 61 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#61' });
     choosePick(0);
     await c.handle({ type: 'closeDependabot' });
     expect(last().view).toBe('queue');
     expect(last().queue.some((p) => p.number === 61)).toBe(false);
     expect(sent.some((m) => m.type === 'toast' && m.text === 'Asked Dependabot to close #61 (“Ignore eslint 10”).')).toBe(true);
-    await c.handle({ type: 'openPr', number: 61 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#61' });
     expect(last().pr!.conversation.at(-1)).toMatchObject({ comment: { text: '@dependabot ignore this major version' } });
   });
 
   it('tells the panel whether the PR was opened before, so it can start on Overview the first time', async () => {
     const { c, last } = setup();
-    await c.handle({ type: 'openPr', number: 57 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#57' });
     expect(last().pr!.seenBefore).toBe(false);
-    await c.handle({ type: 'openPr', number: 57 });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#57' });
     expect(last().pr!.seenBefore).toBe(true);
   });
 
@@ -220,9 +220,20 @@ describe('Controller', () => {
     const store = new Map<string, unknown>();
     const host = { post: (m: never) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async () => 'clipboard' as const, choose: async () => undefined, switchRepository: () => {} };
     const c = new Controller(new SampleSource('team'), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host);
-    await c.handle({ type: 'openPr', number: 102 });
+    await c.handle({ type: 'openPr', key: 'acme/storefront#102' });
     await c.handle({ type: 'approve' });
     expect(sent.some((m) => m.type === 'toast' && m.text === 'Approved #102')).toBe(true);
     expect((c.snapshot.pr as { reviewDecision: string }).reviewDecision).toBe('approved');
+  });
+
+  it('tells PRs with the same number in different repos apart', async () => {
+    const store = new Map<string, unknown>();
+    const host = { post: () => {}, openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async () => 'clipboard' as const, choose: async () => undefined, switchRepository: () => {} };
+    const c = new Controller(new SampleSource('team'), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host);
+    await c.handle({ type: 'openPr', key: 'acme/storefront#102' });
+    expect(c.snapshot.pr?.title).toBe('Add the login API');
+    await c.handle({ type: 'openPr', key: 'acme/payments-api#102' });
+    expect(c.snapshot.pr?.title).toBe('Rotate API signing keys');
+    expect([...store.keys()].filter((k) => k.startsWith('lastSeenAt:')).sort()).toEqual(['lastSeenAt:acme/payments-api#102', 'lastSeenAt:acme/storefront#102']);
   });
 });

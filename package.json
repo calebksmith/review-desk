@@ -15,7 +15,7 @@
       { "command": "reviewDesk.open", "title": "Open review queue", "category": "Review Desk", "icon": "$(preview)" },
       { "command": "reviewDesk.openSample", "title": "Open with sample data", "category": "Review Desk" },
       { "command": "reviewDesk.openTeamSample", "title": "Open with team sample data", "category": "Review Desk" },
-      { "command": "reviewDesk.switchRepository", "title": "Switch repository", "category": "Review Desk", "icon": "$(repo)" },
+      { "command": "reviewDesk.switchRepository", "title": "Choose what to review", "category": "Review Desk", "icon": "$(repo)" },
       { "command": "reviewDesk.mergeDependabot", "title": "Merge passing Dependabot updates", "category": "Review Desk", "icon": "$(git-merge)" },
       { "command": "reviewDesk.signOut", "title": "Use a different GitHub account", "category": "Review Desk" },
       { "command": "reviewDesk.connect", "title": "Sign in with GitHub", "category": "Review Desk" },
@@ -58,7 +58,13 @@
         "reviewDesk.repository": {
           "type": "string",
           "default": "",
-          "markdownDescription": "The repository to review, as `owner/name`. Leave empty to use the open folder's GitHub remote. When several folders are open, Review Desk asks which one and remembers your pick."
+          "markdownDescription": "Review only this repository, as `owner/name`. Leave empty to review **everything that involves you** across GitHub (plus `#reviewDesk.repositories#` in full), or pick with **Review Desk: Choose what to review**."
+        },
+        "reviewDesk.repositories": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Repositories to always show in full, as `owner/name`. **Everything involving you** lists every open PR in these, not just the ones that involve you."
         },
         "reviewDesk.label": {
           "type": "string",

@@ -24,7 +24,9 @@ npm install
 npm run build
 ```
 
-Then press F5 in VS Code to open an Extension Development Host. Click the Review Desk icon in the left rail: the **Pull requests** list groups PRs by what they need, with a badge for how many need you, and marks the one open in the panel. Click one to open it in the full panel, or run **Review Desk: Open review queue** from the Command Palette. The list's title bar has Open review queue, Refresh and Switch repository; the Needs you group offers the one-click Dependabot merge when updates qualify. It signs in with your GitHub account in VS Code and reviews the open folder's GitHub repo. If several folders are open, it asks which repo to review and remembers your choice for that workspace. To review a different one, click the repo name at the top of the queue, the repo icon in the sidebar, or run **Review Desk: Switch repository**: pick an open folder's repo or type any `owner/name`.
+Then press F5 in VS Code to open an Extension Development Host. Click the Review Desk icon in the left rail: the **Pull requests** list groups PRs by what they need, with a badge for how many need you, and marks the one open in the panel. Click one to open it in the full panel, or run **Review Desk: Open review queue** from the Command Palette. The list's title bar has Open review queue, Refresh and Switch repository; the Needs you group offers the one-click Dependabot merge when updates qualify. It signs in with your GitHub account in VS Code and reviews the open folder's GitHub repo. If several folders are open, it asks which repo to review and remembers your choice for that workspace. ## Everything in one view
+
+By default Review Desk shows **everything that involves you** across GitHub: PRs you opened, were asked to review, reviewed, commented on or were mentioned in, plus recently merged ones. Add repos to `reviewDesk.repositories` to see every open PR in them too. With several repos in view, rows show their repo and a repo filter appears. To look at one repo, click the scope at the top of the queue or the repo icon in the sidebar, or run **Review Desk: Choose what to review**, and pick an open folder's repo or type any `owner/name`.
 
 **Review Desk: Open with sample data** works without GitHub, and **Open with team sample data** shows a team: several developers, an agent and Dependabot, one approval required to merge, and two stacks of PRs. To see the UI in a browser instead, run `npm run preview` and open `.preview/index.html` (add `?theme=dark` for dark, `?sample=team` for the team).
 
@@ -34,13 +36,15 @@ To install it as a normal extension, run `npm run package` and install the `.vsi
 
 - **Your PRs, review requests and everyone else's.** PRs you opened have their own group, saying what's next ("Waiting on priya", "Changes requested", "Ready to merge"). Needs you holds other people's PRs that need your review, with **Review requested** where you were asked by name. Waiting on others holds PRs assigned to someone else.
 - **Required approvals.** The merge checklist says who approved and who's still asked, and Merge waits for the approvals GitHub requires. You can't approve your own PR, so it goes straight to Merge.
-- **Stacks.** A PR whose base is another open PR's branch is stacked on it. **Stacks** in the queue shows each stack as a tree in merge order; a stacked PR's rail shows its whole stack, its header links the PR below, and Merge waits until that one has merged.
+- **Stacks.** A PR whose base is another open PR's branch is stacked on it. **Stacks** in the queue draws each stack as a merge tree, like a git graph: newest PRs on top, each above the PR it builds on, forks in their own lanes, all flowing into the base branch, with the bottom PR marked **Merges first**. A stacked PR's rail shows its whole stack, its header links the PR below, and Merge waits until that one has merged.
+- **What's your turn comes first.** **All** is split into **Your turn** (reviews asked of you by name first, then your own PRs that need you, then PRs nobody was assigned), **Waiting on others** (dimmed: changes requested, other reviewers, other people's approved PRs, which their authors merge) and **Merged**. The sidebar badge counts Your turn.
 
 ## Settings
 
 | Setting | What it does |
 | --- | --- |
-| `reviewDesk.repository` | Always review this `owner/name`. **Switch repository** updates it when it's set |
+| `reviewDesk.repository` | Review only this `owner/name`. Empty means everything that involves you. **Choose what to review** updates it when it's set |
+| `reviewDesk.repositories` | Repos to always show in full in the everything view |
 | `reviewDesk.label` | Only show PRs with this label, such as `review-desk` |
 | `reviewDesk.commentActions` | One-click comments in the Conversation tab, such as `[{ "label": "Ask Codex to review", "comment": "@codex review", "reviewer": "chatgpt-codex-connector" }]` |
 | `reviewDesk.agent` | Where **Fix with agent** sends a failure: `auto` (default), `claudeCode`, `chat` or `clipboard` |
@@ -60,6 +64,7 @@ The extension host talks to GitHub; the webview only renders. `src/controller.ts
 | `src/logs.ts` | The error lines from a failed GitHub Actions log |
 | `src/repos.ts` | Which repo to review: the setting, your last pick, or the folders that are open |
 | `src/protocol.ts` | Types shared by the host and the webview |
+| `src/scope.ts` | What the queue covers: one repo, or everything involving you plus repos in full |
 | `src/stacks.ts` | Which PRs are stacked on which, and in what order they merge |
 | `src/sidebar.ts` | How the sidebar groups and counts PRs |
 | `src/sample.ts`, `src/sample-team.ts` | Sample PRs for demos and tests: solo, and a team |

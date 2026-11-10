@@ -2,12 +2,13 @@ import type { MergeMethod, PrDetail, PrSummary } from './protocol';
 
 /** Where review data comes from: GitHub, or the built-in sample PRs. */
 export interface DataSource {
-  readonly repo: string;
+  /** What the queue covers, for the header: a repo, or "Everything involving you". */
+  readonly scope: string;
   readonly sample: boolean;
   viewer(): Promise<string>;
   listPrs(): Promise<PrSummary[]>;
   /** sinceSha is the head the reviewer last saw, so the source can diff what changed after it. */
-  getPr(number: number, sinceSha: string | null): Promise<PrDetail>;
+  getPr(repo: string, number: number, sinceSha: string | null): Promise<PrDetail>;
   setViewed(pr: PrDetail, path: string, viewed: boolean): Promise<void>;
   approve(pr: PrDetail): Promise<void>;
   merge(pr: PrDetail, method: MergeMethod): Promise<void>;

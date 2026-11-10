@@ -2,8 +2,9 @@ import * as vscode from 'vscode';
 import type { AgentRoute } from './agent';
 import { Controller, type Host } from './controller';
 import { GitHubSource } from './github';
-import type { CommentAction, FromWebview, PrSummary } from './protocol';
-import { defaultRepository, githubRepos, parseRepositoryInput } from './repos';
+import { prKey, type CommentAction, type FromWebview, type PrSummary } from './protocol';
+import { defaultScope, EVERYTHING_PICK, githubRepos, parseRepositoryInput } from './repos';
+import { EVERYTHING, scopeLabel, type Scope } from './scope';
 import { SampleSource } from './sample';
 import { needsYou, queueGroups, type QueueGroup } from './sidebar';
 import { parentOf } from './stacks';
@@ -29,8 +30,8 @@ export function activate(context: vscode.ExtensionContext): void {
     command('reviewDesk.connect', async () => {
       if (await ensureSource(context)) await tree.refresh();
     }),
-    command('reviewDesk.openPr', async (number: unknown) => {
-      if (typeof number === 'number' && (await ensureSource(context))) open(context, number);
+    command('reviewDesk.openPr', async (key: unknown) => {
+      if (typeof key === 'string' && (await ensureSource(context))) open(context, key);
     }),
     command('reviewDesk.openOnGitHub', async (item: unknown) => {
       if (item instanceof PrItem) await vscode.env.openExternal(vscode.Uri.parse(item.pr.url));
@@ -53,44 +54,53 @@ export function activate(context: vscode.ExtensionContext): void {
       open(context);
     }),
     command('reviewDesk.switchRepository', async () => {
-      const repo = await repository(context, true);
-      if (repo) { useSource(await githubSource(repo, false)); open(context); }
+      const scope = await chooseScope(context, true);
+      if (scope) { useSource(await githubSource(scope, false)); open(context); }
     }),
     command('reviewDesk.signOut', async () => {
-      const repo = await repository(context, false);
-      if (repo) { useSource(await githubSource(repo, true)); open(context); }
+      const scope = await chooseScope(context, false);
+      if (scope) { useSource(await githubSource(scope, true)); open(context); }
     }),
     view.onDidChangeVisibility((e) => { if (e.visible) void tree.refreshIfStale(); }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('reviewDesk.label')) void tree.refresh();
-      if (!e.affectsConfiguration('reviewDesk.repository')) return;
-      // Switch repository updates this setting itself and has already switched; only follow edits made elsewhere.
-      const want = vscode.workspace.getConfiguration('reviewDesk').get<string>('repository')?.trim();
-      if (want && want !== source?.repo) void connectQuietly(context);
+      if (!e.affectsConfiguration('reviewDesk.repository') && !e.affectsConfiguration('reviewDesk.repositories')) return;
+      // Choose what to review updates these settings itself and has already switched; only follow edits made elsewhere.
+      if (source && !source.sample && scopeLabel(currentScope(context)) !== source.scope) void connectQuietly(context);
     }),
   );
   void connectQuietly(context);
 }
 
-/** At startup: connect only if that needs no prompt (signed in, one obvious repo). Otherwise the sidebar offers sign-in. */
+/** The scope settings and the workspace's last pick point at, without asking. */
+function currentScope(context: vscode.ExtensionContext): Scope {
+  const settings = vscode.workspace.getConfiguration('reviewDesk');
+  return defaultScope(settings.get<string>('repository') ?? '', context.workspaceState.get<string>(REMEMBERED), fullRepos());
+}
+
+/** The repos to always show in full, from reviewDesk.repositories, cleaned up and without duplicates. */
+function fullRepos(): string[] {
+  const listed = vscode.workspace.getConfiguration('reviewDesk').get<string[]>('repositories') ?? [];
+  return [...new Set(listed.map((r) => parseRepositoryInput(String(r))).filter((r): r is string => !!r))];
+}
+
+/** At startup: connect only if that needs no prompt (already signed in). Otherwise the sidebar offers sign-in. */
 async function connectQuietly(context: vscode.ExtensionContext): Promise<void> {
   try {
-    const settings = vscode.workspace.getConfiguration('reviewDesk');
-    const repo = defaultRepository(settings.get<string>('repository') ?? '', context.workspaceState.get<string>(REMEMBERED), await openGitHubRepos());
-    const session = repo ? await vscode.authentication.getSession('github', SCOPES, { silent: true }) : undefined;
-    if (repo && session) useSource(new GitHubSource(session.accessToken, repo));
+    const session = await vscode.authentication.getSession('github', SCOPES, { silent: true });
+    if (session) useSource(new GitHubSource(session.accessToken, currentScope(context)));
     else tree.show(undefined);
   } catch {
     tree.show(undefined);
   }
 }
 
-/** The current source, or a new one after asking for the repo and sign-in. False if the reviewer cancels. */
+/** The current source, or a new one after sign-in. False if the reviewer cancels. */
 async function ensureSource(context: vscode.ExtensionContext): Promise<boolean> {
   if (source) return true;
-  const repo = await repository(context, false);
-  if (!repo) return false;
-  useSource(await githubSource(repo, false));
+  const scope = await chooseScope(context, false);
+  if (!scope) return false;
+  useSource(await githubSource(scope, false));
   return true;
 }
 
@@ -113,60 +123,66 @@ function command(id: string, run: (arg?: unknown) => Promise<void>): vscode.Disp
   });
 }
 
-async function githubSource(repo: string, switchAccount: boolean): Promise<DataSource> {
+async function githubSource(scope: Scope, switchAccount: boolean): Promise<DataSource> {
   const session = await vscode.authentication.getSession('github', SCOPES, switchAccount ? { clearSessionPreference: true, createIfNone: true } : { createIfNone: true });
-  return new GitHubSource(session.accessToken, repo);
+  return new GitHubSource(session.accessToken, scope);
 }
 
 /**
- * The repo to review. Open uses the setting, the last pick in this workspace, or the only GitHub repo
- * open, and asks only when that leaves a choice. Switch always asks. Undefined if the reviewer cancels.
+ * What to review. Without asking: a pinned repo, the workspace's last pick, or everything that involves you.
+ * Asking offers everything, the open folders' repos, or any owner/name. Undefined if the reviewer cancels.
  */
-async function repository(context: vscode.ExtensionContext, ask: boolean): Promise<string | undefined> {
+async function chooseScope(context: vscode.ExtensionContext, ask: boolean): Promise<Scope | undefined> {
+  if (!ask) return currentScope(context);
   const settings = vscode.workspace.getConfiguration('reviewDesk');
-  const configured = settings.get<string>('repository') ?? '';
-  const candidates = await openGitHubRepos();
-  if (!ask) {
-    const repo = defaultRepository(configured, context.workspaceState.get<string>(REMEMBERED), candidates);
-    if (repo) return repo;
-  }
-
-  const current = configured.trim() || context.workspaceState.get<string>(REMEMBERED);
-  const picked = await pickRepository(candidates, current);
+  const now = currentScope(context);
+  const picked = await pickScope(await openGitHubRepos(), now);
   if (!picked) return undefined;
 
   // A repo pinned in settings stays the source of truth: update it where it was set, so the pick sticks.
-  const scope = settingScope(settings.inspect<string>('repository'));
-  if (scope !== undefined) await settings.update('repository', picked, scope);
-  else await context.workspaceState.update(REMEMBERED, picked);
-  return picked;
+  const where = settingScope(settings.inspect<string>('repository'));
+  if (where !== undefined) await settings.update('repository', picked === EVERYTHING_PICK ? undefined : picked, where);
+  await context.workspaceState.update(REMEMBERED, picked);
+  return currentScope(context);
 }
 
 const REMEMBERED = 'repository';
 
 async function openGitHubRepos(): Promise<string[]> {
-  const git = vscode.extensions.getExtension('vscode.git');
-  const api = (await git?.activate())?.getAPI(1);
-  return githubRepos(api?.repositories ?? []);
+  return (await gitRepos()).map((r) => r.name);
 }
 
-async function pickRepository(candidates: string[], current: string | undefined): Promise<string | undefined> {
+/** The workspace's git repos that have a GitHub remote, with where each is on disk. */
+async function gitRepos(): Promise<{ name: string; root: vscode.Uri }[]> {
+  const git = vscode.extensions.getExtension('vscode.git');
+  const api = (await git?.activate())?.getAPI(1);
+  const repos: { rootUri: vscode.Uri; state: { remotes: { name: string; fetchUrl?: string; pushUrl?: string }[] } }[] = api?.repositories ?? [];
+  return repos.flatMap((r) => githubRepos([r]).map((name) => ({ name, root: r.rootUri })));
+}
+
+/** Everything that involves you, an open folder's repo, or one typed in. EVERYTHING_PICK means everything. */
+async function pickScope(candidates: string[], now: Scope): Promise<string | undefined> {
   const other = 'Another repository…';
-  if (candidates.length) {
-    const items: vscode.QuickPickItem[] = [
-      ...candidates.map((label) => ({ label, description: label === current ? 'Reviewing now' : undefined })),
-      { label: '', kind: vscode.QuickPickItemKind.Separator },
-      { label: other, description: 'Type owner/name or paste a GitHub link' },
-    ];
-    const choice = await vscode.window.showQuickPick(items, { title: 'Review Desk: Choose a repository', placeHolder: 'Which repository do you want to review?' });
-    if (!choice) return undefined;
-    if (choice.label !== other) return choice.label;
-  }
+  const edit = 'Repositories to always show in full…';
+  const full = fullRepos();
+  const items: vscode.QuickPickItem[] = [
+    { label: `$(globe) ${EVERYTHING}`, description: [now.kind === 'involves' ? 'Reviewing now' : '', full.length ? `+ ${full.join(', ')} in full` : 'across all your repos'].filter(Boolean).join(' · ') },
+    { label: 'One repository', kind: vscode.QuickPickItemKind.Separator },
+    ...candidates.map((label) => ({ label, description: now.kind === 'repo' && now.repo === label ? 'Reviewing now' : undefined })),
+    { label: other, description: 'Type owner/name or paste a GitHub link' },
+    { label: '', kind: vscode.QuickPickItemKind.Separator },
+    { label: edit, description: 'Repos whose every PR shows in Everything' },
+  ];
+  const choice = await vscode.window.showQuickPick(items, { title: 'Review Desk: Choose what to review', placeHolder: 'Everything that involves you, or one repository' });
+  if (!choice) return undefined;
+  if (choice.label.endsWith(EVERYTHING)) return EVERYTHING_PICK;
+  if (choice.label === edit) { await vscode.commands.executeCommand('workbench.action.openSettings', 'reviewDesk.repositories'); return undefined; }
+  if (choice.label !== other) return choice.label;
   const typed = await vscode.window.showInputBox({
     title: 'Review Desk: Choose a repository',
-    prompt: candidates.length ? 'Which repository do you want to review?' : 'No folder here has a GitHub remote. Which repository do you want to review?',
+    prompt: 'Which repository do you want to review?',
     placeHolder: 'owner/name',
-    value: current,
+    value: now.kind === 'repo' ? now.repo : '',
     validateInput: (text) => (parseRepositoryInput(text) ? null : 'Type owner/name, like octocat/hello-world, or paste a github.com link'),
   });
   return typed === undefined ? undefined : parseRepositoryInput(typed) ?? undefined;
@@ -179,13 +195,12 @@ function settingScope(inspected: { globalValue?: string; workspaceValue?: string
   return undefined;
 }
 
-
 /** Shows the panel, opening a PR if one is given. Reuses the panel that's already open. */
-function open(context: vscode.ExtensionContext, number?: number): void {
+function open(context: vscode.ExtensionContext, key?: string): void {
   if (!source) return;
   if (panel && controller) {
     panel.reveal();
-    if (number !== undefined) void controller.handle({ type: 'openPr', number });
+    if (key !== undefined) void controller.handle({ type: 'openPr', key });
     return;
   }
   panel = vscode.window.createWebviewPanel('reviewDesk', 'Review Desk', vscode.ViewColumn.Active, {
@@ -205,12 +220,13 @@ function open(context: vscode.ExtensionContext, number?: number): void {
       if (!st.loading && st.view === 'queue') tree.setQueue(st.queue);
       // The tab says what's open, like any editor tab; the sidebar marks the open PR.
       if (panel) panel.title = st.view === 'pr' && st.pr ? `#${st.pr.number} ${st.pr.title}` : 'Review queue';
-      if (st.view === 'pr' && st.pr) tree.reveal(st.pr.number);
+      if (st.view === 'pr' && st.pr) tree.reveal(prKey(st.pr));
     },
-    openFile: async (path, line) => {
-      const folder = vscode.workspace.workspaceFolders?.[0];
-      if (!folder) return;
-      const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, path));
+    openFile: async (repo, path, line) => {
+      // The PR's repo has to be open here to jump into its files; with several repos in view, find the right folder.
+      const root = (await gitRepos()).find((r) => r.name.toLowerCase() === repo.toLowerCase())?.root;
+      if (!root) { void vscode.window.showInformationMessage(`Open ${repo} in VS Code to jump to its files.`); return; }
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(root, path));
       const pos = new vscode.Position(Math.max(0, (line ?? 1) - 1), 0);
       await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside, selection: new vscode.Range(pos, pos) });
     },
@@ -228,7 +244,7 @@ function open(context: vscode.ExtensionContext, number?: number): void {
   panel.onDidDispose(() => { panel = undefined; controller = undefined; }, undefined, context.subscriptions);
   webview.html = html(webview, context.extensionUri);
   // The webview asks for the queue when it's ready; a PR opened now shows once it's loaded.
-  if (number !== undefined) void c.handle({ type: 'openPr', number });
+  if (key !== undefined) void c.handle({ type: 'openPr', key });
 }
 
 const label = () => vscode.workspace.getConfiguration('reviewDesk').get<string>('label')?.trim() ?? '';
@@ -257,15 +273,18 @@ class PrItem extends vscode.TreeItem {
   constructor(readonly pr: PrSummary, queue: readonly PrSummary[] = []) {
     super(pr.title, vscode.TreeItemCollapsibleState.None);
     const status = prStatus(pr);
-    this.id = `pr:${pr.number}`;
+    this.id = `pr:${prKey(pr)}`;
     // Say the status only when it adds to the group's name ("Needs you" already means needs your review).
     const parent = parentOf(pr, queue);
-    this.description = [`#${pr.number}`, parent ? `on #${parent.number}` : '', status.quiet ? '' : status.label].filter(Boolean).join(' · ');
-    this.tooltip = new vscode.MarkdownString(`**#${pr.number} ${pr.title}**\n\n${status.label} · by ${pr.author} · +${pr.additions} −${pr.deletions}`);
+    // With several repos in view, a number alone is ambiguous: say which repo.
+    const multi = new Set(queue.map((p) => p.repo)).size > 1;
+    const ref = multi ? `${pr.repo.split('/')[1]}#${pr.number}` : `#${pr.number}`;
+    this.description = [ref, parent ? `on #${parent.number}` : '', status.quiet ? '' : status.label].filter(Boolean).join(' · ');
+    this.tooltip = new vscode.MarkdownString(`**${pr.repo}#${pr.number} ${pr.title}**\n\n${status.label} · by ${pr.author} · +${pr.additions} −${pr.deletions}`);
     const t = TONE[status.tone];
     this.iconPath = pr.state === 'merged' ? new vscode.ThemeIcon('git-merge') : new vscode.ThemeIcon(t.icon, t.color ? new vscode.ThemeColor(t.color) : undefined);
     this.contextValue = 'pr';
-    this.command = { command: 'reviewDesk.openPr', title: 'Open', arguments: [pr.number] };
+    this.command = { command: 'reviewDesk.openPr', title: 'Open', arguments: [prKey(pr)] };
   }
 }
 
@@ -281,15 +300,15 @@ class QueueTree implements vscode.TreeDataProvider<vscode.TreeItem> {
   attach(view: vscode.TreeView<vscode.TreeItem>): void { this.view = view; }
 
   /** Marks the PR open in the panel, without taking focus from it. */
-  reveal(number: number): void {
-    const pr = this.queue?.find((p) => p.number === number);
+  reveal(key: string): void {
+    const pr = this.queue?.find((p) => prKey(p) === key);
     if (!pr || !this.view?.visible) return;
     void this.view.reveal(new PrItem(pr, this.queue ?? []), { select: true, focus: false, expand: true }).then(undefined, () => {});
   }
 
   getParent(item: vscode.TreeItem): vscode.TreeItem | undefined {
     if (!(item instanceof PrItem) || !this.queue) return undefined;
-    const group = queueGroups(this.queue).find((g) => g.prs.some((p) => p.number === item.pr.number));
+    const group = queueGroups(this.queue).find((g) => g.prs.some((p) => prKey(p) === prKey(item.pr)));
     return group ? new GroupItem(group) : undefined;
   }
 
@@ -298,7 +317,7 @@ class QueueTree implements vscode.TreeDataProvider<vscode.TreeItem> {
     void vscode.commands.executeCommand('setContext', 'reviewDesk.connected', !!next);
     this.queue = null;
     this.message = null;
-    if (this.view) this.view.description = next ? `${next.repo}${next.sample ? ' · sample' : ''}` : undefined;
+    if (this.view) this.view.description = next ? `${next.scope}${next.sample ? ' · sample' : ''}` : undefined;
     this.render();
     if (next) void this.refresh();
   }

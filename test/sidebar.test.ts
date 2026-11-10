@@ -15,7 +15,8 @@ describe('sidebar', () => {
   it('counts what needs the reviewer for the badge', async () => {
     const queue = await new SampleSource().listPrs();
     expect(needsYou(queue)).toBe(5);
-    expect(needsYou(queue.map((p) => ({ ...p, myReview: 'approved' as const })))).toBe(2);
+    // Approving everything leaves the two failing PRs, plus two ready to merge, which alone is your move: 4.
+    expect(needsYou(queue.map((p) => ({ ...p, myReview: 'approved' as const })))).toBe(4);
   });
 });
 
@@ -23,8 +24,12 @@ describe('sidebar with a team', () => {
   it('groups your PRs apart and counts what needs you', async () => {
     const queue = await new SampleSource('team').listPrs();
     expect(queueGroups(queue).map((g) => g.label)).toEqual(['Needs you', 'Your PRs', 'Waiting on others', 'Approved', 'Merged']);
-    expect(queueGroups(queue).find((g) => g.bucket === 'mine')!.prs.map((p) => p.number).sort()).toEqual([122, 123, 124]);
-    // Review requests and unassigned PRs (102, 103, 112, 121, 125, 126, 127) plus your 123 (ready) and 124 (changes requested).
-    expect(needsYou(queue)).toBe(9);
+    expect(queueGroups(queue).find((g) => g.bucket === 'mine')!.prs.map((p) => `${p.repo}#${p.number}`).sort()).toEqual([
+      'acme/payments-api#108', 'acme/payments-api#109', 'acme/storefront#122', 'acme/storefront#123', 'acme/storefront#124',
+    ]);
+    // Review requests and unassigned PRs (storefront 102, 103, 112, 121, 125, 126, 127; payments 102) plus your 123 (ready) and 124 (changes requested).
+    expect(needsYou(queue)).toBe(10);
+    // Both repos have a #102; they're two PRs.
+    expect(queue.filter((p) => p.number === 102).map((p) => p.repo).sort()).toEqual(['acme/payments-api', 'acme/storefront']);
   });
 });

@@ -1,5 +1,6 @@
 import type { MergeMethod, PrDetail, PrSummary, Reviewer } from './protocol';
 import { ago, decide, file, pass, say, sized, type SamplePr } from './sample-kit';
+import { EVERYTHING } from './scope';
 import { teamSeed } from './sample-team';
 import type { DataSource } from './source';
 
@@ -175,15 +176,17 @@ function soloSeed(): SamplePr[] {
 
 export type SampleKind = 'solo' | 'team';
 
-const SETS: Record<SampleKind, { repo: string; required: number; seed: () => SamplePr[] }> = {
-  solo: { repo: 'calebksmith/portfolio', required: 0, seed: soloSeed },
-  // One approval from someone other than the author before anything merges, like a protected main.
-  team: { repo: 'acme/storefront', required: 1, seed: teamSeed },
+const SETS: Record<SampleKind, { repo: string; scope: string; required: number; seed: () => SamplePr[] }> = {
+  solo: { repo: 'calebksmith/portfolio', scope: 'calebksmith/portfolio', required: 0, seed: soloSeed },
+  // Everything involving the reviewer across two repos, with one approval required before anything merges.
+  team: { repo: 'acme/storefront', scope: EVERYTHING, required: 1, seed: teamSeed },
 };
 
 export class SampleSource implements DataSource {
-  readonly repo: string;
+  readonly scope: string;
   readonly sample = true;
+  /** Where PRs live when the seed doesn't say. */
+  private readonly repo: string;
   private readonly me = 'calebksmith';
   private readonly required: number;
   private prs: SamplePr[];
@@ -191,6 +194,7 @@ export class SampleSource implements DataSource {
   constructor(readonly kind: SampleKind = 'solo') {
     const set = SETS[kind];
     this.repo = set.repo;
+    this.scope = set.scope;
     this.required = set.required;
     this.prs = set.seed();
   }
@@ -199,8 +203,8 @@ export class SampleSource implements DataSource {
 
   async listPrs(): Promise<PrSummary[]> { return this.prs.map((p) => this.summarize(p)); }
 
-  async getPr(number: number, sinceSha: string | null): Promise<PrDetail> {
-    const p = this.find(number);
+  async getPr(repo: string, number: number, sinceSha: string | null): Promise<PrDetail> {
+    const p = this.find(repo, number);
     // #55 always shows one new commit, so the banner can be seen in demos.
     const sinceLastLook = number === 55
       ? { fromSha: sinceSha ?? 'c44e2b9', toSha: p.summary.headSha, commits: 1, files: p.files.filter((f) => f.path === 'src/lib/track.test.ts') }
@@ -212,33 +216,33 @@ export class SampleSource implements DataSource {
   }
 
   async setViewed(pr: PrDetail, path: string, viewed: boolean): Promise<void> {
-    const f = this.find(pr.number).files.find((x) => x.path === path);
+    const f = this.find(pr.repo, pr.number).files.find((x) => x.path === path);
     if (f) f.viewed = viewed ? 'viewed' : 'unviewed';
   }
 
   async approve(pr: PrDetail): Promise<void> {
-    const p = this.find(pr.number);
+    const p = this.find(pr.repo, pr.number);
     if (p.summary.author === this.me) throw Object.assign(new Error('You can’t approve your own pull request.'), { status: 422 });
     p.summary.myReview = 'approved';
   }
 
   /** Like GitHub: refuses without the required approvals, and moves PRs stacked on this one onto its base. */
   async merge(pr: PrDetail, _method: MergeMethod): Promise<void> {
-    const p = this.find(pr.number);
+    const p = this.find(pr.repo, pr.number);
     const s = this.summarize(p);
     if (this.required && s.reviewDecision !== 'approved') {
       throw Object.assign(new Error(`At least ${this.required} approving review is required by reviewers with write access.`), { status: 405 });
     }
     p.summary.state = 'merged';
-    for (const child of this.prs) if (child.base === p.headRef && child.summary.state === 'open') child.base = p.base ?? 'main';
+    for (const child of this.prs) if (this.repoOf(child) === this.repoOf(p) && child.base === p.headRef && child.summary.state === 'open') child.base = p.base ?? 'main';
   }
 
   async comment(pr: PrDetail, body: string): Promise<void> {
     const html = `<p>${body.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!)}</p>`;
-    this.find(pr.number).conversation.push({ kind: 'comment', comment: { ...say(this.me, 0, html), text: body } });
+    this.find(pr.repo, pr.number).conversation.push({ kind: 'comment', comment: { ...say(this.me, 0, html), text: body } });
   }
 
-  async updateBranch(pr: PrDetail): Promise<void> { this.find(pr.number).summary.mergeState = 'clean'; }
+  async updateBranch(pr: PrDetail): Promise<void> { this.find(pr.repo, pr.number).summary.mergeState = 'clean'; }
 
   /** Adds what GitHub works out: branches, whose PR it is, the viewer's review among the others, the decision. */
   private summarize(p: SamplePr): PrSummary {
@@ -247,6 +251,7 @@ export class SampleSource implements DataSource {
     const reviewers: Reviewer[] = s.myReview ? [...others, { login: this.me, state: s.myReview }] : others;
     return {
       ...s,
+      repo: this.repoOf(p),
       headRef: p.headRef,
       baseRef: p.base ?? 'main',
       mine: s.author === this.me,
@@ -256,9 +261,11 @@ export class SampleSource implements DataSource {
     };
   }
 
-  private find(number: number): SamplePr {
-    const p = this.prs.find((x) => x.summary.number === number);
-    if (!p) throw new Error(`No sample PR #${number}`);
+  private repoOf(p: SamplePr): string { return p.repo ?? this.repo; }
+
+  private find(repo: string, number: number): SamplePr {
+    const p = this.prs.find((x) => this.repoOf(x) === repo && x.summary.number === number);
+    if (!p) throw new Error(`No sample PR ${repo}#${number}`);
     return p;
   }
 }

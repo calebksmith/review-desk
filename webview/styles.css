@@ -392,3 +392,35 @@ kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: ce
 .sdot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--fg-3) }
 .sdot.ok { background: var(--ok) } .sdot.bad { background: var(--bad) } .sdot.warn { background: var(--warn) } .sdot.run { background: var(--accent) }
 .ck .link { white-space: nowrap }
+
+/* Several repos in one view */
+.qrow .sub .rp { font-family: var(--mono); font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--chrome); color: var(--fg-2) }
+.reposw.all { font-family: var(--ui); font-size: 12px }
+.reposw .ico:not(.caretico) { width: 13px; height: 13px }
+.repofilter { flex-shrink: 0; font-size: 12px }
+.toolbar .repofilter + .layout, .toolbar .filters + .repofilter { margin-left: auto }
+.toolbar .repofilter + .layout { margin-left: 0 }
+.prh .r1 .rpo { display: block; font-family: var(--mono); font-size: 11px; color: var(--fg-3); margin-bottom: 1px }
+
+/* All, by who acts next */
+.lbl.sect { margin: 6px 0 -4px }
+.lbl.sect:first-child { margin-top: 0 }
+.list.later .qrow .t b { font-weight: 500; color: var(--fg-2) }
+
+/* Merge tree: a git-graph column beside each stacked PR. Columns are 18px; lines meet at row centres. */
+.list.tree { --graph: color-mix(in srgb, var(--fg) 32%, transparent) }
+.tree .qrow { overflow: visible }
+.graph { position: relative; flex-shrink: 0; align-self: stretch; width: calc(var(--lanes) * 18px + 2px); margin: -11px 0 -10px -4px }
+.gl { position: absolute; width: 2px; left: calc(var(--l) * 18px + 8px); background: var(--graph) }
+.gl.full { top: 0; bottom: 0 } .gl.top { top: 0; height: 50% } .gl.bot { top: 50%; bottom: 0 }
+/* A later branch: down its own column, then curving left into the PR it's stacked on. */
+.gj { position: absolute; top: 0; height: 50%; left: calc(var(--to) * 18px + 9px); width: calc((var(--l) - var(--to)) * 18px + 1px); border-right: 2px solid var(--graph); border-bottom: 2px solid var(--graph); border-bottom-right-radius: 10px; box-sizing: border-box }
+.gd { position: absolute; z-index: 1; width: 12px; height: 12px; border-radius: 50%; left: calc(var(--l) * 18px + 3px); top: calc(50% - 6px); background: var(--fg-3); box-shadow: 0 0 0 2px var(--win) }
+.qrow:hover .gd { box-shadow: 0 0 0 2px var(--chrome) }
+.gd.ok { background: var(--ok) } .gd.bad { background: var(--bad) } .gd.warn { background: var(--warn) } .gd.run { background: var(--accent) }
+.gd.draft { background: var(--win); border: 2px solid var(--fg-3) }
+.gd.base { background: var(--win); border: 2px solid var(--graph); width: 14px; height: 14px; left: calc(var(--l) * 18px + 2px); top: calc(50% - 7px) }
+.trunk { display: flex; align-items: center; gap: 14px; padding: 10px 14px; border-top: 1px solid var(--line-soft); min-height: 40px }
+.trunk .mono { font-size: 12px; font-weight: 600; color: var(--fg-2) }
+.trunk .sub { font-size: 11px; color: var(--fg-3) }
+.chip.next { font-family: var(--ui); font-weight: 600; background: var(--ok-soft); color: var(--ok); border-color: transparent; flex-shrink: 0 }

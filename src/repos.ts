@@ -1,4 +1,5 @@
 import { parseRemote } from './remote';
+import type { Scope } from './scope';
 
 /** The parts of a VS Code git repository this module reads. */
 export interface GitRepoLike {
@@ -21,14 +22,17 @@ export function githubRepos(repos: readonly GitRepoLike[]): string[] {
   return found;
 }
 
+/** What the workspace remembers when the reviewer picked "Everything that involves you". */
+export const EVERYTHING_PICK = '*';
+
 /**
- * Which repo Open should review without asking: the setting, then the reviewer's last pick in this
- * workspace, then the only GitHub repo open. Null means the reviewer has to choose.
+ * What to review without asking: a repo pinned in settings, then the reviewer's last pick in this workspace,
+ * then everything that involves them (plus the repos they always want in full).
  */
-export function defaultRepository(configured: string, remembered: string | undefined, candidates: readonly string[]): string | null {
-  if (configured.trim()) return configured.trim();
-  if (remembered) return remembered;
-  return candidates.length === 1 ? candidates[0]! : null;
+export function defaultScope(configured: string, remembered: string | undefined, full: readonly string[]): Scope {
+  if (configured.trim()) return { kind: 'repo', repo: configured.trim() };
+  if (remembered && remembered !== EVERYTHING_PICK) return { kind: 'repo', repo: remembered };
+  return { kind: 'involves', full: [...full] };
 }
 
 /** owner/name from what a reviewer typed: owner/name or a github.com URL. Null if it's neither. */

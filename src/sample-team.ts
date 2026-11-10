@@ -1,15 +1,17 @@
 import type { CheckRun, ConversationItem, Reviewer } from './protocol';
 import { ago, fail, file, pass, running, say, sized, type SamplePr, type SeedSummary } from './sample-kit';
 
-// A team: several developers, an agent and Dependabot on one storefront app, one approval required to merge,
-// and two stacks (a chain four deep, and a base with two PRs on it). The viewer is calebksmith, the lead.
-// Everything here is made up.
+// A team: several developers, an agent and Dependabot across two repos (a storefront app and a payments API),
+// one approval required to merge, and stacks (a chain four deep and a fork in the storefront, a pair in
+// payments). Both repos have a #102, so nothing can tell PRs apart by number alone. The viewer is
+// calebksmith, the lead. Everything here is made up.
 
 const ci = (): CheckRun[] => [pass('Lint', 'GitHub Actions'), pass('Types', 'GitHub Actions'), pass('Tests', 'GitHub Actions'), pass('Preview', 'Vercel', 'Preview ready')];
 const req = (...logins: string[]): Reviewer[] => logins.map((login) => ({ login, state: 'requested' }));
 const rev = (login: string, state: Reviewer['state']): Reviewer => ({ login, state });
 
 interface Spec {
+  repo?: string;
   n: number; title: string; author: string; min: number; head: string; base?: string;
   reviewers?: Reviewer[]; myReview?: SeedSummary['myReview']; draft?: boolean; merged?: boolean;
   checks?: CheckRun[]; conflicts?: boolean; behind?: boolean; threads?: number;
@@ -21,6 +23,7 @@ function pr(s: Spec): SamplePr {
   const failed = checkRuns.filter((c) => c.conclusion === 'failure').length;
   const pending = checkRuns.filter((c) => c.status !== 'completed').length;
   return {
+    repo: s.repo,
     summary: {
       number: s.n, title: s.title, author: s.author, url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(s.min),
       headSha: (s.n * 2654435761 >>> 0).toString(16).padStart(8, '0').slice(0, 7), isDraft: !!s.draft, state: s.merged ? 'merged' : 'open',
@@ -101,6 +104,17 @@ export function teamSeed(): SamplePr[] {
     pr({ n: 127, title: 'Bump vite from 6.3.1 to 6.3.5', author: 'dependabot', min: 60 * 5, head: 'dependabot/npm_and_yarn/vite-6.3.5',
       body: 'Bumps vite from 6.3.1 to 6.3.5.',
       path: 'package-lock.json', patch: ['@@ -4120,3 +4120,3 @@', '     "node_modules/vite": {', '-      "version": "6.3.1",', '+      "version": "6.3.5",'] }),
+
+    // The payments API: a review request, and a stack of yours. Its #102 shares a number with the storefront's.
+    pr({ repo: 'acme/payments-api', n: 102, title: 'Rotate API signing keys', author: 'sam', min: 60 * 5, head: 'sam/rotate-keys', reviewers: req('calebksmith'),
+      body: 'Signs webhooks with the new key and accepts both keys for 24 hours.',
+      path: 'src/webhooks/sign.ts', patch: ['@@ -3,2 +3,2 @@', ' export function sign(body: string) {', '-  return hmac(KEY, body)', '+  return hmac(currentKey(), body)'] }),
+    pr({ repo: 'acme/payments-api', n: 108, title: 'Add idempotency keys', author: 'calebksmith', min: 60 * 7, head: 'calebksmith/idempotency', reviewers: req('marco'),
+      body: 'A repeated charge request with the same key returns the first result instead of charging twice.',
+      path: 'src/charges/create.ts', patch: ['@@ -1,2 +1,3 @@', ' export async function createCharge(req: ChargeRequest) {', '+  const seen = await idempotency.get(req.key); if (seen) return seen', '   return stripe.charges.create(req)'] }),
+    pr({ repo: 'acme/payments-api', n: 109, title: 'Use idempotency keys for refunds', author: 'calebksmith', min: 60 * 6, head: 'calebksmith/refund-idempotency', base: 'calebksmith/idempotency', reviewers: req('marco'),
+      body: 'Refunds get the same protection. Stacked on #108.',
+      path: 'src/refunds/create.ts', patch: ['@@ -1,2 +1,3 @@', ' export async function createRefund(req: RefundRequest) {', '+  const seen = await idempotency.get(req.key); if (seen) return seen', '   return stripe.refunds.create(req)'] }),
 
     // Merged recently.
     pr({ n: 100, title: 'Cache dependencies in CI', author: 'dana', min: 60 * 28, head: 'dana/ci-cache', merged: true, reviewers: [rev('calebksmith', 'approved')],

@@ -15,7 +15,8 @@ function header(repo: string, pr: PrDetail): string[] {
   return [`PR: ${repo}#${pr.number} "${pr.title}"${pr.url ? ` ${pr.url}` : ''}`, `Branch: ${pr.headRef}`];
 }
 
-export function fixPrompt(repo: string, pr: PrDetail, run: CheckRun): string {
+export function fixPrompt(pr: PrDetail, run: CheckRun): string {
+  const repo = pr.repo;
   const others = pr.checkRuns.filter((r) => r !== run && r.status === 'completed' && FAILED.includes(r.conclusion ?? '')).map((r) => r.name);
   const lines = [
     `The "${run.name}" check is failing${run.failedStep ? ` at "${run.failedStep}"` : ''}. Find the cause and propose a fix.`,
@@ -34,7 +35,8 @@ export function fixPrompt(repo: string, pr: PrDetail, run: CheckRun): string {
 }
 
 /** A review comment on a line of code (Codex's findings arrive this way) as a prompt to act on. */
-export function threadPrompt(repo: string, pr: PrDetail, thread: Extract<ConversationItem, { kind: 'thread' }>): string {
+export function threadPrompt(pr: PrDetail, thread: Extract<ConversationItem, { kind: 'thread' }>): string {
+  const repo = pr.repo;
   return [
     `Address this review comment on ${thread.path}${thread.line ? `:${thread.line}` : ''}${thread.outdated ? ' (made on an older version of the file)' : ''}.`,
     ...header(repo, pr),
@@ -46,7 +48,8 @@ export function threadPrompt(repo: string, pr: PrDetail, thread: Extract<Convers
 }
 
 /** Conflicts with the base branch: Update branch can't fix these, so the agent merges the base in. */
-export function conflictPrompt(repo: string, pr: PrDetail): string {
+export function conflictPrompt(pr: PrDetail): string {
+  const repo = pr.repo;
   return [
     `This PR has merge conflicts with ${pr.baseRef}. Merge ${pr.baseRef} into the branch, resolve the conflicts, and show me how you resolved each one.`,
     ...header(repo, pr),

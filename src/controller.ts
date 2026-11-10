@@ -1,4 +1,4 @@
-import type { CommentAction, FromWebview, HostState, MergeMethod, ToWebview } from './protocol';
+import { parseKey, prKey, type CommentAction, type FromWebview, type HostState, type MergeMethod, type PrSummary, type ToWebview } from './protocol';
 import { conflictPrompt, fixPrompt, threadPrompt, type AgentRoute } from './agent';
 import { closeOptions, type CloseOption } from './dependabot';
 import { markNew } from './conversation';
@@ -7,7 +7,8 @@ import { bulkMergeable, bulkSkipReason, mergeBlocker, mergeWarning, plural } fro
 
 export interface Host {
   post(msg: ToWebview): void;
-  openFile(path: string, line: number | null): void;
+  /** Opens a file of the PR's repo in the editor, if that repo is open here. */
+  openFile(repo: string, path: string, line: number | null): void;
   openExternal(url: string): void;
   confirm(question: string, action: string): Promise<boolean>;
   /** Hands a prompt to the reviewer's AI agent, filled in but not sent, and says where it went. */
@@ -25,11 +26,11 @@ export interface Host {
 export class Controller {
   private state: HostState;
 
-  /** PRs closed from here this session; GitHub can list them as open for a few seconds after. */
-  private readonly closed = new Set<number>();
+  /** PRs closed from here this session (by key); GitHub can list them as open for a few seconds after. */
+  private readonly closed = new Set<string>();
 
   constructor(private readonly source: DataSource, private readonly store: Store, private readonly host: Host, private readonly label = '', actions: CommentAction[] = []) {
-    this.state = { repo: source.repo, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, bulk: null, notice: null, actions, error: null };
+    this.state = { scope: source.scope, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, bulk: null, notice: null, actions, error: null };
   }
 
   get snapshot(): HostState { return this.state; }
@@ -38,14 +39,14 @@ export class Controller {
     try {
       switch (msg.type) {
         case 'ready': this.push(); await this.loadQueue(); break;
-        case 'refresh': await (this.state.view === 'pr' && this.state.pr ? this.loadPr(this.state.pr.number) : this.loadQueue()); break;
-        case 'openPr': await this.loadPr(msg.number); break;
+        case 'refresh': await (this.state.view === 'pr' && this.state.pr ? this.loadPr(this.state.pr) : this.loadQueue()); break;
+        case 'openPr': { const at = parseKey(msg.key); if (at) await this.loadPr(at); break; }
         case 'back': this.set({ view: 'queue', pr: null }); await this.loadQueue(); break;
         case 'setViewed': await this.setViewed(msg.path, msg.viewed); break;
         case 'approve': await this.approve(); break;
         case 'merge': await this.merge(msg.method); break;
         case 'updateBranch': await this.updateBranch(); break;
-        case 'openFile': this.host.openFile(msg.path, msg.line); break;
+        case 'openFile': if (this.state.pr) this.host.openFile(this.state.pr.repo, msg.path, msg.line); break;
         case 'openExternal': this.host.openExternal(msg.url); break;
         case 'mergeDependabot': await this.mergeDependabot(); break;
         case 'fixWithAgent': await this.fixWithAgent(msg.check); break;
@@ -64,16 +65,17 @@ export class Controller {
   private async loadQueue(): Promise<void> {
     this.set({ loading: true, error: null });
     const [user, prs] = await Promise.all([this.source.viewer(), this.source.listPrs()]);
-    const queue = (this.label ? prs.filter((p) => p.labels.includes(this.label)) : prs).filter((p) => !this.closed.has(p.number));
+    const queue = (this.label ? prs.filter((p) => p.labels.includes(this.label)) : prs).filter((p) => !this.closed.has(prKey(p)));
     this.set({ user, queue, loading: false });
   }
 
-  private async loadPr(number: number): Promise<void> {
-    this.set({ view: 'pr', loading: true, error: null, notice: null, pr: this.state.pr?.number === number ? this.state.pr : null });
-    const key = `lastSeen:${this.source.repo}#${number}`;
-    const atKey = `lastSeenAt:${this.source.repo}#${number}`;
+  private async loadPr(at: { repo: string; number: number }): Promise<void> {
+    this.set({ view: 'pr', loading: true, error: null, notice: null, pr: this.state.pr && prKey(this.state.pr) === prKey(at) ? this.state.pr : null });
+    // Keyed by repo and number, so "new since you looked" survives switching between repos and the combined view.
+    const key = `lastSeen:${prKey(at)}`;
+    const atKey = `lastSeenAt:${prKey(at)}`;
     const seenAt = this.store.get<string>(atKey) ?? null;
-    const [pr, me] = await Promise.all([this.source.getPr(number, this.store.get<string>(key) ?? null), this.source.viewer()]);
+    const [pr, me] = await Promise.all([this.source.getPr(at.repo, at.number, this.store.get<string>(key) ?? null), this.source.viewer()]);
     // Seen means opened: the next push or comment after this is "new since you looked".
     await this.store.set(key, pr.headSha);
     await this.store.set(atKey, new Date().toISOString());
@@ -104,9 +106,9 @@ export class Controller {
       this.set({ busy: null });
     }
     // Re-read it: on a team, GitHub's review decision may now be approved, or still need someone else.
-    const fresh = await this.source.getPr(pr.number, null);
+    const fresh = await this.source.getPr(pr.repo, pr.number, null);
     this.set({ pr: { ...pr, ...fresh, myReview: 'approved', conversation: pr.conversation, seenBefore: pr.seenBefore, sinceLastLook: pr.sinceLastLook } });
-    this.host.post({ type: 'toast', text: fresh.reviewDecision === 'review_required' ? `Approved #${pr.number}. It needs another approval to merge.` : `Approved #${pr.number}` });
+    this.host.post({ type: 'toast', text: fresh.reviewDecision === 'review_required' ? `Approved ${this.ref(pr)}. It needs another approval to merge.` : `Approved ${this.ref(pr)}` });
   }
 
   private async merge(method: MergeMethod): Promise<void> {
@@ -118,14 +120,14 @@ export class Controller {
     const verb = { squash: 'Squash and merge', merge: 'Merge', rebase: 'Rebase and merge' }[method];
     const warning = mergeWarning(pr);
     const ok = warning
-      ? await this.host.confirm(`${warning} on #${pr.number}. ${verb} into ${pr.baseRef} anyway?`, `${verb} anyway`)
-      : await this.host.confirm(`${verb} #${pr.number} into ${pr.baseRef}?`, verb);
+      ? await this.host.confirm(`${warning} on ${this.ref(pr)}. ${verb} into ${pr.baseRef} anyway?`, `${verb} anyway`)
+      : await this.host.confirm(`${verb} ${this.ref(pr)} into ${pr.baseRef}?`, verb);
     if (!ok) return;
     this.set({ busy: 'merge' });
     await this.source.merge(pr, method);
     // A merged PR is a dead end, so go back to the queue for the next one.
     this.set({ busy: null, view: 'queue', pr: null });
-    this.host.post({ type: 'toast', text: `Merged #${pr.number} into ${pr.baseRef}` });
+    this.host.post({ type: 'toast', text: `Merged ${this.ref(pr)} into ${pr.baseRef}` });
     await this.loadQueue();
   }
 
@@ -140,27 +142,27 @@ export class Controller {
     if (!this.state.queue.length) await this.loadQueue();
     const picks = bulkMergeable(this.state.queue);
     if (!picks.length) return;
-    const list = picks.map((p) => `#${p.number} ${p.title}`).join('\n');
+    const list = picks.map((p) => `${this.ref(p)} ${p.title}`).join('\n');
     const verb = `Approve and merge ${picks.length}`;
     if (!(await this.host.confirm(`Approve and merge ${plural(picks.length, 'Dependabot update')}, one at a time?\n\n${list}\n\nAny that conflict or fail by their turn are skipped.`, verb))) return;
 
-    const merged: number[] = [];
+    const merged: string[] = [];
     const skipped: string[] = [];
     this.set({ busy: 'bulk', bulk: { done: 0, total: picks.length }, notice: null, error: null });
     for (const [i, p] of picks.entries()) {
       this.set({ bulk: { done: i, total: picks.length } });
       try {
-        const pr = await this.source.getPr(p.number, null);
+        const pr = await this.source.getPr(p.repo, p.number, null);
         const why = bulkSkipReason(pr);
-        if (why) { skipped.push(`#${p.number} (${why})`); continue; }
+        if (why) { skipped.push(`${this.ref(p)} (${why})`); continue; }
         if (pr.myReview !== 'approved') await this.source.approve(pr);
         await this.source.merge(pr, pr.mergeMethods[0]!);
-        merged.push(p.number);
+        merged.push(this.ref(p));
       } catch (err) {
-        skipped.push(`#${p.number} (${message(err).replace(/\.$/, '')})`);
+        skipped.push(`${this.ref(p)} (${message(err).replace(/\.$/, '')})`);
       }
     }
-    const done = merged.length ? `Merged ${plural(merged.length, 'Dependabot update')}: ${merged.map((n) => `#${n}`).join(', ')}.` : 'Merged nothing.';
+    const done = merged.length ? `Merged ${plural(merged.length, 'Dependabot update')}: ${merged.join(', ')}.` : 'Merged nothing.';
     this.set({ busy: null, bulk: null, notice: skipped.length ? `${done} Skipped ${skipped.join('; ')}.` : done });
     await this.loadQueue();
   }
@@ -169,7 +171,7 @@ export class Controller {
     const pr = this.state.pr;
     const run = pr?.checkRuns.find((r) => r.name === check);
     if (!pr || !run) return;
-    const via = await this.host.askAgent(fixPrompt(this.source.repo, pr, run));
+    const via = await this.host.askAgent(fixPrompt(pr, run));
     const text = {
       claudeCode: `Opened Claude Code with why ${run.name} failed. Read the prompt, then send it.`,
       chat: `Opened chat with why ${run.name} failed. Read the prompt, then send it.`,
@@ -182,7 +184,7 @@ export class Controller {
     const pr = this.state.pr;
     const thread = pr?.conversation.find((it) => it.kind === 'thread' && it.id === id);
     if (!pr || thread?.kind !== 'thread') return;
-    const via = await this.host.askAgent(threadPrompt(this.source.repo, pr, thread));
+    const via = await this.host.askAgent(threadPrompt(pr, thread));
     const where = thread.path.split('/').pop();
     this.host.post({ type: 'toast', text: via === 'clipboard' ? `Copied the comment on ${where} as a prompt. Paste it into your agent.` : `Opened ${via === 'claudeCode' ? 'Claude Code' : 'chat'} with the comment on ${where}. Read the prompt, then send it.` });
   }
@@ -190,7 +192,7 @@ export class Controller {
   private async fixConflicts(): Promise<void> {
     const pr = this.state.pr;
     if (!pr) return;
-    const via = await this.host.askAgent(conflictPrompt(this.source.repo, pr));
+    const via = await this.host.askAgent(conflictPrompt(pr));
     this.host.post({ type: 'toast', text: via === 'clipboard' ? 'Copied the conflicts as a prompt. Paste it into your agent.' : `Opened ${via === 'claudeCode' ? 'Claude Code' : 'chat'} to resolve the conflicts. Read the prompt, then send it.` });
   }
 
@@ -206,19 +208,19 @@ export class Controller {
     }
     const action = this.state.actions.find((a) => a.comment.trim() === text);
     this.host.post({ type: 'toast', text: action ? `Posted “${text}”. Replies show up in Conversation when you refresh.` : 'Comment posted' });
-    await this.loadPr(pr.number);
+    await this.loadPr(pr);
   }
 
   /** Dependabot closes the PR itself when it reads the command, so this posts the command and moves on. */
   private async closeDependabot(): Promise<void> {
     const pr = this.state.pr;
     if (!pr || this.state.busy) return;
-    const pick: CloseOption | undefined = await this.host.choose(`Close #${pr.number}: ${pr.title}`, closeOptions(pr));
+    const pick: CloseOption | undefined = await this.host.choose(`Close ${this.ref(pr)}: ${pr.title}`, closeOptions(pr));
     if (!pick) return;
     await this.source.comment(pr, pick.comment);
-    this.closed.add(pr.number);
+    this.closed.add(prKey(pr));
     this.set({ view: 'queue', pr: null });
-    this.host.post({ type: 'toast', text: `Asked Dependabot to close #${pr.number} (“${pick.label}”).` });
+    this.host.post({ type: 'toast', text: `Asked Dependabot to close ${this.ref(pr)} (“${pick.label}”).` });
     await this.loadQueue();
   }
 
@@ -231,8 +233,14 @@ export class Controller {
     } finally {
       this.set({ busy: null });
     }
-    this.host.post({ type: 'toast', text: `Brought ${pr.baseRef} into #${pr.number}. Checks run again.` });
-    await this.loadPr(pr.number);
+    this.host.post({ type: 'toast', text: `Brought ${pr.baseRef} into ${this.ref(pr)}. Checks run again.` });
+    await this.loadPr(pr);
+  }
+
+  /** "#102", or "storefront#102" when the queue spans repos and a number alone is ambiguous. */
+  private ref(pr: Pick<PrSummary, 'repo' | 'number'>): string {
+    const repos = new Set(this.state.queue.map((p) => p.repo));
+    return repos.size > 1 ? `${pr.repo.split('/')[1]}#${pr.number}` : `#${pr.number}`;
   }
 
   private patchFile(path: string, viewed: 'viewed' | 'unviewed' | 'changed'): void {

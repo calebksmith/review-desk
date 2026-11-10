@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { defaultRepository, githubRepos, parseRepositoryInput } from '../src/repos';
+import { defaultScope, githubRepos, parseRepositoryInput } from '../src/repos';
 
 const repo = (...remotes: [string, string][]) => ({ state: { remotes: remotes.map(([name, fetchUrl]) => ({ name, fetchUrl })) } });
 
@@ -23,22 +23,18 @@ describe('githubRepos', () => {
   });
 });
 
-describe('defaultRepository', () => {
-  it('uses the setting first', () => {
-    expect(defaultRepository(' acme/pinned ', 'acme/last', ['acme/a', 'acme/b'])).toBe('acme/pinned');
+describe('defaultScope', () => {
+  it('uses a repo pinned in settings first', () => {
+    expect(defaultScope(' acme/pinned ', 'acme/last', [])).toEqual({ kind: 'repo', repo: 'acme/pinned' });
   });
 
-  it('then the last repo picked in this workspace', () => {
-    expect(defaultRepository('', 'acme/last', ['acme/a', 'acme/b'])).toBe('acme/last');
+  it('then the last pick in this workspace', () => {
+    expect(defaultScope('', 'acme/last', [])).toEqual({ kind: 'repo', repo: 'acme/last' });
+    expect(defaultScope('', '*', ['acme/web'])).toEqual({ kind: 'involves', full: ['acme/web'] });
   });
 
-  it('then the only GitHub repo open', () => {
-    expect(defaultRepository('', undefined, ['acme/a'])).toBe('acme/a');
-  });
-
-  it('asks when several repos are open, or none', () => {
-    expect(defaultRepository('', undefined, ['acme/a', 'acme/b'])).toBeNull();
-    expect(defaultRepository('', undefined, [])).toBeNull();
+  it('otherwise everything that involves you, plus the repos shown in full', () => {
+    expect(defaultScope('', undefined, ['acme/web'])).toEqual({ kind: 'involves', full: ['acme/web'] });
   });
 });
 

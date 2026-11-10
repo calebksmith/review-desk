@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { toMergeState, mergeMethods } from '../src/github';
 import type { PrDetail, PrSummary } from '../src/protocol';
-import { bulkMergeable, bulkSkipReason, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, prStatus } from '../src/status';
+import { bulkMergeable, bulkSkipReason, byPriority, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, priority, prStatus } from '../src/status';
 
 const base: PrSummary = {
-  number: 1, title: 't', author: 'a', url: '', additions: 0, deletions: 0, updatedAt: '', headSha: 'abc', isDraft: false, state: 'open',
+  repo: 'acme/web', number: 1, title: 't', author: 'a', url: '', additions: 0, deletions: 0, updatedAt: '', headSha: 'abc', isDraft: false, state: 'open',
   labels: [], myReview: null, checks: { passed: 3, failed: 0, pending: 0, total: 3 }, mergeable: true, mergeState: 'clean', unresolvedThreads: 0,
   headRef: 'h', baseRef: 'main', mine: false, reviewDecision: null, reviewers: [], reviewRequested: false,
 };
@@ -124,7 +124,7 @@ describe('team reviews', () => {
 
   it('waits for another approval after yours when the repo needs more', () => {
     expect(prStatus(pr({ myReview: 'approved', reviewDecision: 'review_required' }))).toMatchObject({ bucket: 'waiting', label: 'Needs another approval' });
-    expect(prStatus(pr({ reviewDecision: 'approved' }))).toMatchObject({ bucket: 'approved', label: 'Ready to merge' });
+    expect(prStatus(pr({ reviewDecision: 'approved' }))).toMatchObject({ bucket: 'approved', label: 'Approved', tone: 'muted', who: 'author' });
   });
 
   it('blocks merging without approval, and a stacked PR before the one under it', () => {
@@ -133,7 +133,9 @@ describe('team reviews', () => {
     const parent = pr({ number: 7, headRef: 'base-branch' });
     const child = detail({ number: 8, baseRef: 'base-branch', reviewDecision: 'approved' });
     expect(mergeBlocker(child, [parent])).toBe('Merge #7 first. This PR is stacked on it.');
-    expect(mergeReadiness(child, [parent])[0]).toMatchObject({ key: 'stack', action: 'openPr', pr: 7 });
+    expect(mergeReadiness(child, [parent])[0]).toMatchObject({ key: 'stack', action: 'openPr', pr: 'acme/web#7' });
+    // A branch with the same name in another repo isn't a parent.
+    expect(mergeBlocker(child, [{ ...parent, repo: 'acme/other' }])).toBeNull();
   });
 
   it('says who approved and who’s still asked', () => {
@@ -141,5 +143,27 @@ describe('team reviews', () => {
     expect(items.find((i) => i.key === 'approval')?.text).toBe('Approved by dana; needs another approval (asked: sam)');
     const me = mergeReadiness(detail({ reviewDecision: 'review_required', reviewers: asked('calebksmith') }), [], 'calebksmith');
     expect(me.find((i) => i.key === 'approval')?.text).toBe('Needs an approval (asked: you)');
+  });
+});
+
+describe('priority', () => {
+  const asked = [{ login: 'me', state: 'requested' as const }];
+  it('puts what you can act on first, a review asked of you by name above all', () => {
+    const order = [
+      pr({ number: 1, reviewDecision: 'review_required', reviewers: [{ login: 'sam', state: 'requested' }] }), // someone else's review
+      pr({ number: 2 }), // unassigned
+      pr({ number: 3, mine: true, reviewDecision: 'changes_requested' }), // yours, your move
+      pr({ number: 4, reviewDecision: 'review_required', reviewers: asked, reviewRequested: true }), // asked of you
+      pr({ number: 5, reviewDecision: 'approved' }), // someone else's, theirs to merge
+      pr({ number: 6, state: 'merged' }),
+    ].sort(byPriority);
+    expect(order.map((p) => p.number)).toEqual([4, 3, 2, 1, 5, 6]);
+    expect(order.map((p) => priority(p).section)).toEqual(['you', 'you', 'you', 'others', 'others', 'merged']);
+  });
+
+  it('leaves merging to the author on a team, and to you alone', () => {
+    expect(prStatus(pr({ reviewDecision: 'approved' })).who).toBe('author');
+    expect(prStatus(pr({ myReview: 'approved' })).who).toBe('you');
+    expect(prStatus(pr({ mine: true, reviewDecision: 'approved' })).who).toBe('you');
   });
 });

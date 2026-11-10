@@ -1,4 +1,4 @@
-import type { PrDetail, PrSummary, Reviewer } from './protocol';
+import { prKey, type PrDetail, type PrSummary, type Reviewer } from './protocol';
 import { parentOf } from './stacks';
 
 // One vocabulary for a PR's state. The queue row, the PR header and the sidebar all
@@ -52,9 +52,33 @@ function baseStatus(p: PrSummary): PrStatus {
 }
 
 function approved(p: PrSummary): PrStatus {
+  // Who merges: on a team (review rules on), the author merges their own PR; alone, the reviewer does.
+  const merger = p.mine || p.reviewDecision === null ? 'you' : 'author';
   if (p.checks.pending) return { label: 'Approved · checks running', tone: 'run', bucket: 'approved', who: null };
-  if (p.mergeState === 'behind') return { label: 'Approved · behind base', tone: 'warn', bucket: 'approved', who: 'you' };
-  return { label: 'Ready to merge', tone: 'ok', bucket: 'approved', who: 'you' };
+  // Someone else's to merge: say it's approved, quietly, rather than "Ready to merge" in green, which reads as yours.
+  if (merger === 'author') return { label: 'Approved', tone: 'muted', bucket: 'approved', who: 'author' };
+  if (p.mergeState === 'behind') return { label: 'Approved · behind base', tone: 'warn', bucket: 'approved', who: merger };
+  return { label: 'Ready to merge', tone: 'ok', bucket: 'approved', who: merger };
+}
+
+/**
+ * Where a PR sorts: first what the reviewer can act on (a review asked of them by name, then their own PRs
+ * that need them, then PRs nobody was assigned), then what's waiting on someone else, then merged.
+ * Within a rank, what blocks a merge comes first.
+ */
+export function priority(p: PrSummary): { section: 'you' | 'others' | 'merged'; rank: number } {
+  const s = prStatus(p);
+  if (p.state === 'merged') return { section: 'merged', rank: 9 };
+  const blocking = s.tone === 'bad' ? 0 : 0.5;
+  if (s.who !== 'you') return { section: 'others', rank: 5 + blocking };
+  if (p.reviewRequested && !p.myReview) return { section: 'you', rank: 0 + blocking };
+  if (p.mine) return { section: 'you', rank: 1 + blocking };
+  return { section: 'you', rank: 2 + blocking };
+}
+
+/** Sorts PRs by priority, then most recently updated. */
+export function byPriority(a: PrSummary, b: PrSummary): number {
+  return priority(a).rank - priority(b).rank || Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
 }
 
 /** "Waiting on priya" or "Waiting on priya, sam"; "Waiting on review" when nobody's been asked by name. */
@@ -71,8 +95,8 @@ export interface ReadinessItem {
   tone: Tone;
   text: string;
   action?: 'updateBranch' | 'showChecks' | 'openThreads' | 'fixConflicts' | 'openPr';
-  /** The PR an openPr action opens. */
-  pr?: number;
+  /** The PR an openPr action opens, as a key (owner/name#123). */
+  pr?: string;
 }
 
 /**
@@ -83,7 +107,7 @@ export function mergeReadiness(pr: PrDetail, queue: readonly PrSummary[] = [], m
   const items: ReadinessItem[] = [];
   const c = pr.checks;
   const parent = parentOf(pr, queue);
-  if (parent) items.push({ key: 'stack', tone: 'warn', text: `Stacked on #${parent.number}; merge it first`, action: 'openPr', pr: parent.number });
+  if (parent) items.push({ key: 'stack', tone: 'warn', text: `Merge #${parent.number} first`, action: 'openPr', pr: prKey(parent) });
 
   const approvedBy = pr.reviewers.filter((r) => r.state === 'approved');
   const changesBy = pr.reviewers.filter((r) => r.state === 'changes_requested');

@@ -1,5 +1,5 @@
 import type { PrSummary } from './protocol';
-import { prStatus, type Bucket } from './status';
+import { byPriority, priority, prStatus, type Bucket } from './status';
 
 // The sidebar's PR list: the same buckets as the queue's filters, in the order a reviewer works them.
 
@@ -13,16 +13,12 @@ const GROUPS: { bucket: Bucket; label: string }[] = [
   { bucket: 'merged', label: 'Merged' },
 ];
 
-/** Non-empty groups. Within each, what blocks a merge comes first, then the most recently updated. */
+/** Non-empty groups, each in priority order: what you can act on first, blocking problems first within that. */
 export function queueGroups(queue: PrSummary[]): QueueGroup[] {
-  const order = (p: PrSummary) => (prStatus(p).tone === 'bad' ? 0 : 1);
-  return GROUPS.map((g) => ({
-    ...g,
-    prs: queue.filter((p) => prStatus(p).bucket === g.bucket).sort((a, b) => order(a) - order(b) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
-  })).filter((g) => g.prs.length);
+  return GROUPS.map((g) => ({ ...g, prs: queue.filter((p) => prStatus(p).bucket === g.bucket).sort(byPriority) })).filter((g) => g.prs.length);
 }
 
-/** The number on the sidebar icon: review requests, plus the reviewer's own PRs where it's their move. */
+/** The number on the sidebar icon: every open PR where it's the reviewer's turn. */
 export function needsYou(queue: PrSummary[]): number {
-  return queue.filter((p) => { const s = prStatus(p); return s.bucket === 'needs' || (s.bucket === 'mine' && s.who === 'you'); }).length;
+  return queue.filter((p) => priority(p).section === 'you').length;
 }

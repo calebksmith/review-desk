@@ -5,6 +5,8 @@ export type CheckConclusion = 'success' | 'failure' | 'neutral' | 'cancelled' | 
 export interface ChecksTally { passed: number; failed: number; pending: number; total: number }
 
 export interface PrSummary {
+  /** owner/name. PR numbers only mean something within their repo. */
+  repo: string;
   number: number;
   title: string;
   author: string;
@@ -124,8 +126,17 @@ export interface CommentAction {
   reviewer?: string;
 }
 
+/** A PR's identity across repos: "owner/name#123". */
+export const prKey = (p: { repo: string; number: number }): string => `${p.repo}#${p.number}`;
+
+export function parseKey(key: string): { repo: string; number: number } | null {
+  const m = /^(.+)#(\d+)$/.exec(key);
+  return m ? { repo: m[1]!, number: Number(m[2]) } : null;
+}
+
 export interface HostState {
-  repo: string;
+  /** What the queue covers, for the header: a repo, or "Everything involving you". */
+  scope: string;
   user: string;
   sample: boolean;
   view: 'queue' | 'pr';
@@ -148,7 +159,7 @@ export type ToWebview =
 export type FromWebview =
   | { type: 'ready' }
   | { type: 'refresh' }
-  | { type: 'openPr'; number: number }
+  | { type: 'openPr'; key: string }
   | { type: 'back' }
   | { type: 'setViewed'; path: string; viewed: boolean }
   | { type: 'approve' }

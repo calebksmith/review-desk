@@ -3,10 +3,12 @@ import { COMMENT_FIELDS, toConversation, type RawComment, type RawReview, type R
 import { logExcerpt } from './logs';
 import { parsePatch } from './patch';
 import type { CheckConclusion, CheckRun, ChecksTally, FileDiff, MergeMethod, MergeState, PrDetail, PrSummary, Reviewer, ViewedState } from './protocol';
+import { combine, scopeLabel, searchQueries, type Scope } from './scope';
 import type { DataSource } from './source';
 
 const PR_FIELDS = `
   number title url additions deletions updatedAt isDraft state headRefOid mergeable mergeStateStatus
+  repository { nameWithOwner }
   headRefName baseRefName reviewDecision
   reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug } ... on Bot { login } } } }
   reviewThreads(first: 100) { nodes { isResolved } }
@@ -21,6 +23,7 @@ const PR_FIELDS = `
 `;
 
 interface RawPr {
+  repository: { nameWithOwner: string };
   number: number; title: string; url: string; additions: number; deletions: number; updatedAt: string;
   isDraft: boolean; state: 'OPEN' | 'MERGED' | 'CLOSED'; headRefOid: string;
   headRefName: string; baseRefName: string; reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null;
@@ -36,19 +39,27 @@ type RawContext =
   | { __typename: 'CheckRun'; status: string; conclusion: string | null }
   | { __typename: 'StatusContext'; state: string };
 
+/** owner and repo for Octokit's REST calls, from "owner/name". */
+function at(repo: string): { owner: string; repo: string } {
+  const [owner, name] = repo.split('/');
+  if (!owner || !name) throw new Error(`Repository should look like owner/name, not "${repo}"`);
+  return { owner, repo: name };
+}
+
+const REPO_PRS = `
+  open: pullRequests(states: OPEN, first: 50, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { ${PR_FIELDS} } }
+  merged: pullRequests(states: MERGED, first: 10, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { ${PR_FIELDS} } }`;
+
 export class GitHubSource implements DataSource {
   readonly sample = false;
+  readonly scope: string;
   private readonly octokit: Octokit;
-  private readonly owner: string;
-  private readonly name: string;
   private login: string | null = null;
 
-  constructor(token: string, readonly repo: string) {
+  constructor(token: string, private readonly what: Scope) {
     this.octokit = new Octokit({ auth: token, userAgent: 'review-desk' });
-    const [owner, name] = repo.split('/');
-    if (!owner || !name) throw new Error(`Repository should look like owner/name, not "${repo}"`);
-    this.owner = owner;
-    this.name = name;
+    for (const r of what.kind === 'repo' ? [what.repo] : what.full) at(r);
+    this.scope = scopeLabel(what);
   }
 
   async viewer(): Promise<string> {
@@ -56,20 +67,37 @@ export class GitHubSource implements DataSource {
     return this.login;
   }
 
+  /** One repo's PRs, or everything involving the reviewer across GitHub plus the repos they want in full. */
   async listPrs(): Promise<PrSummary[]> {
     const me = await this.viewer();
+    if (this.what.kind === 'repo') return this.repoPrs(this.what.repo, me);
+    const q = searchQueries(new Date(Date.now() - 7 * 24 * 60 * 60_000));
+    const found = await this.octokit.graphql<Record<string, { nodes: (RawPr | Record<string, never>)[] }>>(
+      `query($a: String!, $b: String!, $c: String!, $m: String!) {
+        a: search(query: $a, type: ISSUE, first: 50) { nodes { ... on PullRequest { ${PR_FIELDS} } } }
+        b: search(query: $b, type: ISSUE, first: 50) { nodes { ... on PullRequest { ${PR_FIELDS} } } }
+        c: search(query: $c, type: ISSUE, first: 50) { nodes { ... on PullRequest { ${PR_FIELDS} } } }
+        m: search(query: $m, type: ISSUE, first: 20) { nodes { ... on PullRequest { ${PR_FIELDS} } } }
+      }`,
+      { a: q.open[0], b: q.open[1], c: q.open[2], m: q.merged },
+    );
+    const searched = Object.values(found).flatMap((r) => r.nodes.filter((n): n is RawPr => 'number' in n)).map((p) => toSummary(p, me));
+    const full = await Promise.all(this.what.full.map((r) => this.repoPrs(r, me)));
+    return combine([searched, ...full]);
+  }
+
+  private async repoPrs(repo: string, me: string): Promise<PrSummary[]> {
+    const { owner, repo: name } = at(repo);
     const data = await this.octokit.graphql<{ repository: { open: { nodes: RawPr[] }; merged: { nodes: RawPr[] } } }>(
-      `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
-        open: pullRequests(states: OPEN, first: 50, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { ${PR_FIELDS} } }
-        merged: pullRequests(states: MERGED, first: 10, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { ${PR_FIELDS} } }
-      } }`,
-      { owner: this.owner, name: this.name },
+      `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${REPO_PRS} } }`,
+      { owner, name },
     );
     return [...data.repository.open.nodes, ...data.repository.merged.nodes].map((p) => toSummary(p, me));
   }
 
-  async getPr(number: number, sinceSha: string | null): Promise<PrDetail> {
+  async getPr(repo: string, number: number, sinceSha: string | null): Promise<PrDetail> {
     const me = await this.viewer();
+    const { owner, repo: name } = at(repo);
     const data = await this.octokit.graphql<{ repository: { squashMergeAllowed: boolean; mergeCommitAllowed: boolean; rebaseMergeAllowed: boolean; pullRequest: RawPr & {
       id: string; body: string; bodyHTML: string;
       files: { nodes: { path: string; viewerViewedState: 'VIEWED' | 'UNVIEWED' | 'DISMISSED' }[] };
@@ -85,12 +113,12 @@ export class GitHubSource implements DataSource {
           reviews(last: 50) { nodes { author { login } state submittedAt body bodyHTML url } }
           threads: reviewThreads(first: 50) { nodes { id isResolved isOutdated path line originalLine comments(first: 30) { nodes { ${COMMENT_FIELDS} } } } } }
       } }`,
-      { owner: this.owner, name: this.name, number },
+      { owner, name, number },
     );
     const raw = data.repository.pullRequest;
     const viewed = new Map(raw.files.nodes.map((f) => [f.path, toViewed(f.viewerViewedState)]));
 
-    const files = (await this.octokit.paginate(this.octokit.pulls.listFiles, { owner: this.owner, repo: this.name, pull_number: number, per_page: 100 }))
+    const files = (await this.octokit.paginate(this.octokit.pulls.listFiles, { owner, repo: name, pull_number: number, per_page: 100 }))
       .map((f): FileDiff => ({
         path: f.filename,
         status: f.status,
@@ -101,8 +129,8 @@ export class GitHubSource implements DataSource {
       }));
 
     const [runs, statuses] = await Promise.all([
-      this.octokit.paginate(this.octokit.checks.listForRef, { owner: this.owner, repo: this.name, ref: raw.headRefOid, per_page: 100 }),
-      this.octokit.repos.getCombinedStatusForRef({ owner: this.owner, repo: this.name, ref: raw.headRefOid, per_page: 100 }),
+      this.octokit.paginate(this.octokit.checks.listForRef, { owner, repo: name, ref: raw.headRefOid, per_page: 100 }),
+      this.octokit.repos.getCombinedStatusForRef({ owner, repo: name, ref: raw.headRefOid, per_page: 100 }),
     ]);
     const checkRuns = await Promise.all(runs.map(async (r): Promise<CheckRun> => {
       const run: CheckRun = {
@@ -116,7 +144,7 @@ export class GitHubSource implements DataSource {
         excerpt: null,
       };
       // A failed GitHub Actions job says only "exit code 1". Name the step and show its error lines.
-      return r.app?.slug === 'github-actions' && isFailure(run.conclusion) ? { ...run, ...(await this.jobFailure(r.id)) } : run;
+      return r.app?.slug === 'github-actions' && isFailure(run.conclusion) ? { ...run, ...(await this.jobFailure(repo, r.id)) } : run;
     }));
     // Older integrations (Vercel, for one) report commit statuses instead of check runs.
     for (const st of statuses.data.statuses) {
@@ -135,7 +163,7 @@ export class GitHubSource implements DataSource {
     let sinceLastLook: PrDetail['sinceLastLook'] = null;
     if (sinceSha && sinceSha !== raw.headRefOid) {
       try {
-        const cmp = await this.octokit.repos.compareCommitsWithBasehead({ owner: this.owner, repo: this.name, basehead: `${sinceSha}...${raw.headRefOid}` });
+        const cmp = await this.octokit.repos.compareCommitsWithBasehead({ owner, repo: name, basehead: `${sinceSha}...${raw.headRefOid}` });
         sinceLastLook = {
           fromSha: sinceSha,
           toSha: raw.headRefOid,
@@ -164,12 +192,12 @@ export class GitHubSource implements DataSource {
   }
 
   /** The failed step of an Actions job and the error lines from its log. Logs can expire; then it's just the step. */
-  private async jobFailure(jobId: number): Promise<Pick<CheckRun, 'failedStep' | 'excerpt'>> {
+  private async jobFailure(repo: string, jobId: number): Promise<Pick<CheckRun, 'failedStep' | 'excerpt'>> {
     let failedStep: string | null = null;
     try {
-      const job = await this.octokit.actions.getJobForWorkflowRun({ owner: this.owner, repo: this.name, job_id: jobId });
+      const job = await this.octokit.actions.getJobForWorkflowRun({ ...at(repo), job_id: jobId });
       failedStep = job.data.steps?.find((st) => st.conclusion === 'failure')?.name ?? null;
-      const log = await this.octokit.actions.downloadJobLogsForWorkflowRun({ owner: this.owner, repo: this.name, job_id: jobId });
+      const log = await this.octokit.actions.downloadJobLogsForWorkflowRun({ ...at(repo), job_id: jobId });
       return { failedStep, excerpt: typeof log.data === 'string' ? logExcerpt(log.data) : null };
     } catch {
       return { failedStep, excerpt: null };
@@ -182,19 +210,19 @@ export class GitHubSource implements DataSource {
   }
 
   async approve(pr: PrDetail): Promise<void> {
-    await this.octokit.pulls.createReview({ owner: this.owner, repo: this.name, pull_number: pr.number, commit_id: pr.headSha, event: 'APPROVE' });
+    await this.octokit.pulls.createReview({ ...at(pr.repo), pull_number: pr.number, commit_id: pr.headSha, event: 'APPROVE' });
   }
 
   async merge(pr: PrDetail, method: MergeMethod): Promise<void> {
-    await this.octokit.pulls.merge({ owner: this.owner, repo: this.name, pull_number: pr.number, sha: pr.headSha, merge_method: method });
+    await this.octokit.pulls.merge({ ...at(pr.repo), pull_number: pr.number, sha: pr.headSha, merge_method: method });
   }
 
   async comment(pr: PrDetail, body: string): Promise<void> {
-    await this.octokit.issues.createComment({ owner: this.owner, repo: this.name, issue_number: pr.number, body });
+    await this.octokit.issues.createComment({ ...at(pr.repo), issue_number: pr.number, body });
   }
 
   async updateBranch(pr: PrDetail): Promise<void> {
-    await this.octokit.pulls.updateBranch({ owner: this.owner, repo: this.name, pull_number: pr.number, expected_head_sha: pr.headSha });
+    await this.octokit.pulls.updateBranch({ ...at(pr.repo), pull_number: pr.number, expected_head_sha: pr.headSha });
   }
 }
 
@@ -212,6 +240,7 @@ function toSummary(p: RawPr, me: string): PrSummary {
     .map((r) => ({ login: r.author!.login, state: REVIEW_STATE[r.state]! }));
   const asked = p.reviewRequests.nodes.map((n) => n.requestedReviewer?.login ?? n.requestedReviewer?.slug).filter((l): l is string => !!l);
   return {
+    repo: p.repository.nameWithOwner,
     number: p.number,
     title: p.title,
     author,
