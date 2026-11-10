@@ -10,7 +10,7 @@ function setup(label = '', onConfirm: (question: string, action: string) => void
   const prompts: string[] = [];
   let pick = 0;
   let switched = 0;
-  const host: Host = { post: (m) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async (q, a) => { onConfirm(q, a); return confirmed; }, askAgent: async (p) => { prompts.push(p); return 'clipboard'; }, choose: async (_t, options) => options[pick], switchRepository: () => { switched++; } };
+  const host: Host = { post: (m) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async (q, a) => { onConfirm(q, a); return confirmed; }, askAgent: async (p) => { prompts.push(p); return 'clipboard'; }, choose: async (_t, options) => options[pick], switchRepository: () => { switched++; }, findingsFile: async () => null };
   const c = new Controller(new SampleSource(), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host, label);
   const last = (): HostState => (sent.filter((m) => m.type === 'state').at(-1) as { state: HostState }).state;
   return { c, sent, store, last, prompts, refuse: () => { confirmed = false; }, choosePick: (i: number) => { pick = i; }, switched: () => switched };
@@ -218,7 +218,7 @@ describe('Controller', () => {
   it('on a team, approving says when another approval is still needed', async () => {
     const sent: { type: string; text?: string }[] = [];
     const store = new Map<string, unknown>();
-    const host = { post: (m: never) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async () => 'clipboard' as const, choose: async () => undefined, switchRepository: () => {} };
+    const host = { post: (m: never) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async () => 'clipboard' as const, choose: async () => undefined, switchRepository: () => {}, findingsFile: async () => null };
     const c = new Controller(new SampleSource('team'), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host);
     await c.handle({ type: 'openPr', key: 'acme/storefront#102' });
     await c.handle({ type: 'approve' });
@@ -228,7 +228,7 @@ describe('Controller', () => {
 
   it('tells PRs with the same number in different repos apart', async () => {
     const store = new Map<string, unknown>();
-    const host = { post: () => {}, openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async () => 'clipboard' as const, choose: async () => undefined, switchRepository: () => {} };
+    const host = { post: () => {}, openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async () => 'clipboard' as const, choose: async () => undefined, switchRepository: () => {}, findingsFile: async () => null };
     const c = new Controller(new SampleSource('team'), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host);
     await c.handle({ type: 'openPr', key: 'acme/storefront#102' });
     expect(c.snapshot.pr?.title).toBe('Add the login API');
@@ -241,7 +241,7 @@ describe('Controller', () => {
     const team = () => {
       const sent: { type: string; text?: string }[] = [];
       const store = new Map<string, unknown>();
-      const host = { post: (m: never) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async () => 'clipboard' as const, choose: async () => undefined, switchRepository: () => {} };
+      const host = { post: (m: never) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async () => 'clipboard' as const, choose: async () => undefined, switchRepository: () => {}, findingsFile: async () => null };
       const c = new Controller(new SampleSource('team'), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host);
       return { c, sent, store, toast: () => sent.filter((m) => m.type === 'toast').at(-1)?.text };
     };
@@ -282,5 +282,32 @@ describe('Controller', () => {
       await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
       expect(c.snapshot.drafts.map((d) => d.body)).toEqual(['one']);
     });
+  });
+
+  it('loads an agent’s findings as drafts, once, and says how many', async () => {
+    const sent: { type: string; text?: string }[] = [];
+    const store = new Map<string, unknown>();
+    const host = { post: (m: never) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async () => 'clipboard' as const, choose: async () => undefined, switchRepository: () => {}, findingsFile: async () => null };
+    const c = new Controller(new SampleSource('team'), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host);
+    await c.handle({ type: 'openPr', key: 'acme/storefront#102' });
+    const findings = [{ path: 'src/server/routes/login.ts', line: 3, severity: 0, title: 'Session fixation', body: 'Rotate the id.' }];
+    await c.importFindings({ repo: 'acme/storefront', number: 102 }, findings);
+    expect(c.snapshot.drafts).toMatchObject([{ from: 'agent', severity: 0, line: 3 }]);
+    expect(sent.at(-1)).toMatchObject({ text: 'Your agent found 1 issue in #102. They’re drafts in Files changed until you keep them.' });
+    await c.importFindings({ repo: 'acme/storefront', number: 102 }, findings);
+    expect(c.snapshot.drafts).toHaveLength(1);
+    // Findings for a PR that isn't open wait in its drafts.
+    await c.importFindings({ repo: 'acme/storefront', number: 121 }, [{ path: '.nvmrc', line: 1, severity: 2, body: 'Pin the minor version.' }]);
+    expect((store.get('drafts:acme/storefront#121') as unknown[]).length).toBe(1);
+  });
+
+  it('says where an agent review’s findings will go', async () => {
+    const sent: { type: string; text?: string }[] = [];
+    const host = { post: (m: never) => sent.push(m), openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async () => 'claudeCode' as const, choose: async () => undefined, switchRepository: () => {}, findingsFile: async () => null };
+    const store = new Map<string, unknown>();
+    const c = new Controller(new SampleSource('team'), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host);
+    await c.handle({ type: 'openPr', key: 'acme/storefront#102' });
+    await c.handle({ type: 'reviewWithAgent' });
+    expect(sent.at(-1)).toMatchObject({ text: 'Opened Claude Code with an adversarial review of #102. Open acme/storefront in VS Code to have its findings show up here; until then it replies with them.' });
   });
 });

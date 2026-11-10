@@ -19,6 +19,7 @@ const controller = new Controller(new SampleSource(team ? 'team' : 'solo'), { ge
   askAgent: async (prompt) => { console.log(prompt); return 'clipboard'; },
   choose: async (title, options) => { console.log(title, options); return options[0]; },
   switchRepository: () => console.log('switchRepository'),
+  findingsFile: async () => null,
 }, '', [{ label: 'Ask Codex to review', comment: '@codex review', reviewer: 'chatgpt-codex-connector' }]);
 
 (window as unknown as { acquireVsCodeApi: () => unknown }).acquireVsCodeApi = () => ({
@@ -26,3 +27,6 @@ const controller = new Controller(new SampleSource(team ? 'team' : 'solo'), { ge
   getState: () => state,
   setState: (s: unknown) => { state = s; },
 });
+
+// In the preview only: try host-side things by hand, e.g. reviewDesk.importFindings({ repo, number }, [...]).
+(window as unknown as { reviewDesk: Controller }).reviewDesk = controller;

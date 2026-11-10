@@ -1,5 +1,6 @@
 import { parseKey, prKey, type CommentAction, type Draft, type FromWebview, type HostState, type MergeMethod, type PrDetail, type PrSummary, type ReviewEvent, type ToWebview } from './protocol';
 import { conflictPrompt, fixPrompt, threadPrompt, type AgentRoute } from './agent';
+import { parseFindings, reviewPrompt } from './agentReview';
 import { closeOptions, type CloseOption } from './dependabot';
 import { markNew } from './conversation';
 import { DEFAULT_BLOCKER_LABELS } from './signals';
@@ -18,6 +19,11 @@ export interface Host {
   choose<T extends { label: string; detail?: string }>(title: string, options: T[]): Promise<T | undefined>;
   /** Asks which repo to review, the same as the Switch repository command. */
   switchRepository(): void;
+  /**
+   * Where the agent should write findings for this PR (the repo's local .review-desk folder, kept out of git),
+   * or null when the repo isn't open here. Review Desk watches that file and calls importFindings.
+   */
+  findingsFile(repo: string, number: number): Promise<string | null>;
 }
 
 /**
@@ -62,6 +68,7 @@ export class Controller {
         case 'keepDraft': await this.saveDrafts(this.state.drafts.map((d) => (d.id === msg.id ? { ...d, from: 'you' } : d))); break;
         case 'deleteDraft': await this.saveDrafts(this.state.drafts.filter((d) => d.id !== msg.id)); break;
         case 'commentNow': await this.commentNow(msg.draft); break;
+        case 'reviewWithAgent': await this.reviewWithAgent(); break;
         case 'dismissNotice': this.set({ notice: null }); break;
       }
     } catch (err) {
@@ -195,7 +202,10 @@ export class Controller {
     if (event === 'APPROVE' && (f.p0 || f.p1) && !(await this.host.confirm(`${[f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ')} ${f.p0 + f.p1 === 1 ? 'finding is' : 'findings are'} still open. Approve anyway?`, 'Approve anyway'))) return;
     this.set({ busy: 'review' });
     try {
-      await this.source.submitReview(pr, event, body.trim(), send);
+      // Findings without a line can't sit in the diff on GitHub either: they go in the summary instead.
+      const loose = send.filter((d) => !d.replyTo && d.line == null);
+      const summary = [body.trim(), ...loose.map((d) => `- \`${d.path}\`: ${d.body}`)].filter(Boolean).join('\n\n');
+      await this.source.submitReview(pr, event, summary, send.filter((d) => !loose.includes(d)));
     } finally {
       this.set({ busy: null });
     }
@@ -216,6 +226,36 @@ export class Controller {
     }
     this.host.post({ type: 'toast', text: 'Comment posted' });
     await this.loadPr(pr);
+  }
+
+  /**
+   * Your own agent reviews the PR adversarially. Its findings come back through a file Review Desk watches
+   * (when the repo is open here) and land as drafts marked "from your agent".
+   */
+  private async reviewWithAgent(): Promise<void> {
+    const pr = this.state.pr;
+    if (!pr) return;
+    const file = await this.host.findingsFile(pr.repo, pr.number);
+    const via = await this.host.askAgent(reviewPrompt(pr, file));
+    const where = via === 'clipboard' ? 'Copied an adversarial review of' : `Opened ${via === 'claudeCode' ? 'Claude Code' : 'chat'} with an adversarial review of`;
+    this.host.post({ type: 'toast', text: file
+      ? `${where} ${this.ref(pr)}. Its findings will show up here as drafts.`
+      : `${where} ${this.ref(pr)}. Open ${pr.repo} in VS Code to have its findings show up here; until then it replies with them.` });
+  }
+
+  /** Findings an agent wrote for a PR: they join that PR's drafts (the open one, or stored for later). */
+  async importFindings(at: { repo: string; number: number }, raw: unknown): Promise<void> {
+    const key = prKey(at);
+    const open = this.state.pr && prKey(this.state.pr) === key ? this.state.pr : null;
+    const pr = open ?? (await this.source.getPr(at.repo, at.number, null));
+    const found = parseFindings(raw, pr, newId);
+    const before = open ? this.state.drafts : this.store.get<Draft[]>(`drafts:${key}`) ?? [];
+    // Re-running the review shouldn't duplicate what's already there.
+    const fresh = found.filter((f) => !before.some((d) => d.path === f.path && d.line === f.line && d.body === f.body));
+    const drafts = [...before, ...fresh];
+    await this.store.set(`drafts:${key}`, drafts);
+    if (open) this.set({ drafts });
+    this.host.post({ type: 'toast', text: fresh.length ? `Your agent found ${plural(fresh.length, 'issue')} in ${this.ref(at)}. They’re drafts in Files changed until you keep them.` : `Your agent found nothing new in ${this.ref(at)}.` });
   }
 
   /** Held-back comments live per PR in the workspace, so they survive switching PRs and reloads until sent. */

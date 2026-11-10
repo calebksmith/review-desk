@@ -225,4 +225,5 @@ export type FromWebview =
   | { type: 'keepDraft'; id: string }
   | { type: 'deleteDraft'; id: string }
   | { type: 'commentNow'; draft: Omit<Draft, 'id' | 'from'> }
+  | { type: 'reviewWithAgent' }
   | { type: 'dismissNotice' };

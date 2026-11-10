@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { findingsFor, findingsPath } from './agentReview';
+import { excludeLocally } from './gitExclude';
 import type { AgentRoute } from './agent';
 import { Controller, type Host } from './controller';
 import { GitHubSource } from './github';
@@ -235,6 +237,14 @@ function open(context: vscode.ExtensionContext, key?: string): void {
     askAgent,
     choose: async (title, options) => vscode.window.showQuickPick(options, { title, placeHolder: 'Pick one' }),
     switchRepository: () => { void vscode.commands.executeCommand('reviewDesk.switchRepository'); },
+    findingsFile: async (repo, number) => {
+      const root = (await gitRepos()).find((r) => r.name.toLowerCase() === repo.toLowerCase())?.root;
+      if (!root) return null;
+      await excludeReviewDesk(root);
+      await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(root, '.review-desk'));
+      watchFindings(context, root);
+      return vscode.Uri.joinPath(root, findingsPath(repo, number)).fsPath;
+    },
   };
   const store = { get: <T>(key: string) => context.workspaceState.get<T>(key), set: (key: string, value: unknown) => context.workspaceState.update(key, value) };
   const actions = vscode.workspace.getConfiguration('reviewDesk').get<CommentAction[]>('commentActions') ?? [];
@@ -365,6 +375,26 @@ class QueueTree implements vscode.TreeDataProvider<vscode.TreeItem> {
     if (item instanceof GroupItem) return item.group.prs.map((p) => new PrItem(p, this.queue ?? []));
     return item ? [] : queueGroups(this.queue, blockerLabels()).map((g) => new GroupItem(g));
   }
+}
+
+/** Keeps .review-desk/ out of git through the repo's local excludes (never its .gitignore). */
+const excludeReviewDesk = (root: vscode.Uri) => excludeLocally(root.fsPath, '.review-desk/', "Review Desk: your agent's review findings");
+
+/** Watches a repo's .review-desk folder; a findings file that appears or changes joins its PR's drafts. */
+const watched = new Set<string>();
+function watchFindings(context: vscode.ExtensionContext, root: vscode.Uri): void {
+  if (watched.has(root.fsPath)) return;
+  watched.add(root.fsPath);
+  const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, '.review-desk/*.json'));
+  const load = async (uri: vscode.Uri) => {
+    const at = findingsFor(uri.fsPath);
+    if (!at) return;
+    let raw: unknown;
+    try { raw = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri))); } catch { return; } // half-written: wait for the next change
+    if (!controller) open(context);
+    await controller?.importFindings(at, raw);
+  };
+  context.subscriptions.push(watcher, watcher.onDidCreate(load), watcher.onDidChange(load));
 }
 
 /**

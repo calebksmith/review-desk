@@ -485,3 +485,5 @@ kbd { font-family: var(--mono); font-size: 11px; min-width: 18px; text-align: ce
 .why.muted { font-weight: 500; color: var(--fg-3) }
 .lin { font-family: var(--mono); font-size: 11px; color: var(--accent-ink); text-decoration: none }
 span.lin { color: var(--fg-3) }
+
+.agentrev { justify-content: center; margin: 0 0 8px }

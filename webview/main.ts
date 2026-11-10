@@ -452,7 +452,7 @@ function stepFiles(pr: PrDetail): string {
     ${fileSince ? `<div class="seg"><button data-onlynew="0" aria-pressed="${!view.onlyNew}">Whole change</button><button data-onlynew="1" aria-pressed="${view.onlyNew}">${since.kind === 'review' ? 'Since your review' : 'Since you looked'}</button></div>` : since.files[0] ? `<button class="btn sm" data-file="${esc(since.files[0].path)}" data-onlynew="1">Show it${I.chev}</button>` : ''}</div>` : '';
 
   return `${banner}
-    <div class="split"><nav class="files" aria-label="Changed files"><div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}</nav>
+    <div class="split"><nav class="files" aria-label="Changed files">${pr.state === 'open' ? `<button class="btn sm fix agentrev" data-do="reviewWithAgent" title="Your agent reviews this PR adversarially; its findings come back as drafts">${I.spark}Review with agent</button>` : ''}<div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}</nav>
       <section class="diffpane" aria-label="Diff">${file ? `<div class="dh"><span class="mono">${esc(file.path)}</span><label class="vt"><input type="checkbox" data-viewed="${esc(file.path)}" ${file.viewed === 'viewed' ? 'checked' : ''}> Viewed</label></div>
         <div class="code">${lines ? renderDiff(file!.path, lines, pr) : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>'}</section></div>`;
 }
@@ -485,9 +485,11 @@ function renderDiff(path: string, lines: DiffLine[], pr: PrDetail): string {
     if (c && !c.replyTo && !c.editId && c.path === path && c.side === side && c.line === no) html += composerBox(c);
     return html;
   }).join('');
-  // Threads on lines this diff doesn't show (outdated, or outside the changed hunks) still need a home.
+  // Threads on lines this diff doesn't show (outdated, or outside the changed hunks), and findings without a
+  // line, still need a home.
   const elsewhere = here.filter((t) => !shown.has(t.id));
-  return (elsewhere.length ? `<div class="outside"><span class="lbl">Comments on lines not shown here</span>${elsewhere.map((t) => threadCard(t, pr)).join('')}</div>` : '') + out;
+  const loose = drafts.filter((d) => d.line == null || !lines.some((l) => l.kind !== 'gap' && (d.side === 'LEFT' ? l.oldNo : l.newNo) === d.line && (d.side === 'LEFT') === (l.kind === 'del')));
+  return (elsewhere.length || loose.length ? `<div class="outside"><span class="lbl">Comments on lines not shown here</span>${elsewhere.map((t) => threadCard(t, pr)).join('')}${loose.map(draftCard).join('')}</div>` : '') + out;
 }
 
 /** An existing thread in the diff: its finding's severity, the conversation, and what you can do about it. */
@@ -513,7 +515,7 @@ function draftCard(d: Draft): string {
   if (c?.editId === d.id) return composerBox(c);
   return `<div class="drf ${d.from}"><div class="drh"><span class="chip pend">Pending</span>${d.from === 'agent' ? `<span class="chip agent">${I.spark}From your agent</span>` : ''}${sevChip(d.severity)}${d.resolve ? '<span class="chip">Resolves the thread</span>' : ''}
     <span class="end"><button class="link" data-edit="${esc(d.id)}">Edit</button><button class="link" data-del="${esc(d.id)}">Delete</button>${d.from === 'agent' ? `<button class="btn sm" data-keep="${esc(d.id)}">Keep</button>` : ''}</span></div>
-    <div class="drb">${esc(d.body)}</div></div>`;
+    <div class="drb">${esc(d.body.replace(/^\*\*P[0-3]\*\*\s*/, ''))}</div></div>`;
 }
 
 function composerBox(c: Composer): string {
@@ -779,6 +781,7 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'composeCancel') save({ composer: null });
   else if (d.do === 'composeAdd' || d.do === 'composeNow' || d.do === 'composeSave') finishComposer(d.do);
   else if (d.do === 'nextFinding') stepFinding(1);
+  else if (d.do === 'reviewWithAgent') send({ type: 'reviewWithAgent' });
   else if (d.do === 'dismissNotice') send({ type: 'dismissNotice' });
   else if (d.do === 'threads') {
     save({ step: 'overview' });
