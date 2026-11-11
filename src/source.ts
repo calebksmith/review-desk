@@ -23,6 +23,8 @@ export interface DataSource {
    * carry `added`: ids of drafts that are already in the reviewer's pending review and mustn't be sent again.
    */
   submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<Sent>;
+  /** Converts the PR to a draft, or marks a draft ready for review: GitHub's two buttons. */
+  setDraft(pr: PrDetail, draft: boolean): Promise<void>;
   /** Resolves a thread right away, like GitHub's Resolve conversation. */
   resolveThread(pr: PrDetail, threadId: string): Promise<void>;
   /** Posts one line comment or reply right away, outside a review. */

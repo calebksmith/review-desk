@@ -366,6 +366,11 @@ export class GitHubSource implements DataSource {
     await this.octokit.graphql('mutation($id: ID!) { deletePullRequestReview(input: { pullRequestReviewId: $id }) { clientMutationId } }', { id }).catch(() => {});
   }
 
+  async setDraft(pr: PrDetail, draft: boolean): Promise<void> {
+    const mutation = draft ? 'convertPullRequestToDraft' : 'markPullRequestReadyForReview';
+    await this.octokit.graphql(`mutation($id: ID!) { ${mutation}(input: { pullRequestId: $id }) { clientMutationId } }`, { id: pr.nodeId });
+  }
+
   async resolveThread(_pr: PrDetail, threadId: string): Promise<void> {
     await this.resolve(threadId);
   }

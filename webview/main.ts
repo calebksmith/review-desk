@@ -6,7 +6,7 @@ import { inDiff } from '../src/patch';
 import { parseKey, prKey } from '../src/protocol';
 import type { CheckRun, Comment, CommentAction, ConversationItem, Draft, ReviewEvent, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
 import { askAndReply, who } from '../src/refresh';
-import { reasons } from '../src/signals';
+import { inMilestone, milestones, NO_MILESTONE, reasons } from '../src/signals';
 import { fileMarks, nearLines, reviewQueue, stepQueue, type QueueItem } from '../src/queue';
 import { bulkMergeable, isDependabot, isReReview, openFindings, priority, priorityOrder, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural, prStatus, stillOpen, type Bucket, type Tone } from '../src/status';
 
@@ -22,14 +22,14 @@ type Step = 'overview' | 'checks' | 'files';
 /** The comment box open in the diff: a new comment on a line (or range), a reply to a thread, or an edit. */
 interface Composer { id?: string; path: string; line: number | null; side: 'RIGHT' | 'LEFT'; startLine?: number | null; replyTo?: string; resolve?: boolean; editId?: string; prefill?: string }
 type Thread = Extract<ConversationItem, { kind: 'thread' }>;
-interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; part: PartKey | null; cardOpen: boolean; conv: 'all' | 'unresolved' | 'mine'; composer: Composer | null; finding: string | null; near: boolean; menu: 'checklist' | 'methods' | 'review' | null }
+interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; milestone: string | null; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; part: PartKey | null; cardOpen: boolean; conv: 'all' | 'unresolved' | 'mine'; composer: Composer | null; finding: string | null; near: boolean; menu: 'checklist' | 'methods' | 'review' | null }
 
 let host: HostState | null = null;
 /** True while the reviewer moves through the queue with j/k; a mouse move hides the cursor again. */
 let kbd = false;
 /** Text to put in Overview's comment box on the next render. */
 let prefill: string | null = null;
-let view: View = { filter: 'all', repo: '', reviewEvent: null, part: null, cardOpen: false, conv: 'all', composer: null, finding: null, near: false, showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
+let view: View = { filter: 'all', repo: '', milestone: null, reviewEvent: null, part: null, cardOpen: false, conv: 'all', composer: null, finding: null, near: false, showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
 // State saved by older versions named the files page "review".
 if (!['overview', 'checks', 'files'].includes(view.step)) view.step = 'files';
 // Older versions saved a bare PR number; keys are owner/name#number now.
@@ -60,6 +60,7 @@ const I = {
   down: svg('M7 10l5 5 5-5', 'ico caretico'),
   lock: svg('M7 11V8a5 5 0 0 1 10 0v3M6 11h12v9H6z'),
   doc: svg('M7 4h7l4 4v12H7zM14 4v4h4M10 12h5M10 16h5'),
+  milestone: svg('M12 3v18M6 6h10l3 3-3 3H6z'),
   spark: svg('M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z'),
 };
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -122,9 +123,9 @@ function visibleQueue(h: HostState): PrSummary[] {
   const byNeed = priorityOrder({ queue: h.queue, blockerLabels: h.blockerLabels });
   if (view.layout === 'stacks') {
     const s = stacks(h.queue);
-    return [...s.stacks.flatMap((rows) => mergeTree(rows, h.queue).rows.map((r) => r.pr)), ...s.alone.sort(byNeed)].filter((p) => !view.repo || p.repo === view.repo);
+    return [...s.stacks.flatMap((rows) => mergeTree(rows, h.queue).rows.map((r) => r.pr)), ...s.alone.sort(byNeed)].filter((p) => (!view.repo || p.repo === view.repo) && inMilestone(p, view.milestone));
   }
-  return h.queue.filter((p) => (view.filter === 'all' || bucket(p) === view.filter) && (!view.repo || p.repo === view.repo)).sort(byNeed);
+  return h.queue.filter((p) => (view.filter === 'all' || bucket(p) === view.filter) && (!view.repo || p.repo === view.repo) && inMilestone(p, view.milestone)).sort(byNeed);
 }
 
 const EMPTY: Record<Filter, string> = {
@@ -135,6 +136,13 @@ const EMPTY: Record<Filter, string> = {
   approved: 'Nothing approved and waiting to merge.',
   merged: 'Nothing merged recently.',
 };
+
+/** The PR's milestone, on every row that has one, so the queue shows which release each PR is in. */
+function milestoneTag(p: PrSummary): string {
+  if (!p.milestone) return '';
+  const due = p.milestone.dueOn ? ` · due ${new Date(p.milestone.dueOn).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : '';
+  return `<span class="ms" title="Milestone: ${esc(p.milestone.title)}${due}">${I.milestone}${esc(p.milestone.title)}</span>`;
+}
 
 /** Who reviewed it, in a few words: whose changes are requested, or who approved. */
 function reviewNote(p: PrSummary): string {
@@ -167,7 +175,7 @@ function row(p: PrSummary, i: number, h: HostState, depth = 0, inStack = false, 
   const linear = p.linear ? (p.linear.url ? `<a class="lin" href="${esc(p.linear.url)}" title="Open in Linear">${esc(p.linear.key)}</a>` : `<span class="lin" title="Linear issue">${esc(p.linear.key)}</span>`) : '';
   return `<button class="qrow ${kbd && i === view.sel ? 'sel' : ''} ${depth ? 'nested' : ''}" data-open="${esc(prKey(p))}" data-vars="--depth:${depth}">
       ${graph}<span class="num">#${p.number}</span>
-      <span class="t"><span class="tl"><b>${esc(p.title)}</b>${checksIcon(p)}</span><span class="sub">${multi(h) && !inStack ? `<span class="rp" title="${esc(p.repo)}">${esc(short(p.repo))}</span>` : ''}<span class="diffstat"><span class="a">+${p.additions}</span> <span class="d">−${p.deletions}</span></span><span class="${p.mine ? 'you' : ''}">${p.mine ? 'you' : esc(p.author)}</span>${parent ? `<span class="on">on #${parent.number}</span>` : ''}${linear}${reviewNote(p)}</span>${why}</span>
+      <span class="t"><span class="tl"><b>${esc(p.title)}</b>${checksIcon(p)}</span><span class="sub">${multi(h) && !inStack ? `<span class="rp" title="${esc(p.repo)}">${esc(short(p.repo))}</span>` : ''}<span class="diffstat"><span class="a">+${p.additions}</span> <span class="d">−${p.deletions}</span></span><span class="${p.mine ? 'you' : ''}">${p.mine ? 'you' : esc(p.author)}</span>${parent ? `<span class="on">on #${parent.number}</span>` : ''}${linear}${milestoneTag(p)}${reviewNote(p)}</span>${why}</span>
       ${chip}${asked}<span class="st">${listStatus(p)}</span><span class="when" title="Updated ${ago(p.updatedAt)} ago">${ago(p.updatedAt)}</span></button>`;
 }
 
@@ -190,7 +198,7 @@ function graphCell(t: TreeRow, lanes: number): string {
  * Then the PRs that stand alone.
  */
 function stackedList(h: HostState): string {
-  const { stacks: all, alone } = stacks(view.repo ? h.queue.filter((p) => p.repo === view.repo) : h.queue);
+  const { stacks: all, alone } = stacks(h.queue.filter((p) => (!view.repo || p.repo === view.repo) && inMilestone(p, view.milestone)));
   let i = 0;
   const tree = (rows: StackRow[]) => {
     const root = rows[0]!.pr;
@@ -211,6 +219,20 @@ function repoFilter(h: HostState): string {
   const repos = [...new Set(h.queue.map((p) => p.repo))].sort();
   if (view.repo && !repos.includes(view.repo)) view.repo = '';
   return `<select id="repofilter" class="repofilter" aria-label="Repository"><option value="">All repos · ${repos.length}</option>${repos.map((r) => `<option value="${esc(r)}" ${r === view.repo ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>`;
+}
+
+/**
+ * Narrow the queue to one milestone (a release), like GitHub's Milestones filter: soonest due first. Only when
+ * some PR in the queue has a milestone.
+ */
+function milestoneFilter(h: HostState): string {
+  const all = milestones(h.queue);
+  if (!all.length) return '';
+  if (view.milestone && !all.some((m) => m.title === view.milestone)) view.milestone = null;
+  const none = h.queue.filter((p) => !p.milestone).length;
+  const when = (d: string | null) => (d ? ` · due ${new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : '');
+  const opt = (value: string, label: string, on: boolean) => `<option value="${esc(value)}" ${on ? 'selected' : ''}>${esc(label)}</option>`;
+  return `<select id="msfilter" class="repofilter" aria-label="Milestone"><option value="*" ${view.milestone === null ? 'selected' : ''}>All milestones</option>${all.map((m) => opt(`=${m.title}`, `${m.title}${when(m.dueOn)} · ${m.count}`, view.milestone === m.title)).join('')}${none ? opt(`=${NO_MILESTONE}`, `No milestone · ${none}`, view.milestone === NO_MILESTONE) : ''}</select>`;
 }
 
 /** "All", split by who acts next: your turn first, then what waits on someone else (dimmed), then merged. */
@@ -242,7 +264,7 @@ function queue(h: HostState): string {
       <div class="end">${bulkButton(h)}${updated(h)}<button class="btn icon" data-do="refresh" aria-label="Refresh" title="Refresh (r)">${I.rerun}</button><button class="btn icon" data-do="keys" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button></div></div>
     ${h.notice ? `<div class="note" role="status">${I.check}<span>${esc(h.notice)}</span><button class="btn sm" data-do="dismissNotice">Dismiss</button></div>` : ''}
     <div class="pad">
-      <div class="toolbar">${stacked ? '' : `<div class="seg filters" role="group" aria-label="Filter">${f('all', 'All')}${f('needs', 'Needs you')}${mine}${f('waiting', 'Waiting on others')}${f('approved', 'Approved')}${f('merged', 'Merged')}</div>`}${repoFilter(h)}${layout}</div>
+      <div class="toolbar">${stacked ? '' : `<div class="seg filters" role="group" aria-label="Filter">${f('all', 'All')}${f('needs', 'Needs you')}${mine}${f('waiting', 'Waiting on others')}${f('approved', 'Approved')}${f('merged', 'Merged')}</div>`}${repoFilter(h)}${milestoneFilter(h)}${layout}</div>
       ${stacked ? (h.loading && !h.queue.length ? empty : stackedList(h)) : view.filter === 'all' && rows.length ? sections(rows, h) : `<div class="list">${rows.map((p, i) => row(p, i, h)).join('') || empty}</div>`}
     </div>`;
 }
@@ -356,6 +378,7 @@ function partDetail(k: PartKey, pr: PrDetail, h: HostState): string {
 /** A blocker's one fix: resolve the conflict (whoever should), bring the base in, or open the PR below. */
 function blockerAction(pr: PrDetail, h: HostState, key: string, prKeyBelow?: string): string {
   if (key === 'conflicts') return conflictAction(pr);
+  if (key === 'draft') return `<button class="btn sm" data-do="readyForReview" ${h.busy ? 'disabled' : ''}>${h.busy === 'draft' ? '<span class="spin sm"></span>' : ''}Ready for review</button>`;
   if (key === 'base') return `<button class="btn sm" data-do="updateBranch" ${h.busy ? 'disabled' : ''}>${h.busy === 'update' ? '<span class="spin sm"></span>' : ''}Update branch</button>`;
   if (key === 'stack' && prKeyBelow) return `<button class="btn sm" data-open="${esc(prKeyBelow)}">Open #${parseKey(prKeyBelow)?.number ?? ''}</button>`;
   return '';
@@ -519,7 +542,9 @@ function details(pr: PrDetail): string {
   const state: Record<string, [string, string, string]> = {
     approved: ['ok', I.check, 'Approved'], changes_requested: ['bad', I.x, 'Requested changes'], commented: ['muted', I.com, 'Commented'], requested: ['run', I.clock, 'Asked to review'],
   };
-  return `<div class="details"><div class="dg"><span class="lbl">Reviewers</span>${reviewersList(pr)}</div>${detailsRest(pr)}</div>`;
+  // GitHub's own wording and place: under the reviewers.
+  const toDraft = pr.state === 'open' && !pr.isDraft ? `<p class="sub todraft">Still in progress? <button class="link" data-do="toDraft" ${host?.busy ? 'disabled' : ''}>Convert to draft</button></p>` : '';
+  return `<div class="details"><div class="dg"><span class="lbl">Reviewers</span>${reviewersList(pr)}${toDraft}</div>${detailsRest(pr)}</div>`;
 }
 
 function reviewersList(pr: PrDetail): string {
@@ -968,6 +993,8 @@ document.addEventListener('change', (e) => {
   const t = e.target as HTMLInputElement | HTMLSelectElement;
   if (t instanceof HTMLInputElement && t.name === 'revent') save({ reviewEvent: t.value as ReviewEvent });
   else if (t.id === 'repofilter') save({ repo: (t as HTMLSelectElement).value, sel: 0 });
+  // "*" is every milestone; "=Title" one of them, and "=" alone those without one.
+  else if (t.id === 'msfilter') { const v = (t as HTMLSelectElement).value; save({ milestone: v === '*' ? null : v.slice(1), sel: 0 }); }
   else if (t.id === 'method') save({ method: t.value as MergeMethod });
   else if (t instanceof HTMLInputElement && t.dataset.viewed) send({ type: 'setViewed', path: t.dataset.viewed, viewed: t.checked });
 });
@@ -1002,8 +1029,8 @@ document.addEventListener('click', (e) => {
   else if (d.fix) send({ type: 'fixWithAgent', check: d.fix });
   else if (d.thread) { send({ type: 'fixThread', id: d.thread }); advanceFrom(d.thread); }
   else if (d.action) { const a: CommentAction | undefined = host?.actions[Number(d.action)]; if (a) send({ type: 'comment', body: a.comment }); }
-  else if (d.file) save({ file: d.file, step: 'files', onlyNew: d.onlynew === '1', near: false });
-  else if (d.onlynew) save({ onlyNew: d.onlynew === '1' });
+  else if (d.file) { save({ file: d.file, step: 'files', onlyNew: d.onlynew === '1', near: false }); if (d.onlynew === '1') showFirstChange(); }
+  else if (d.onlynew) { save({ onlyNew: d.onlynew === '1' }); if (d.onlynew === '1') showFirstChange(); }
   else if (d.line && view.file) send({ type: 'openFile', path: view.file, line: Number(d.line) });
   else if (d.cline && view.file) openComposer(d.cline, (e as MouseEvent).shiftKey);
   else if (d.reply) save({ composer: replyTo(d.reply, d.resolve === '1', d.prefill), finding: d.reply });
@@ -1018,6 +1045,8 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'approve') send({ type: 'approve' });
   else if (d.do === 'merge') send({ type: 'merge', method: (d.method as MergeMethod | undefined) ?? 'merge' });
   else if (d.do === 'updateBranch') send({ type: 'updateBranch' });
+  else if (d.do === 'toDraft') send({ type: 'setDraft', draft: true });
+  else if (d.do === 'readyForReview') send({ type: 'setDraft', draft: false });
   else if (d.do === 'keys') save({ keys: !view.keys });
   else if (d.do === 'switchRepo') send({ type: 'switchRepository' });
   else if (d.do === 'togglePassed') save({ showPassed: !view.showPassed });
@@ -1096,7 +1125,28 @@ function goToItem(id: string): void {
   if (path == null) return;
   const near = view.near && queueNow().some((x) => x.id === id);
   save({ step: 'files', onlyNew: false, finding: id, near, ...(near ? {} : { file: path }) });
-  cardFor(id)?.scrollIntoView({ block: 'center' });
+  const card = cardFor(id);
+  card?.scrollIntoView({ block: 'center' });
+  if (card) flash([card]);
+}
+
+/** Lights up what you were just taken to for a moment, so it's clear where you landed. */
+function flash(els: HTMLElement[]): void {
+  for (const el of els) {
+    el.classList.remove('flash');
+    void el.offsetWidth; // restart the animation when it's the same element again
+    el.classList.add('flash');
+  }
+}
+
+/** "Since you looked": scroll to the first lines that changed, and light them up. */
+function showFirstChange(): void {
+  const first = app.querySelector<HTMLElement>('.diffpane .ln.add, .diffpane .ln.del');
+  if (!first) return;
+  const run = [first];
+  for (let n = first.nextElementSibling; n instanceof HTMLElement && n.matches('.ln.add, .ln.del'); n = n.nextElementSibling) run.push(n);
+  first.scrollIntoView({ block: 'center' });
+  flash(run);
 }
 
 const cardFor = (id: string) => app.querySelector<HTMLElement>(`.diffpane [data-thread-id="${CSS.escape(id)}"], .diffpane [data-draft-id="${CSS.escape(id)}"]`);

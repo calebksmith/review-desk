@@ -582,3 +582,15 @@ span.lin { color: var(--fg-3) }
 .railfoot { margin-top: auto; display: flex; flex-direction: column; gap: 6px; padding-top: 8px }
 .railfoot .keyslink { margin-top: 0; padding-top: 0 }
 @media (max-width: 600px) { .crumb .upd { display: none } }
+
+/* Milestones on queue rows and in the milestone filter. */
+.qrow .sub .ms { display: inline-flex; align-items: center; gap: 3px; color: var(--fg-2); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.qrow .sub .ms .ico { width: 12px; height: 12px }
+
+/* Where "Show it" (and ] [, or a comment's link) took you: lit up for a moment, then gone. */
+.flash { position: relative }
+.flash::after { content: ''; position: absolute; inset: 0; border-radius: inherit; background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--focus); pointer-events: none; animation: flash 1.8s ease-out forwards }
+@keyframes flash { 0%, 45% { opacity: 1 } 100% { opacity: 0 } }
+@media (prefers-reduced-motion: reduce) { .flash::after { animation-timing-function: steps(1, end) } }
+
+.details .todraft { margin: 6px 0 0; font-size: 12px; color: var(--fg-3) }

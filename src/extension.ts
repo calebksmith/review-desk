@@ -370,7 +370,7 @@ class PrItem extends vscode.TreeItem {
     // With several repos in view, a number alone is ambiguous: say which repo.
     // With several repos the PR sits under its repo, so the row doesn't repeat it.
     this.description = [parent ? `on #${parent.number}` : '', status.quiet ? '' : status.label].filter(Boolean).join(' · ');
-    this.tooltip = new vscode.MarkdownString(`**${pr.repo}#${pr.number} ${pr.title}**\n\n${status.label} · by ${pr.author} · +${pr.additions} −${pr.deletions}`);
+    this.tooltip = new vscode.MarkdownString(`**${pr.repo}#${pr.number} ${pr.title}**\n\n${status.label} · by ${pr.author} · +${pr.additions} −${pr.deletions}${pr.milestone ? `\n\nMilestone: ${pr.milestone.title}` : ''}`);
     const t = TONE[status.tone];
     this.iconPath = pr.state === 'merged' ? new vscode.ThemeIcon('git-merge') : new vscode.ThemeIcon(t.icon, t.color ? new vscode.ThemeColor(t.color) : undefined);
     this.contextValue = 'pr';

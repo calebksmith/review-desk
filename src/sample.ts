@@ -219,6 +219,10 @@ export class SampleSource implements DataSource {
     };
   }
 
+  async setDraft(pr: PrDetail, draft: boolean): Promise<void> {
+    this.find(pr.repo, pr.number).summary.isDraft = draft;
+  }
+
   async resolveThread(pr: PrDetail, threadId: string): Promise<void> {
     const t = this.find(pr.repo, pr.number).conversation.find((it) => it.kind === 'thread' && it.id === threadId);
     if (t?.kind === 'thread') t.resolved = true;

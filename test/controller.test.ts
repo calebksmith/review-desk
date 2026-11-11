@@ -253,6 +253,19 @@ describe('Controller', () => {
     expect(sent.some((m) => m.type === 'toast' && m.text === 'Resolved the comment on WorkCard.tsx:44.')).toBe(true);
   });
 
+  it('converts a PR to a draft after asking, and marks it ready for review again', async () => {
+    const asked: string[] = [];
+    const { c, sent } = setup('', (q) => asked.push(q));
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });
+    await c.handle({ type: 'setDraft', draft: true });
+    expect(asked).toEqual(['Convert #52 to a draft? It can’t be merged until it’s marked ready for review again.']);
+    expect(c.snapshot.pr?.isDraft).toBe(true);
+    await c.handle({ type: 'setDraft', draft: false });
+    expect(asked).toHaveLength(1);
+    expect(c.snapshot.pr?.isDraft).toBe(false);
+    expect(sent.filter((m) => m.type === 'toast').map((m) => (m as { text: string }).text)).toEqual(['Converted #52 to a draft.', 'Marked #52 ready for review.']);
+  });
+
   it('sends an unresolved line comment to the agent', async () => {
     const { c, prompts } = setup();
     await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });

@@ -100,7 +100,7 @@ export function statusCard(pr: PrDetail, queue: readonly PrSummary[], me: string
   const threads = pr.conversation.filter((it): it is Thread => it.kind === 'thread');
   const parts = [checksPart(pr), findingsPart(threads), commentsPart(threads), approvalsPart(pr, me)];
   const sum = mergeSummary(pr, queue, me);
-  const blockers = mergeReadiness(pr, queue, me).filter((it) => (it.key === 'conflicts' && it.tone === 'bad') || (it.key === 'base' && it.tone === 'warn') || it.key === 'stack');
+  const blockers = mergeReadiness(pr, queue, me).filter((it) => it.key === 'draft' || (it.key === 'conflicts' && it.tone === 'bad') || (it.key === 'base' && it.tone === 'warn') || it.key === 'stack');
   const ready = sum.tone === 'ok';
   const sub = ready
     ? parts.filter((p) => p.summary !== 'None').map((p) => `${p.label.toLowerCase()}: ${p.summary.charAt(0).toLowerCase()}${p.summary.slice(1)}`).join(' · ')

@@ -199,3 +199,12 @@ describe('required checks', () => {
     expect(mergeWarning(pr)).toBe('lighthouse is failing');
   });
 });
+
+describe('drafts', () => {
+  it('can’t merge, and the checklist says so first', () => {
+    const d = detail({ isDraft: true, reviewDecision: 'approved' });
+    expect(mergeBlocker(d)).toBe('It’s a draft. Mark it ready for review first.');
+    expect(mergeReadiness(d)[0]).toMatchObject({ key: 'draft', tone: 'warn' });
+    expect(mergeSummary(d).text).toBe('Draft: it can’t merge until it’s ready for review');
+  });
+});

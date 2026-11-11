@@ -116,7 +116,7 @@ function waitingOn(reviewers: Reviewer[]): string {
 const names = (rs: Reviewer[], me = '') => rs.map((r) => (r.login === me ? 'you' : r.login)).join(', ');
 
 export interface ReadinessItem {
-  key: 'stack' | 'approval' | 'findings' | 'checks' | 'conflicts' | 'base' | 'threads';
+  key: 'draft' | 'stack' | 'approval' | 'findings' | 'checks' | 'conflicts' | 'base' | 'threads';
   tone: Tone;
   text: string;
   action?: 'updateBranch' | 'showChecks' | 'openThreads' | 'fixConflicts' | 'openPr' | 'nextFinding';
@@ -132,6 +132,7 @@ export function mergeReadiness(pr: PrDetail, queue: readonly PrSummary[] = [], m
   const items: ReadinessItem[] = [];
   const c = pr.checks;
   const parent = parentOf(pr, queue);
+  if (pr.isDraft && pr.state === 'open') items.push({ key: 'draft', tone: 'warn', text: 'Draft: it can’t merge until it’s ready for review' });
   if (parent) items.push({ key: 'stack', tone: 'warn', text: `Merge #${parent.number} first`, action: 'openPr', pr: prKey(parent) });
 
   const approvedBy = pr.reviewers.filter((r) => r.state === 'approved');
@@ -174,7 +175,7 @@ export function mergeReadiness(pr: PrDetail, queue: readonly PrSummary[] = [], m
 
 const URGENCY: Record<Tone, number> = { bad: 0, run: 1, warn: 2, muted: 3, ok: 4 };
 // Within a tone, what blocks a merge outright comes first.
-const LEAD: Record<ReadinessItem['key'], number> = { conflicts: 0, stack: 1, findings: 2, checks: 3, approval: 4, base: 5, threads: 6 };
+const LEAD: Record<ReadinessItem['key'], number> = { draft: -1, conflicts: 0, stack: 1, findings: 2, checks: 3, approval: 4, base: 5, threads: 6 };
 
 /**
  * The one line beside the header's button: the most urgent item, and how many others need attention.
@@ -206,6 +207,7 @@ export const stillOpen = (f: { p0: number; p1: number }) => `${p0p1(f)} ${f.p0 +
  * merged out of order (the PR below has to go first, or this one lands in its branch instead of main).
  */
 export function mergeBlocker(pr: PrDetail, queue: readonly PrSummary[] = []): string | null {
+  if (pr.isDraft) return 'It’s a draft. Mark it ready for review first.';
   if (pr.mergeable === false || pr.mergeState === 'dirty') return `Resolve the conflicts with ${pr.baseRef} first.`;
   // A required check failing: GitHub won't merge it, so there's no "anyway".
   const required = failingChecks(pr, true);

@@ -6,7 +6,7 @@ This is phase 1 of five: a read-only review panel on GitHub data. The agent step
 
 ## What it does today
 
-- **Review queue:** open and recently merged PRs, filtered by Needs you, Approved and Merged, sorted by what needs you first.
+- **Review queue:** open and recently merged PRs, filtered by Needs you, Approved and Merged, sorted by what needs you first. Each row names its milestone, and the **Milestone** filter narrows the queue to one release (soonest due first), like GitHub's.
 - **Dependabot updates in one click:** when Dependabot PRs have no conflicts and every check passed, **Merge N Dependabot updates** in the queue approves and merges them one at a time. Each is re-checked before its turn, since merging one can make the next conflict. Any that GitHub refuses, for example because the repo needs another approval, are skipped with GitHub's reason. Ones with failing checks stay in the queue for you to open.
 - **Checks:** every check run and commit status (Vercel, for one) on the latest commit, failures first, with a link to each log. A failed GitHub Actions job names the step that failed and shows the error lines from its log.
 - **Review with agent:** in Files changed, hands your agent an adversarial review of the PR: what it says it does, what Codex already flagged (so it isn't repeated), and what automated review misses. When the repo is open in VS Code, the agent writes its findings to `.review-desk/` (added to the repo's local git excludes, never its `.gitignore`), and they appear as drafts marked **From your agent** at their lines, for you to keep, edit or delete before your review is sent.
@@ -15,7 +15,7 @@ This is phase 1 of five: a read-only review panel on GitHub data. The agent step
 - **Conversation:** comments, reviews and comments on lines of code, oldest first like GitHub, with what's new since you last looked marked and one click to jump to it. A comment on a line of code opens that file, and an unresolved one has **Fix with agent**, so review findings (Codex's included) go to your agent like a failing check.
 - **Comments:** post a comment from the Conversation tab (⌘Enter sends). Comments you post often, like `@codex review`, can be one-click buttons that show when that reviewer last replied; see `reviewDesk.commentActions`.
 - **Close or ignore** a Dependabot PR from its Checks page: posts the Dependabot command you pick, such as ignoring the new major version, and Dependabot closes the PR.
-- **New commits since you looked:** when the agent pushes after you opened a PR, a banner names the files and shows only what changed since.
+- **New commits since you looked:** when the agent pushes after you opened a PR, a banner names the files and shows only what changed since. **Show it** lights up the lines it takes you to.
 - **Approve and Merge** from the header, beside one line that says what needs attention ("1 check failing +1") or that the PR is ready. Click that line for the merge checklist, in GitHub's order: approval, checks, conflicts, base branch, open threads, each with its fix. Merge is GitHub's **Squash and merge ▾**, with the method in its dropdown; it asks before it runs and takes you back to the queue. While a check fails it reads **Merge anyway** and names the failing checks. Conflicts block a merge and show a bar with **Fix with agent**.
 
 ## Try it
@@ -41,7 +41,7 @@ To install it as a normal extension, run `npm run package` and install the `.vsi
 - **Comment on lines** in Files changed: hover a line for **+** (shift-click another for a range), then **Add to review** or **Comment now**. Held-back comments show at their lines as **Pending**.
 - **Findings** (threads marked P0–P3, like Codex's) show at their lines with **Fix it**, **Ask the author** (a held-back reply), **Not an issue** (a held-back reply that resolves the thread when sent), **Reply**, and **Resolve**, which resolves it right away, like GitHub's Resolve conversation. **]** and **[** step through open findings, most severe first.
 - **Re-review**: a PR you requested changes on comes back to Your turn when the author pushes or asks again, with a "since your review" diff. Its conversation opens on **Mine**, and each thread you started says whether it was resolved, replied to, or is waiting.
-- **Conversation filters** on Overview, like GitHub's: All, Unresolved, Mine. The PR's rail shows its reviewers and their state, labels, milestone and Linear issue.
+- **Conversation filters** on Overview, like GitHub's: All, Unresolved, Mine. The PR's rail shows its reviewers and their state, labels, milestone and Linear issue, and **Convert to draft** for a PR that isn't ready after all. A draft can't merge; the status card offers **Ready for review**.
 - **Conflicts**: on a teammate's PR, **Ask them to resolve** fills in a comment for you to send (you can still approve the code); on Dependabot's, **Ask Dependabot to rebase**; on yours or an agent's, **Fix with agent**.
 - **Keys**: c comments on the line under the pointer, r replies to the current finding, ] and [ move between findings, ⌘⇧Enter finishes the review.
 

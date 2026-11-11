@@ -199,7 +199,7 @@ export interface HostState {
   queue: PrSummary[];
   pr: PrDetail | null;
   loading: boolean;
-  busy: 'approve' | 'merge' | 'update' | 'bulk' | 'comment' | 'review' | 'resolve' | null;
+  busy: 'approve' | 'merge' | 'update' | 'bulk' | 'comment' | 'review' | 'resolve' | 'draft' | null;
   /** Progress while merging Dependabot updates in one go. */
   bulk: { done: number; total: number } | null;
   /** What the last bulk merge did, until the reviewer dismisses it. */
@@ -245,5 +245,6 @@ export type FromWebview =
   | { type: 'deleteDraft'; id: string }
   | { type: 'commentNow'; draft: Omit<Draft, 'id' | 'from'> }
   | { type: 'resolveThread'; id: string }
+  | { type: 'setDraft'; draft: boolean }
   | { type: 'reviewWithAgent' }
   | { type: 'dismissNotice' };

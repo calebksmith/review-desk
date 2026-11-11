@@ -84,6 +84,7 @@ export class Controller {
         case 'deleteDraft': await this.saveDrafts(this.state.drafts.filter((d) => d.id !== msg.id)); break;
         case 'commentNow': await this.commentNow(msg.draft); break;
         case 'resolveThread': await this.resolveThread(msg.id); break;
+        case 'setDraft': await this.setDraft(msg.draft); break;
         case 'reviewWithAgent': await this.reviewWithAgent(); break;
         case 'dismissNotice': this.set({ notice: null }); break;
       }
@@ -317,6 +318,25 @@ export class Controller {
       this.set({ busy: null });
     }
     this.host.post({ type: 'toast', text: `Comment posted${sent.unresolved ? `.${notResolved(sent)}` : ''}` });
+    await this.loadPr(pr);
+  }
+
+  /**
+   * Back to a draft when it isn't ready for review after all (asking first, as GitHub does), or ready for review
+   * again. A draft can't be merged.
+   */
+  private async setDraft(draft: boolean): Promise<void> {
+    const pr = this.state.pr;
+    if (!pr || pr.state !== 'open' || pr.isDraft === draft || this.state.busy) return;
+    if (draft && !(await this.host.confirm(`Convert ${this.ref(pr)} to a draft? It can’t be merged until it’s marked ready for review again.`, 'Convert to draft'))) return;
+    this.set({ busy: 'draft' });
+    try {
+      await this.source.setDraft(pr, draft);
+      this.source.invalidate?.();
+    } finally {
+      this.set({ busy: null });
+    }
+    this.host.post({ type: 'toast', text: draft ? `Converted ${this.ref(pr)} to a draft.` : `Marked ${this.ref(pr)} ready for review.` });
     await this.loadPr(pr);
   }
 

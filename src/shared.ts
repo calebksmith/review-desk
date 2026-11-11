@@ -35,4 +35,5 @@ export class SharedSource implements DataSource {
   submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<Sent> { return this.inner.submitReview(pr, event, body, drafts); }
   commentNow(pr: PrDetail, draft: Draft): Promise<Sent> { return this.inner.commentNow(pr, draft); }
   resolveThread(pr: PrDetail, threadId: string): Promise<void> { return this.inner.resolveThread(pr, threadId); }
+  setDraft(pr: PrDetail, draft: boolean): Promise<void> { return this.inner.setDraft(pr, draft); }
 }

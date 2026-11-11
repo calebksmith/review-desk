@@ -68,7 +68,14 @@ export function tier(s: Signals): number {
 export function reasons(p: PrSummary, s: Signals, now = Date.now()): { text: string; tone: Tone; title?: string }[] {
   const out: { text: string; tone: Tone; title?: string }[] = [];
   if (s.releaseBlocker) out.push({ text: 'Release blocker', tone: 'bad' });
-  if (s.release) out.push({ text: s.release.dueOn ? `${s.release.title.length > 18 ? 'Release' : s.release.title} · ${due(s.release.dueOn, now)}` : s.release.title, tone: s.release.soon ? 'warn' : 'muted', title: s.release.title });
+  if (s.release) {
+    // A milestone is named on the row already; the reason only says when it's due.
+    const fromMilestone = p.milestone?.title === s.release.title;
+    const when = s.release.dueOn ? due(s.release.dueOn, now) : null;
+    const text = fromMilestone ? (when ? (when === 'overdue' ? 'Overdue' : when.startsWith('due') ? `D${when.slice(1)}` : `Due ${when}`) : null)
+      : when ? `${s.release.title.length > 18 ? 'Release' : s.release.title} · ${when}` : s.release.title;
+    if (text) out.push({ text, tone: s.release.soon ? 'warn' : 'muted', title: s.release.title });
+  }
   if (s.blocks) out.push({ text: `Blocks ${s.blocks}`, tone: 'run', title: `${s.blocks} open PR${s.blocks === 1 ? ' is' : 's are'} waiting on this one` });
   if (p.findingCounts.p0 || p.findingCounts.p1) out.push({ text: `${p.findingCounts.p0 ? `${p.findingCounts.p0} P0` : `${p.findingCounts.p1} P1`} open`, tone: p.findingCounts.p0 ? 'bad' : 'warn' });
   const waited = now - Date.parse(s.waitingSince);
@@ -82,4 +89,30 @@ function due(iso: string, now: number): string {
   if (days === 0) return 'due today';
   if (days === 1) return 'due tomorrow';
   return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+/** What the queue's milestone filter shows when you pick "No milestone". Titles can't be empty, so it can't clash. */
+export const NO_MILESTONE = '';
+
+/**
+ * The milestones in the queue, for its filter: soonest due first, then those with no due date, by title. Repos that
+ * share a milestone title (one release across repos) count as one. `count` is how many PRs each holds.
+ */
+export function milestones(queue: readonly PrSummary[]): { title: string; dueOn: string | null; count: number }[] {
+  const by = new Map<string, { title: string; dueOn: string | null; count: number }>();
+  for (const p of queue) {
+    if (!p.milestone) continue;
+    const m = by.get(p.milestone.title) ?? { title: p.milestone.title, dueOn: p.milestone.dueOn, count: 0 };
+    m.count++;
+    if (p.milestone.dueOn && (!m.dueOn || p.milestone.dueOn < m.dueOn)) m.dueOn = p.milestone.dueOn;
+    by.set(m.title, m);
+  }
+  const at = (d: string | null) => (d ? Date.parse(d) : Infinity);
+  return [...by.values()].sort((a, b) => at(a.dueOn) - at(b.dueOn) || a.title.localeCompare(b.title));
+}
+
+/** Whether a PR is in the milestone picked in the filter: null is every PR, NO_MILESTONE those without one. */
+export function inMilestone(p: Pick<PrSummary, 'milestone'>, pick: string | null): boolean {
+  if (pick === null) return true;
+  return pick === NO_MILESTONE ? !p.milestone : p.milestone?.title === pick;
 }
