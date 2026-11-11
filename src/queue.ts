@@ -1,10 +1,13 @@
+import { conversationCounts } from './conversation';
 import type { DiffLine, Draft, PrDetail } from './protocol';
 
 /**
  * Something in the diff waiting on the reviewer: an open thread they haven't answered yet, or a suggestion
  * from their agent they haven't kept or deleted. A thread is answered when the reviewer has a reply held back
- * for it or wrote its last comment (a thread they started is waiting on the author). Answered threads and the
- * reviewer's own drafts need nothing more, so they aren't in the queue.
+ * for it or wrote its last comment (a thread they started is waiting on the author). On their own PR, though,
+ * every unresolved thread waits on them, whoever wrote last: nobody else resolves it, and a finding an agent
+ * posted as them (or answered as them) is still theirs to close. Answered threads and the reviewer's own drafts
+ * need nothing more, so they aren't in the queue.
  */
 export interface QueueItem {
   kind: 'thread' | 'draft';
@@ -20,7 +23,8 @@ export function reviewQueue(pr: PrDetail, drafts: readonly Draft[], me: string):
   const answered = new Set(drafts.filter((d) => d.replyTo && d.from === 'you').map((d) => d.replyTo));
   const items: QueueItem[] = [];
   for (const it of pr.conversation) {
-    if (it.kind !== 'thread' || it.resolved || answered.has(it.id) || (me && it.comments.at(-1)?.author === me)) continue;
+    if (it.kind !== 'thread' || it.resolved || answered.has(it.id)) continue;
+    if (me && !pr.mine && it.comments.at(-1)?.author === me) continue;
     items.push({ kind: 'thread', id: it.id, path: it.path, line: it.line, side: 'RIGHT', severity: it.severity });
   }
   for (const d of drafts) {
@@ -28,6 +32,16 @@ export function reviewQueue(pr: PrDetail, drafts: readonly Draft[], me: string):
     items.push({ kind: 'draft', id: d.id, path: d.path, line: d.line, side: d.side, severity: d.severity ?? null });
   }
   return items.sort((a, b) => (a.severity ?? 9) - (b.severity ?? 9) || a.path.localeCompare(b.path) || (a.line ?? 0) - (b.line ?? 0));
+}
+
+/**
+ * Where a PR opens. Something waiting on you comes first: Files changed, on the most severe item. Otherwise a
+ * first look or new comments start on Overview for the context, and anything else picks up the files.
+ */
+export function openOn(pr: PrDetail, drafts: readonly Draft[], me: string): { step: 'overview' | 'files'; item: QueueItem | null } {
+  const item = reviewQueue(pr, drafts, me)[0] ?? null;
+  if (item) return { step: 'files', item };
+  return { step: !pr.seenBefore || conversationCounts(pr.conversation).fresh ? 'overview' : 'files', item: null };
 }
 
 /** For the file list: how many items each file has, and the most severe one. */

@@ -8,6 +8,11 @@ import { SampleSource } from '../src/sample';
 const store = new Map<string, unknown>();
 // #55 was last opened 30 minutes ago, so its newer comments show as new.
 store.set('lastSeenAt:calebksmith/portfolio#55', new Date(Date.now() - 30 * 60_000).toISOString());
+// #59 was opened an hour ago, after Codex's finding: nothing is new, but the finding is still open.
+store.set('lastSeenAt:calebksmith/portfolio#59', new Date(Date.now() - 60 * 60_000).toISOString());
+// #58 has a suggestion from your agent, as if Review with agent had run.
+store.set('drafts:calebksmith/portfolio#58', [{ id: 'A_58_1', path: 'src/app/work/page.tsx', line: 23, side: 'RIGHT', from: 'agent', severity: 2,
+  body: 'Only the first study passes `first`, but the grid shows two images per row on wide screens. The second one is above the fold too.' }]);
 let state: unknown;
 // ?sample=team shows a team: several developers, stacked PRs and required approvals.
 const team = new URLSearchParams(location.search).get('sample') === 'team';

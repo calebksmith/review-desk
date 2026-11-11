@@ -3,20 +3,21 @@ import { SampleSource } from '../src/sample';
 import { needsYou, queueGroups, repoGroups } from '../src/sidebar';
 
 describe('sidebar', () => {
-  it('groups PRs in working order, failing first, and leaves out empty groups', async () => {
+  it('groups PRs in working order, open P1s then failing checks first, and leaves out empty groups', async () => {
     const queue = await new SampleSource().listPrs();
     const groups = queueGroups(queue);
     expect(groups.map((g) => g.label)).toEqual(['Needs you', 'Merged']);
     const needs = groups[0]!.prs.map((p) => p.number);
-    expect(needs.slice(0, 2).sort()).toEqual([55, 61]);
-    expect(needs).toHaveLength(5);
+    expect(needs.slice(0, 2).sort()).toEqual([58, 59]);
+    expect(needs.slice(2, 4).sort()).toEqual([55, 61]);
+    expect(needs).toHaveLength(7);
   });
 
   it('counts what needs the reviewer for the badge', async () => {
     const queue = await new SampleSource().listPrs();
-    expect(needsYou(queue)).toBe(5);
-    // Approving everything leaves the two failing PRs, plus two ready to merge, which alone is your move: 4.
-    expect(needsYou(queue.map((p) => ({ ...p, myReview: 'approved' as const })))).toBe(4);
+    expect(needsYou(queue)).toBe(7);
+    // Approving everything leaves the two failing PRs, plus four ready to merge, which alone is your move: 6.
+    expect(needsYou(queue.map((p) => ({ ...p, myReview: 'approved' as const })))).toBe(6);
   });
 });
 

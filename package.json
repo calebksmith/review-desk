@@ -2,7 +2,7 @@
   "name": "review-desk",
   "displayName": "Review Desk",
   "description": "Review agent-written pull requests beside the code: what changed, what the checks found, and what's left for you.",
-  "version": "0.1.0",
+  "version": "0.1.16",
   "publisher": "calebksmith",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/calebksmith/review-desk" },
@@ -18,6 +18,7 @@
       { "command": "reviewDesk.switchRepository", "title": "Choose what to review", "category": "Review Desk", "icon": "$(repo)" },
       { "command": "reviewDesk.mergeDependabot", "title": "Merge passing Dependabot updates", "category": "Review Desk", "icon": "$(git-merge)" },
       { "command": "reviewDesk.signOut", "title": "Use a different GitHub account", "category": "Review Desk" },
+      { "command": "reviewDesk.openSettings", "title": "Settings", "category": "Review Desk", "icon": "$(gear)" },
       { "command": "reviewDesk.connect", "title": "Sign in with GitHub", "category": "Review Desk" },
       { "command": "reviewDesk.refresh", "title": "Refresh", "category": "Review Desk", "icon": "$(refresh)" },
       { "command": "reviewDesk.openPr", "title": "Open pull request", "category": "Review Desk" },
@@ -41,7 +42,8 @@
         { "command": "reviewDesk.open", "when": "view == reviewDesk.queue && reviewDesk.connected", "group": "navigation@1" },
         { "command": "reviewDesk.refresh", "when": "view == reviewDesk.queue && reviewDesk.connected", "group": "navigation@2" },
         { "command": "reviewDesk.switchRepository", "when": "view == reviewDesk.queue", "group": "navigation@3" },
-        { "command": "reviewDesk.signOut", "when": "view == reviewDesk.queue && reviewDesk.connected", "group": "1_repo@2" }
+        { "command": "reviewDesk.signOut", "when": "view == reviewDesk.queue && reviewDesk.connected", "group": "1_repo@2" },
+        { "command": "reviewDesk.openSettings", "when": "view == reviewDesk.queue", "group": "2_settings@1" }
       ],
       "view/item/context": [
         { "command": "reviewDesk.openOnGitHub", "when": "view == reviewDesk.queue && viewItem == pr", "group": "inline" },
@@ -80,7 +82,7 @@
         "reviewDesk.commentActions": {
           "type": "array",
           "default": [],
-          "markdownDescription": "Comments you post often, as one-click buttons in a PR's Conversation tab, such as `@codex review`. Set `reviewer` to the account that answers, and its latest reply shows beside the button.",
+          "markdownDescription": "Comments you post often, as one-click buttons in a PR's Overview tab, such as `@codex review`. Set `reviewer` to the account that answers, and its latest reply shows beside the button.",
           "items": {
             "type": "object",
             "required": ["label", "comment"],

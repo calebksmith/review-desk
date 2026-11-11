@@ -1,7 +1,7 @@
 import type { CheckRun, ConversationItem, PrDetail, PrSummary } from './protocol';
 import { mergeReadiness, mergeSummary, prStatus, type ReadinessItem, type Tone } from './status';
 
-// The status card at the top of Overview (and in the header's popover): one place that says what this PR
+// The status card under the PR's header: one place that says what this PR
 // needs and whose turn it is, with Checks, Findings, Comments and Approvals as bars of one piece per item.
 
 export type PartKey = 'checks' | 'findings' | 'comments' | 'approvals';
@@ -57,18 +57,20 @@ function findingsPart(threads: Thread[]): Part {
   return { key: 'findings', label: 'Findings', summary: `${same} P${top} open${open.length > same ? ` +${open.length - same}` : ''}`, tone: top === 0 ? 'bad' : top === 1 ? 'warn' : 'muted', locked: false, segments };
 }
 
-function commentsPart(threads: Thread[]): Part {
+/** Unsent comments are counted here, but don't block anything: a PR can be ready to merge with some unsent. */
+function commentsPart(threads: Thread[], unsent: number): Part {
   const plain = threads.filter((t) => t.severity == null);
   const open = plain.filter((t) => !t.resolved);
   const segments: Tone[] = plain.map((t) => (t.resolved ? 'ok' : 'warn'));
-  if (!plain.length) return { key: 'comments', label: 'Comments', summary: 'None', tone: 'muted', locked: false, segments };
-  if (!open.length) return { key: 'comments', label: 'Comments', summary: 'All resolved', tone: 'ok', locked: false, segments };
-  return { key: 'comments', label: 'Comments', summary: `${open.length} unresolved`, tone: 'warn', locked: false, segments };
+  const also = unsent ? ` · ${unsent} unsent` : '';
+  if (!plain.length) return { key: 'comments', label: 'Comments', summary: unsent ? `${unsent} unsent` : 'None', tone: 'muted', locked: false, segments };
+  if (!open.length) return { key: 'comments', label: 'Comments', summary: `All resolved${also}`, tone: 'ok', locked: false, segments };
+  return { key: 'comments', label: 'Comments', summary: `${open.length} unresolved${also}`, tone: 'warn', locked: false, segments };
 }
 
 function approvalsPart(pr: PrDetail, me: string): Part {
   const name = (l: string) => (l === me ? 'you' : l);
-  const people = pr.reviewers.filter((r) => r.state !== 'commented');
+  const people = pr.reviewers.filter((r) => r.state !== 'commented' && r.state !== 'no_issues');
   if (pr.reviewDecision === null) {
     // No review rules: your approval is the one that counts.
     const ok = pr.myReview === 'approved';
@@ -96,11 +98,12 @@ function whoNext(pr: PrDetail): string {
   return '';
 }
 
-export function statusCard(pr: PrDetail, queue: readonly PrSummary[], me: string): Card {
+/** `unsent`: your comments not on GitHub yet, shown under Comments. */
+export function statusCard(pr: PrDetail, queue: readonly PrSummary[], me: string, unsent = 0): Card {
   const threads = pr.conversation.filter((it): it is Thread => it.kind === 'thread');
-  const parts = [checksPart(pr), findingsPart(threads), commentsPart(threads), approvalsPart(pr, me)];
+  const parts = [checksPart(pr), findingsPart(threads), commentsPart(threads, unsent), approvalsPart(pr, me)];
   const sum = mergeSummary(pr, queue, me);
-  const blockers = mergeReadiness(pr, queue, me).filter((it) => (it.key === 'conflicts' && it.tone === 'bad') || (it.key === 'base' && it.tone === 'warn') || it.key === 'stack');
+  const blockers = mergeReadiness(pr, queue, me).filter((it) => it.key === 'draft' || (it.key === 'conflicts' && it.tone === 'bad') || (it.key === 'base' && it.tone === 'warn') || it.key === 'stack');
   const ready = sum.tone === 'ok';
   const sub = ready
     ? parts.filter((p) => p.summary !== 'None').map((p) => `${p.label.toLowerCase()}: ${p.summary.charAt(0).toLowerCase()}${p.summary.slice(1)}`).join(' · ')

@@ -34,6 +34,18 @@ describe('status card', () => {
     expect(pr.compatibility).toBe(17);
   });
 
+  it('counts unsent comments under Comments without holding up a merge', async () => {
+    const s = new SampleSource();
+    const queue = await s.listPrs();
+    const ready = { ...(await s.getPr('calebksmith/portfolio', 60, null)), myReview: 'approved' as const };
+    const card = statusCard(ready, queue, 'calebksmith', 3);
+    expect(card).toMatchObject({ ready: true, title: 'Ready to merge' });
+    expect(card.parts[2]).toMatchObject({ summary: '3 unsent', tone: 'muted' });
+    // Resolved threads keep their state, with the unsent count beside it.
+    const resolved = await s.getPr('calebksmith/portfolio', 55, null);
+    expect(statusCard(resolved, queue, 'calebksmith', 1).parts[2]).toMatchObject({ summary: 'All resolved · 1 unsent', tone: 'ok' });
+  });
+
   it('shrinks to one line when everything’s fine', async () => {
     const s = new SampleSource();
     const queue = await s.listPrs();

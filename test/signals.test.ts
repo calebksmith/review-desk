@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { PrSummary } from '../src/protocol';
 import { SampleSource } from '../src/sample';
-import { parseDependsOn, parseLinear, reasons, signals, tier } from '../src/signals';
+import { inMilestone, milestones, NO_MILESTONE, parseDependsOn, parseLinear, reasons, signals, tier } from '../src/signals';
 import { priority, priorityOrder } from '../src/status';
 
 describe('parsing', () => {
@@ -48,5 +48,31 @@ describe('signals and priority', () => {
     expect(r.map((x) => x.text)).toEqual(['Release blocker', 'Blocks 3', '2 P1 open']);
     const waiting = reasons({ findingCounts: { p0: 0, p1: 0 } } as PrSummary, { blocks: 0, releaseBlocker: false, release: null, waitingSince: new Date(now - 2 * 86_400_000).toISOString() }, now);
     expect(waiting.map((x) => x.text)).toEqual(['Waiting 2d']);
+  });
+});
+
+describe('milestones', () => {
+  const ms = (title: string, dueOn: string | null) => ({ milestone: { title, dueOn } }) as PrSummary;
+  const none = { milestone: null } as PrSummary;
+  const queue = [ms('Dec release', '2026-12-05T00:00:00Z'), ms('Someday', null), ms('Nov release', '2026-11-14T00:00:00Z'), ms('Nov release', '2026-11-14T00:00:00Z'), none];
+
+  it('lists each milestone once for the filter, soonest due first and undated last, with how many PRs it holds', () => {
+    expect(milestones(queue).map((m) => [m.title, m.count])).toEqual([['Nov release', 2], ['Dec release', 1], ['Someday', 1]]);
+    expect(milestones([none])).toEqual([]);
+  });
+
+  it('filters to one milestone, to PRs without one, or not at all', () => {
+    expect(queue.filter((p) => inMilestone(p, 'Nov release'))).toHaveLength(2);
+    expect(queue.filter((p) => inMilestone(p, NO_MILESTONE))).toEqual([none]);
+    expect(queue.filter((p) => inMilestone(p, null))).toHaveLength(5);
+  });
+
+  it('says only when a milestone is due, since the row already names it; a release branch keeps its name', () => {
+    const now = Date.parse('2026-11-13T12:00:00Z');
+    const release = { title: 'Nov release', dueOn: '2026-11-14T00:00:00Z', soon: true };
+    const base = { findingCounts: { p0: 0, p1: 0 } } as PrSummary;
+    const s = { blocks: 0, releaseBlocker: false, release, waitingSince: new Date(now).toISOString() };
+    expect(reasons({ ...base, milestone: { title: 'Nov release', dueOn: release.dueOn } }, s, now)[0]).toMatchObject({ text: 'Due tomorrow', tone: 'warn', title: 'Nov release' });
+    expect(reasons({ ...base, milestone: null }, { ...s, release: { title: 'release/2.4', dueOn: null, soon: false } }, now)[0]?.text).toBe('release/2.4');
   });
 });

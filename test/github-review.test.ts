@@ -84,7 +84,7 @@ const raw = (over: Partial<RawPr> = {}): RawPr => ({
   isDraft: false, state: 'OPEN', headRefOid: 'abc', createdAt: '2026-11-01T00:00:00Z', body: '', milestone: null,
   timelineItems: { nodes: [] }, headRefName: 'feature', baseRefName: 'main', isCrossRepository: false, reviewDecision: 'REVIEW_REQUIRED',
   reviewRequests: { nodes: [{ requestedReviewer: { __typename: 'Team' } }] }, mergeable: 'MERGEABLE', mergeStateStatus: 'BLOCKED',
-  reviewThreads: { nodes: [] }, recentThreads: { nodes: [] }, author: { login: 'sam' }, labels: { nodes: [] }, latestReviews: { nodes: [] },
+  reviewThreads: { nodes: [] }, recentThreads: { nodes: [] }, author: { login: 'sam' }, labels: { nodes: [] }, latestReviews: { nodes: [] }, recentComments: { nodes: [] },
   commits: { nodes: [] }, ...over,
 });
 
@@ -106,6 +106,21 @@ describe('reading PRs from GitHub', () => {
     expect(toSummary(raw(), 'me').reviewRequested).toBe(false);
     expect(toSummary(raw(), 'me', true)).toMatchObject({ reviewRequested: true, reviewers: [{ login: 'a team', state: 'requested' }] });
     expect(toSummary(raw({ reviewRequests: { nodes: [{ requestedReviewer: { __typename: 'User', login: 'me' } }] } }), 'me').reviewRequested).toBe(true);
+  });
+
+  it('lists Codex as a reviewer when it found nothing and only left a comment', () => {
+    const said = (body: string) => ({ recentComments: { nodes: [{ author: { login: 'chatgpt-codex-connector' }, body }] } });
+    expect(toSummary(raw(said("<!-- codex-review-receipt:v1 -->\n\nCodex Review: Didn't find any major issues. Swish!")), 'me').reviewers).toContainEqual({ login: 'chatgpt-codex-connector', state: 'no_issues' });
+    expect(toSummary(raw(said('@codex is thinking')), 'me').reviewers.map((r) => r.login)).not.toContain('chatgpt-codex-connector');
+    // A review it submitted, with findings, wins over the comment.
+    const both = raw({ ...said('Codex Review: Didn’t find any major issues.'), latestReviews: { nodes: [{ author: { login: 'chatgpt-codex-connector' }, state: 'COMMENTED', commit: null }] } });
+    expect(toSummary(both, 'me').reviewers.filter((r) => r.login === 'chatgpt-codex-connector')).toEqual([{ login: 'chatgpt-codex-connector', state: 'commented' }]);
+  });
+
+  it('lists the author’s own review only when the repo needs no approval', () => {
+    const own = { latestReviews: { nodes: [{ author: { login: 'sam' }, state: 'COMMENTED', commit: null }] } };
+    expect(toSummary(raw(own), 'sam').reviewers.map((r) => r.login)).not.toContain('sam');
+    expect(toSummary(raw({ ...own, reviewDecision: null, reviewRequests: { nodes: [] } }), 'sam').reviewers).toEqual([{ login: 'sam', state: 'commented' }]);
   });
 
   it('marks PRs from a fork', () => {

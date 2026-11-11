@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { toMergeState, mergeMethods } from '../src/github';
 import type { PrDetail, PrSummary } from '../src/protocol';
+import { fail } from '../src/sample-kit';
 import { bulkMergeable, bulkSkipReason, byPriority, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, priority, prStatus } from '../src/status';
 
 const base: PrSummary = {
@@ -47,16 +48,23 @@ describe('mergeReadiness', () => {
 });
 
 describe('mergeSummary', () => {
+  it('makes a failing check red only when it blocks the merge', () => {
+    const run = (required: boolean) => fail('Tests', 'GitHub Actions', 'Run tests', [], required);
+    const checks = { passed: 2, failed: 1, pending: 0, total: 3 };
+    expect(mergeSummary(detail({ checks, checkRuns: [run(false)] }))).toMatchObject({ tone: 'warn', text: '1 optional check failing' });
+    expect(mergeSummary(detail({ checks, checkRuns: [run(true)] }))).toMatchObject({ tone: 'bad', text: '1 check failing' });
+  });
+
   it('leads with the most urgent problem and counts the rest', () => {
-    expect(mergeSummary(detail({ mergeState: 'behind', unresolvedThreads: 1, checks: { passed: 2, failed: 1, pending: 0, total: 3 } }))).toEqual({ tone: 'bad', text: '1 check failing', more: 2 });
+    expect(mergeSummary(detail({ mergeState: 'behind', unresolvedThreads: 1, checks: { passed: 2, failed: 1, pending: 0, total: 3 } }))).toEqual({ tone: 'bad', text: '1 check failing', more: 2, key: 'checks' });
     expect(mergeSummary(detail({ mergeable: false, mergeState: 'dirty' }))).toMatchObject({ tone: 'bad', text: 'Conflicts with main', more: 0 });
     expect(mergeSummary(detail({ mergeable: false, checks: { passed: 0, failed: 1, pending: 0, total: 1 } }))).toMatchObject({ text: 'Conflicts with main', more: 1 });
     expect(mergeSummary(detail({ checks: { passed: 1, failed: 0, pending: 2, total: 3 } }))).toMatchObject({ tone: 'run', text: '2 checks running' });
   });
 
   it('says ready when nothing needs attention, without leading on approval', () => {
-    expect(mergeSummary(detail())).toEqual({ tone: 'ok', text: 'Ready once you approve', more: 0 });
-    expect(mergeSummary(detail({ myReview: 'approved' }))).toEqual({ tone: 'ok', text: 'Ready to merge', more: 0 });
+    expect(mergeSummary(detail())).toEqual({ tone: 'ok', text: 'Ready once you approve', more: 0, key: null });
+    expect(mergeSummary(detail({ myReview: 'approved' }))).toEqual({ tone: 'ok', text: 'Ready to merge', more: 0, key: null });
     expect(mergeSummary(detail({ checks: { passed: 0, failed: 0, pending: 0, total: 0 } }))).toMatchObject({ text: 'Ready once you approve' });
   });
 });
@@ -197,5 +205,14 @@ describe('required checks', () => {
     const pr = detail({ checks: failing, checkRuns: [run('lighthouse', 'failure'), run('Tests', 'success', true)] });
     expect(mergeBlocker(pr)).toBeNull();
     expect(mergeWarning(pr)).toBe('lighthouse is failing');
+  });
+});
+
+describe('drafts', () => {
+  it('can’t merge, and the checklist says so first', () => {
+    const d = detail({ isDraft: true, reviewDecision: 'approved' });
+    expect(mergeBlocker(d)).toBe('It’s a draft. Mark it ready for review first.');
+    expect(mergeReadiness(d)[0]).toMatchObject({ key: 'draft', tone: 'warn' });
+    expect(mergeSummary(d).text).toBe('Draft: it can’t merge until it’s ready for review');
   });
 });

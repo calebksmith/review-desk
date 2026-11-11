@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ConversationItem, DiffLine, Draft, PrDetail } from '../src/protocol';
-import { fileMarks, nearLines, reviewQueue, stepQueue } from '../src/queue';
+import { fileMarks, nearLines, openOn, reviewQueue, stepQueue } from '../src/queue';
+import { SampleSource } from '../src/sample';
 
 const thread = (id: string, path: string, line: number | null, p: { severity?: number | null; resolved?: boolean } = {}): ConversationItem =>
   ({ kind: 'thread', id, path, line, resolved: p.resolved ?? false, outdated: false, comments: [], severity: p.severity ?? null });
@@ -20,6 +21,16 @@ describe('reviewQueue', () => {
   it('leaves out threads you’ve answered and your own drafts', () => {
     const q = reviewQueue(pr([thread('t1', 'a.ts', 1), thread('t2', 'a.ts', 2)]), [draft('r', { replyTo: 't1' }), draft('mine', {})], 'me');
     expect(q.map((x) => x.id)).toEqual(['t2']);
+  });
+
+  it('on your own PR, keeps every unresolved thread, even one you (or an agent as you) answered', () => {
+    const by = (author: string) => ({ author, createdAt: '', html: '', text: '', url: '', isNew: false });
+    const posted = { ...thread('t1', 'a.ts', 1), comments: [by('me')] } as ConversationItem;
+    const replied = { ...thread('t2', 'a.ts', 2), comments: [by('me'), by('me')] } as ConversationItem;
+    const mine = { conversation: [posted, replied], mine: true } as unknown as PrDetail;
+    expect(reviewQueue(mine, [], 'me').map((x) => x.id)).toEqual(['t1', 't2']);
+    // On someone else's PR, a thread you started is waiting on its author.
+    expect(reviewQueue(pr([posted]), [], 'me')).toEqual([]);
   });
 
   it('leaves out threads where you wrote the last comment', () => {
@@ -81,5 +92,21 @@ describe('nearLines', () => {
 
   it('shows nothing for comments on lines the diff doesn’t have', () => {
     expect(nearLines(file, [{ side: 'RIGHT', line: 99 }, { side: 'RIGHT', line: null }])).toEqual([]);
+  });
+});
+
+describe('openOn', () => {
+  const agent: Draft = { id: 'A_58_1', path: 'src/app/work/page.tsx', line: 23, side: 'RIGHT', from: 'agent', severity: 2, body: 'x' };
+  const open = async (n: number, seenBefore: boolean, drafts: Draft[] = []) =>
+    openOn({ ...(await new SampleSource().getPr('calebksmith/portfolio', n, null)), seenBefore }, drafts, 'calebksmith');
+
+  it('opens on the most severe item waiting on you, seen before or not', async () => {
+    expect(await open(58, false, [agent])).toMatchObject({ step: 'files', item: { id: 'T_58_1', severity: 1 } });
+    expect(await open(59, true)).toMatchObject({ step: 'files', item: { id: 'T_59_1' } });
+  });
+
+  it('with nothing waiting, opens a first look on Overview and a PR seen before on the files', async () => {
+    expect(await open(57, false)).toEqual({ step: 'overview', item: null });
+    expect(await open(57, true)).toEqual({ step: 'files', item: null });
   });
 });
