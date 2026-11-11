@@ -4,11 +4,11 @@ import { conversationCounts, startedAt } from '../src/conversation';
 import { mergeTree, parentOf, stackOf, stacks, type StackRow, type TreeRow } from '../src/stacks';
 import { inDiff } from '../src/patch';
 import { parseKey, prKey } from '../src/protocol';
-import type { CheckRun, Comment, CommentAction, ConversationItem, Draft, ReviewEvent, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
+import type { CheckRun, Comment, CommentAction, ConversationItem, Decision, Draft, ReviewEvent, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
 import { askAndReply, who } from '../src/refresh';
 import { inMilestone, milestones, NO_MILESTONE, reasons } from '../src/signals';
-import { fileMarks, nearLines, reviewQueue, stepQueue, type QueueItem } from '../src/queue';
-import { bulkMergeable, isDependabot, isReReview, openFindings, priority, priorityOrder, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural, prStatus, stillOpen, type Bucket, type Tone } from '../src/status';
+import { fileMarks, nearLines, openOn, reviewQueue, stepQueue, type QueueItem } from '../src/queue';
+import { bulkMergeable, isDependabot, isReReview, openFindings, priority, priorityOrder, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural, prStatus, stillOpen, type Bucket, type ReadinessItem, type Tone } from '../src/status';
 
 // The webview only renders. Everything it knows comes from the host's state messages;
 // what it remembers on its own is view state (filter, step, open file).
@@ -18,20 +18,22 @@ declare function acquireVsCodeApi(): VsCodeApi;
 const vscode = acquireVsCodeApi();
 
 type Filter = 'all' | Bucket;
-type Step = 'overview' | 'checks' | 'files';
+type Step = 'overview' | 'files';
 /** The comment box open in the diff: a new comment on a line (or range), a reply to a thread, or an edit. */
 interface Composer { id?: string; path: string; line: number | null; side: 'RIGHT' | 'LEFT'; startLine?: number | null; replyTo?: string; resolve?: boolean; editId?: string; prefill?: string }
 type Thread = Extract<ConversationItem, { kind: 'thread' }>;
-interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; milestone: string | null; method: MergeMethod | null; keys: boolean; showPassed: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; part: PartKey | null; cardOpen: boolean; conv: 'all' | 'unresolved' | 'mine'; composer: Composer | null; finding: string | null; near: boolean; menu: 'checklist' | 'methods' | 'review' | null }
+interface View { filter: Filter; step: Step; file: string | null; onlyNew: boolean; pr: string | null; sel: number; repo: string; milestone: string | null; method: MergeMethod | null; keys: boolean; layout: 'list' | 'stacks'; reviewEvent: ReviewEvent | null; part: PartKey | null; cardOpen: boolean; conv: 'all' | 'unresolved' | 'mine'; composer: Composer | null; finding: string | null; near: boolean; /** The status card flipped from its page's default: open on Overview, closed on Files changed. */ statusFlipped: boolean; /** The reviewer picked All changes over Just comments: PRs open that way. */ wholeFiles: boolean; menu: 'methods' | 'review' | null }
 
 let host: HostState | null = null;
 /** True while the reviewer moves through the queue with j/k; a mouse move hides the cursor again. */
 let kbd = false;
+/** The comment a PR just opened on, scrolled to once it's drawn. */
+let landOn: string | null = null;
 /** Text to put in Overview's comment box on the next render. */
 let prefill: string | null = null;
-let view: View = { filter: 'all', repo: '', milestone: null, reviewEvent: null, part: null, cardOpen: false, conv: 'all', composer: null, finding: null, near: false, showPassed: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
+let view: View = { filter: 'all', repo: '', milestone: null, reviewEvent: null, part: null, cardOpen: false, conv: 'all', composer: null, finding: null, near: false, statusFlipped: false, wholeFiles: false, layout: 'list', step: 'overview', file: null, onlyNew: false, pr: null, sel: 0, method: null, ...(vscode.getState() as Partial<View> | undefined), keys: false, menu: null };
 // State saved by older versions named the files page "review".
-if (!['overview', 'checks', 'files'].includes(view.step)) view.step = 'files';
+if (view.step !== 'files') view.step = 'overview';
 // Older versions saved a bare PR number; keys are owner/name#number now.
 if (typeof view.pr !== 'string') view.pr = null;
 const send = (msg: FromWebview) => vscode.postMessage(msg);
@@ -60,6 +62,7 @@ const I = {
   down: svg('M7 10l5 5 5-5', 'ico caretico'),
   lock: svg('M7 11V8a5 5 0 0 1 10 0v3M6 11h12v9H6z'),
   doc: svg('M7 4h7l4 4v12H7zM14 4v4h4M10 12h5M10 16h5'),
+  diff: svg('M7 4h7l4 4v12H7zM14 4v4h4M12.5 10v5M10 12.5h5M10 17.5h5'),
   milestone: svg('M12 3v18M6 6h10l3 3-3 3H6z'),
   spark: svg('M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z'),
 };
@@ -72,13 +75,31 @@ function ago(iso: string): string {
   return `${Math.round(min / 60 / 24)}d`;
 }
 
+/** "just now" under a minute, then "5m ago". */
+const sentWhen = (iso: string) => (ago(iso) === '0m' ? 'just now' : `${ago(iso)} ago`);
+
+/** The status card is showing: its page's default, unless you flipped it. */
+const statusShown = () => (view.step === 'overview') !== view.statusFlipped;
+
+/** Set for a click inside the status card: a page change it causes keeps the card as it was. */
+let keepStatus = false;
+
 function save(patch: Partial<View>): void {
+  // Another page starts with its own default for the card, except when the card itself took you there.
+  if (patch.step && patch.step !== view.step && patch.statusFlipped === undefined) {
+    patch.statusFlipped = keepStatus ? (patch.step === 'overview') !== statusShown() : false;
+  }
+  keepStatus = false;
   view = { ...view, ...patch };
   vscode.setState(view);
   render();
 }
 
 /** "Updated 4m ago": when what's on screen last loaded. The text ticks without redrawing the page. */
+/** Review Desk's version, stamped in at build time from package.json. */
+declare const __VERSION__: string;
+const version = () => `<span class="ver" title="Review Desk version">v${esc(__VERSION__)}</span>`;
+
 function updated(h: HostState): string {
   return h.updatedAt ? `<span class="upd" data-at="${esc(h.updatedAt)}" title="Refreshes on its own while Review Desk is open">${since(h.updatedAt)}</span>` : '';
 }
@@ -162,9 +183,12 @@ function whyNow(p: PrSummary, h: HostState): string {
   const pr = priority(p, { queue: h.queue, blockerLabels: h.blockerLabels });
   if (pr.section !== 'you' || !pr.signals) return '';
   const chips = reasons(p, pr.signals).map((r) => `<span class="why ${r.tone}" ${r.title ? `title="${esc(r.title)}"` : ''}>${esc(r.text)}</span>`);
+  // Open findings mean someone (usually Codex) has reviewed it, so it's not "no Codex review yet".
   const teamUsesCodex = h.queue.some((q) => q.reviewers.some((r) => /codex/i.test(r.login)));
-  if (teamUsesCodex && !p.mine && !isDependabot(p) && !p.reviewers.some((r) => /codex/i.test(r.login))) chips.push('<span class="why muted" title="Codex usually reviews first">No Codex review yet</span>');
-  return chips.length ? `<span class="whys">${chips.slice(0, 3).join('')}</span>` : '';
+  const found = p.findingCounts.p0 + p.findingCounts.p1 > 0 || p.unresolvedThreads > 0;
+  if (!chips.length && teamUsesCodex && !found && !p.mine && !isDependabot(p) && !p.reviewers.some((r) => /codex/i.test(r.login))) chips.push('<span class="why muted" title="Codex usually reviews first">No Codex review yet</span>');
+  // One reason per row, the most important: more turns the queue into wallpaper.
+  return chips.length ? `<span class="whys">${chips[0]}</span>` : '';
 }
 
 /** One PR row. In the Stacks layout it's indented under the PR it's stacked on. */
@@ -261,7 +285,7 @@ function queue(h: HostState): string {
   const layout = `<div class="seg layout" role="group" aria-label="Layout"><button data-layout="list" aria-pressed="${!stacked}" title="List by what each PR needs">List</button><button data-layout="stacks" aria-pressed="${stacked}" title="Stacked PRs as trees, in merge order">${I.stack}Stacks</button></div>`;
   return `<div class="crumb"><span class="home cur">${I.inbox}Review queue</span>
       <button class="reposw ${h.scope.startsWith('Everything') ? 'all' : ''}" data-do="switchRepo" title="Choose what to review">${h.scope.startsWith('Everything') ? I.globe : ''}${esc(h.scope)}${I.down}</button>${h.sample ? '<span class="chip">Sample data</span>' : ''}
-      <div class="end">${bulkButton(h)}${updated(h)}<button class="btn icon" data-do="refresh" aria-label="Refresh" title="Refresh (r)">${I.rerun}</button><button class="btn icon" data-do="keys" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button></div></div>
+      <div class="end">${bulkButton(h)}${updated(h)}${version()}<button class="btn icon" data-do="refresh" aria-label="Refresh" title="Refresh (r)">${I.rerun}</button><button class="btn icon" data-do="keys" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button></div></div>
     ${h.notice ? `<div class="note" role="status">${I.check}<span>${esc(h.notice)}</span><button class="btn sm" data-do="dismissNotice">Dismiss</button></div>` : ''}
     <div class="pad">
       <div class="toolbar">${stacked ? '' : `<div class="seg filters" role="group" aria-label="Filter">${f('all', 'All')}${f('needs', 'Needs you')}${mine}${f('waiting', 'Waiting on others')}${f('approved', 'Approved')}${f('merged', 'Merged')}</div>`}${repoFilter(h)}${milestoneFilter(h)}${layout}</div>
@@ -281,11 +305,13 @@ function bulkButton(h: HostState): string {
 
 /* ---------- PR ---------- */
 function crumb(pr: PrDetail, h: HostState): string {
-  // Two rows, like GitHub: the title gets its own line (wrapping to two), the details and the decision share the next.
-  const meta = `<span class="who">${esc(pr.author)}</span> wants to merge <span class="br head" title="${esc(pr.headRef)}">${esc(pr.headRef)}</span> into <span class="br">${esc(pr.baseRef)}</span>${parentLink(pr)}`;
+  // Two rows, each a pair: the title and the next step's button, then the details and what's in that button's way.
+  // The repo is reference, so it lives in the sidebar's footer, not here.
+  const meta = `<span class="who">${esc(pr.author)}</span> wants to merge <span class="br head" title="${esc(pr.headRef)}">${esc(pr.headRef)}</span> into <span class="br">${esc(pr.baseRef)}</span>${parentLink(pr)}<span class="diffstat" title="Lines added and removed">+${pr.additions} <span class="d">−${pr.deletions}</span></span>`;
   return `<div class="crumb prh"><button class="back" data-do="back" aria-label="Back to the review queue" title="Back to the review queue (Esc)">${I.back}</button>
-    <div class="hd"><div class="r1">${host && multi(host) ? `<span class="rpo" title="Repository">${esc(pr.repo)}</span>` : ''}<button class="ttl" data-ext="${esc(pr.url)}" title="Open on GitHub"><b>${esc(pr.title)}</b> <span class="num">#${pr.number}</span>${I.ext}</button><span class="diffstat" title="Lines added and removed">+${pr.additions} <span class="d">−${pr.deletions}</span></span></div>
-      <div class="r2"><span class="meta">${meta}</span><div class="end">${pr.state === 'merged' ? `<span role="status">${statusPill(pr)}</span>` : `${summary(pr, h)}${decision(pr, h)}`}</div></div></div></div>`;
+    <div class="hd"><button class="ttl" data-ext="${esc(pr.url)}" title="Open on GitHub"><b>${esc(pr.title)}</b> <span class="num">#${pr.number}</span>${I.ext}</button>
+      <div class="nextacts">${pr.state === 'merged' ? `<span role="status">${statusPill(pr)}</span>` : decision(pr, h)}</div>
+      <div class="meta">${meta}</div>${pr.state === 'merged' ? '' : nextLine(pr, h)}</div></div>`;
 }
 
 /** "(#101)" after a stacked PR's base branch, opening the PR it's stacked on. */
@@ -296,35 +322,59 @@ function parentLink(pr: PrDetail): string {
 
 const TONE_ICON: Record<Tone, string> = { ok: I.check, bad: I.x, warn: I.alert, run: '<span class="spin sm"></span>', muted: I.minus };
 
+/** Under the header's button: what has to happen before it (or that it's ready). It opens the status card. */
+function nextLine(pr: PrDetail, h: HostState): string {
+  return `<div class="nextline">${summary(pr, h)}</div>`;
+}
+
 /**
- * The one line beside the button: the most urgent thing to know, or that it's ready. It's a disclosure,
- * styled as text, that opens the merge checklist.
+ * In the status card's Comments: your comments that haven't gone to GitHub yet, like an outbox. Each one (click to
+ * see it in the diff), then Send, which posts them together. On someone else's PR you haven't approved, they go
+ * with your review instead. They never hold up a merge.
+ */
+function unsentBlock(pr: PrDetail, h: HostState): string {
+  const mine = h.drafts.filter((d) => d.from === 'you');
+  const onGitHub = pr.pendingReview?.comments ?? 0;
+  const total = mine.length + onGitHub;
+  if (!total) return '';
+  const rows = mine.map((d) => `<li class="link-row cmt" data-q="${esc(d.id)}" title="Show it in the diff">${I.com}<span class="gist">${esc(d.body.replace(/\s+/g, ' '))}</span><span class="mono sub">${esc(base(d.path))}${d.line ? `:${d.line}` : ''}</span></li>`).join('');
+  const how = reviewLeads(pr)
+    ? 'They go with your review.'
+    : `They go to GitHub together, as one comment review. <button class="btn sm" data-do="submitHeld" ${h.busy ? 'disabled' : ''}>${h.busy === 'review' ? '<span class="spin sm"></span>' : ''}Send ${plural(total, 'comment')}</button>`;
+  return `<span class="lbl">${plural(total, 'unsent comment')}</span><ul>${rows}</ul>${onGitHub ? `<p class="sub">${onGitHub} more ${onGitHub === 1 ? 'is' : 'are'} in the review you started on github.com.</p>` : ''}<p class="sub sendrow">${how}</p>`;
+}
+
+/** Comments held back here, plus any in a review you started on github.com. */
+const heldCount = (pr: PrDetail, h: HostState) => h.drafts.filter((d) => d.from === 'you').length + (pr.pendingReview?.comments ?? 0);
+
+/** Someone else's PR you haven't approved (or that's back for a re-review): the review is the decision. */
+const reviewLeads = (pr: PrDetail) => !pr.mine && (pr.myReview !== 'approved' || isReReview(pr));
+
+/** The status card's part for each thing the header's line can be about. Conflicts and the like show under the card. */
+const PART_FOR: Partial<Record<ReadinessItem['key'], PartKey>> = { checks: 'checks', findings: 'findings', threads: 'comments', approval: 'approvals' };
+
+/**
+ * The one line beside the button: the most urgent thing to know, or that it's ready. Styled as text, it takes
+ * you to the status card on Overview with that part open, so the card lives in one place.
  */
 function summary(pr: PrDetail, h: HostState): string {
   const s = mergeSummary(pr, h.queue, h.user);
-  const open = view.menu === 'checklist';
-  // When nothing needs attention the button already says so; the line shrinks to a quiet check.
-  const quiet = s.tone === 'ok';
-  return `<div class="dz"><button class="sumline ${s.tone} ${quiet ? 'quiet' : ''}" data-menu="checklist" aria-expanded="${open}" aria-haspopup="dialog" aria-label="${esc(s.text)}: merge checklist" title="${quiet ? `${esc(s.text)}. Open the merge checklist.` : 'Merge checklist'}">${TONE_ICON[s.tone]}${quiet ? '' : `<span class="sumtext">${esc(s.text)}${s.more ? ` <span class="more">+${s.more}</span>` : ''}</span>`}${I.down}</button>${open ? checklist(pr, h) : ''}</div>`;
-}
-
-/** GitHub's merge box, on demand: every condition, each with its fix. */
-/** The header's status popover: the same status card as Overview's, so there's one design in two places. */
-function checklist(pr: PrDetail, h: HostState): string {
-  return `<div class="pop cardpop" role="dialog" aria-label="Merge status">${statusCardView(pr, h, true)}</div>`;
+  const part = s.key ? PART_FOR[s.key] ?? '' : '';
+  const open = pr.state === 'open' && statusShown();
+  return `<div class="dz"><button class="sumline ${s.tone}" data-do="toggleStatus" data-topart="${part}" aria-expanded="${open}" aria-controls="statusdock" title="${open ? 'Hide' : 'Show'} the status">${TONE_ICON[s.tone]}<span class="sumtext">${esc(s.text)}${s.more ? ` <span class="more">+${s.more}</span>` : ''}</span>${I.down}</button></div>`;
 }
 
 /**
  * The status card: what this PR needs and whose turn it is, Checks, Findings, Comments and Approvals as bars of
  * one piece per item (click one for its details), and what blocks a merge with its fix. One line when it's ready.
  */
-function statusCardView(pr: PrDetail, h: HostState, inPop = false): string {
-  const c = statusCard(pr, h.queue, h.user);
+function statusCardView(pr: PrDetail, h: HostState): string {
+  const c = statusCard(pr, h.queue, h.user, heldCount(pr, h));
   const compat = isDependabot(pr) && pr.compatibility != null ? (() => {
     const tone = pr.compatibility >= 80 ? 'ok' : pr.compatibility >= 50 ? 'warn' : 'bad';
     return `<span class="why ${tone}" title="Dependabot's compatibility score: in ${pr.compatibility}% of other repos, this update passed CI">Compatibility ${pr.compatibility}%</span>`;
   })() : '';
-  if (c.ready && !view.cardOpen && !inPop) {
+  if (c.ready && !view.cardOpen) {
     return `<div class="scard compact ok">${TONE_ICON.ok}<b>${esc(c.title)}</b><span class="sub">${esc(c.sub)}</span>${compat}<button class="link" data-do="cardOpen">Details${I.down}</button></div>`;
   }
   const parts = c.parts.map((p) => {
@@ -333,7 +383,7 @@ function statusCardView(pr: PrDetail, h: HostState, inPop = false): string {
       <span class="sc-l"><b>${p.label}</b><span class="sc-s">${esc(p.summary)}</span>${p.locked ? `<span class="lock" title="Gates merging">${I.lock}</span>` : ''}</span><span class="bar">${segs}</span></button>`;
   }).join('');
   const blockers = c.blockers.map((b) => `<div class="sc-b ${b.tone}">${TONE_ICON[b.tone]}<span>${esc(b.key === 'conflicts' ? conflictText(pr) : b.key === 'stack' && b.pr ? `Stacked on #${parseKey(b.pr)?.number}: it merges into ${pr.baseRef} until #${parseKey(b.pr)?.number} is in.` : b.text)}</span>${blockerAction(pr, h, b.key, b.pr)}</div>`).join('');
-  return `<div class="scard ${c.tone}"><div class="sc-h"><span class="sc-i ${c.tone}">${TONE_ICON[c.tone]}</span><span class="sc-t"><b>${esc(c.title)}</b>${c.sub ? `<span class="sub">${esc(c.sub)}</span>` : ''}</span>${compat}${c.ready && !inPop ? `<button class="link" data-do="cardOpen">Less</button>` : ''}</div>
+  return `<div class="scard ${c.tone}"><div class="sc-h"><span class="sc-i ${c.tone}">${TONE_ICON[c.tone]}</span><span class="sc-t"><b>${esc(c.title)}</b>${c.sub ? `<span class="sub">${esc(c.sub)}</span>` : ''}</span>${compat}${c.ready ? `<button class="link" data-do="cardOpen">Less</button>` : ''}</div>
     <div class="sc-parts">${parts}</div>${view.part ? `<div class="sc-d">${partDetail(view.part, pr, h)}</div>` : ''}${blockers}</div>`;
 }
 
@@ -349,9 +399,13 @@ function partDetail(k: PartKey, pr: PrDetail, h: HostState): string {
       const when = fail ? `Failing after ${duration(r.seconds)}` : r.status !== 'completed' ? 'Running' : isSkipped(r) ? 'Skipped' : r.seconds != null ? `Successful in ${duration(r.seconds)}` : 'Successful';
       const icon = fail ? `<span class="g bad">${I.x}</span>` : r.status !== 'completed' ? '<span class="g run"><span class="spin sm"></span></span>' : isSkipped(r) ? `<span class="g muted">${I.minus}</span>` : `<span class="g ok">${I.check}</span>`;
       return `<li>${icon}<span class="nm">${esc(r.name)}</span><span class="tool">${esc(r.app)}</span><span class="sub">${esc(when.replace(/ after $| in $/, ''))}</span>${r.required ? '<span class="chip">Required</span>' : ''}
-        <span class="end">${fail ? `<button class="btn sm fix" data-fix="${esc(r.name)}">${I.spark}Fix with agent</button>` : ''}${r.url ? `<button class="link" data-ext="${esc(r.url)}">${fail ? 'Log' : 'Details'}${I.ext}</button>` : ''}</span></li>`;
+        <span class="end">${fail ? `<button class="btn sm fix" data-fix="${esc(r.name)}">${I.spark}Fix with agent</button>` : ''}${r.url ? `<button class="link" data-ext="${esc(r.url)}">${fail ? 'Log' : 'Details'}${I.ext}</button>` : ''}</span></li>
+        ${fail && (r.failedStep || r.excerpt?.length) ? `<li class="why">${r.failedStep ? `<span class="sub">Failed at <b>${esc(r.failedStep)}</b></span>` : ''}${r.excerpt?.length ? `<pre class="log">${r.excerpt.map(esc).join('\n')}</pre>` : ''}</li>` : ''}`;
     };
-    return groups.filter(([, rs]) => rs.length).map(([name, rs]) => `<span class="lbl">${plural(rs.length, `${name} check`)}</span><ul>${rs.map(row).join('')}</ul>`).join('') || '<p class="none">This repo runs no checks on pull requests.</p>';
+    // Closing or ignoring an update sits with its checks, where a broken update shows, not beside Merge.
+    const close = isDependabot(pr) && pr.state === 'open' ? `<p class="sub">Don’t want this update? <button class="link" data-do="closeDependabot">Close or ignore…</button></p>` : '';
+    // Right after the failing checks, so it isn't scrolled out of sight below the passing ones.
+    return groups.filter(([, rs]) => rs.length).map(([name, rs]) => `<span class="lbl">${plural(rs.length, `${name} check`)}</span><ul>${rs.map(row).join('')}</ul>${name === 'failing' ? close : ''}`).join('') || '<p class="none">This repo runs no checks on pull requests.</p>';
   }
   const all = threads(pr);
   const gist = (t: Thread) => esc((t.comments[0]?.text ?? '').replace(/\s+/g, ' ').replace(/^\**P[0-3]\**\s*/, '').slice(0, 110));
@@ -359,14 +413,18 @@ function partDetail(k: PartKey, pr: PrDetail, h: HostState): string {
   if (k === 'findings') {
     const open = all.filter((t) => t.severity != null && !t.resolved).sort((a, b) => a.severity! - b.severity!);
     const done = all.filter((t) => t.severity != null && t.resolved).length;
-    return (open.length ? `<ul>${open.map((t) => `<li class="link-row" data-goto="${esc(t.id)}">${sevChip(t.severity)}<span class="gist">${gist(t)}</span><span class="mono sub">${esc(at(t))}</span></li>`).join('')}</ul>` : '<p class="none">No open findings.</p>')
-      + (done ? `<p class="sub">${plural(done, 'finding')} resolved.</p>` : '');
+    const review = pr.state === 'open' ? `<p class="sub">Want another look? <button class="btn sm fix" data-do="reviewWithAgent" title="Your agent reviews this PR adversarially; its findings come back as drafts in Files changed">${I.spark}Review with agent</button></p>` : '';
+    return (open.length ? `<ul>${open.map((t) => `<li class="link-row" data-goto="${esc(t.id)}">${I.com}${sevChip(t.severity)}<span class="gist">${gist(t)}</span><span class="mono sub">${esc(at(t))}</span></li>`).join('')}</ul>` : '<p class="none">No open findings.</p>')
+      + (done ? `<p class="sub">${plural(done, 'finding')} resolved.</p>` : '') + review;
   }
   if (k === 'comments') {
     const open = all.filter((t) => t.severity == null && !t.resolved);
-    return open.length
-      ? `<ul>${open.map((t) => `<li class="link-row" data-goto="${esc(t.id)}"><b>${esc(who(t.comments[0]?.author ?? ''))}</b><span class="gist">${gist(t)}</span><span class="mono sub">${esc(at(t))}</span></li>`).join('')}</ul><button class="link" data-conv="unresolved">Show unresolved in the conversation</button>`
-      : '<p class="none">No unresolved comments.</p>';
+    // Your unsent comments first, then the unresolved ones on GitHub.
+    const unsent = unsentBlock(pr, h);
+    const unresolved = open.length
+      ? `${unsent ? '<span class="lbl">Unresolved</span>' : ''}<ul>${open.map((t) => `<li class="link-row cmt" data-goto="${esc(t.id)}">${I.com}<b>${esc(who(t.comments[0]?.author ?? ''))}</b><span class="gist">${gist(t)}</span><span class="mono sub">${esc(at(t))}</span></li>`).join('')}</ul><button class="link" data-conv="unresolved">Show unresolved in the conversation</button>`
+      : `<p class="none">${unsent ? 'Every comment on GitHub is resolved.' : 'No unresolved comments.'}</p>`;
+    return unsent + unresolved;
   }
   const why = pr.reviewDecision === null ? 'This repo doesn’t require approvals; your approval is the review.'
     : pr.reviewDecision === 'approved' ? 'GitHub has the approvals it needs.'
@@ -400,7 +458,7 @@ function reviewButton(pr: PrDetail, h: HostState, primary: boolean): string {
   // Comments held back here, plus any in a review you started on github.com: they all go with the review.
   const held = h.drafts.filter((d) => d.from === 'you').length + (pr.pendingReview?.comments ?? 0);
   const open = view.menu === 'review';
-  const cls = `btn ${primary ? 'pri' : ''}`;
+  const cls = `btn ${primary && !goingThrough() && !fixFirst(pr) ? 'pri' : ''}`;
   const main = held || !primary
     ? `<button class="${cls} main" data-menu="review" ${h.busy ? 'disabled' : ''}>${h.busy === 'review' ? '<span class="spin"></span>' : I.com}${held ? `Submit review · ${held}` : 'Review'}</button>`
     : `<button class="${cls} main" data-do="approve" ${h.busy ? 'disabled' : ''}>${h.busy === 'approve' ? '<span class="spin"></span>' : I.check}Approve</button>`;
@@ -439,11 +497,26 @@ function reviewPanel(pr: PrDetail, h: HostState): string {
 }
 
 function decision(pr: PrDetail, h: HostState): string {
+  const fix = fixFirst(pr);
+  const fixBtn = fix ? `<button class="btn ${goingThrough() ? 'fix' : 'pri'}" data-fix="${esc(fix.name)}" title="Sends the ${esc(fix.name)} failure to your agent" ${h.busy ? 'disabled' : ''}>${I.spark}Fix with agent</button>` : '';
+  return fixBtn + decisionButtons(pr, h);
+}
+
+/**
+ * On your own PR or your agent's, a failing check comes before approving or merging: fixing it is the next
+ * step, so Fix with agent is the primary button. The check to send: a required one first.
+ */
+function fixFirst(pr: PrDetail): CheckRun | null {
+  if (pr.state !== 'open' || isDependabot(pr) || !(pr.mine || isAgent(pr.author))) return null;
+  const failing = pr.checkRuns.filter(isFailing);
+  return failing.find((r) => r.required) ?? failing[0] ?? null;
+}
+
+function decisionButtons(pr: PrDetail, h: HostState): string {
   // Not yet approved by you (or a re-review): the review is the decision. You can't approve your own PR.
-  if (!pr.mine && (pr.myReview !== 'approved' || isReReview(pr))) return reviewButton(pr, h, true);
-  // After approving, or on your own PR: Merge leads; comments you hold back still get a way out.
-  const extra = h.drafts.some((d) => d.from === 'you') ? reviewButton(pr, h, false) : '';
-  return extra + mergeButton(pr, h);
+  if (reviewLeads(pr)) return reviewButton(pr, h, true);
+  // After approving, or on your own PR: Merge leads. Comments you hold back are sent from the comment bar.
+  return mergeButton(pr, h);
 }
 
 function mergeButton(pr: PrDetail, h: HostState): string {
@@ -451,7 +524,7 @@ function mergeButton(pr: PrDetail, h: HostState): string {
   const method = view.method && pr.mergeMethods.includes(view.method) ? view.method : pr.mergeMethods[0]!;
   // With a check failing, Merge stays available but stops being the primary action and says "anyway".
   const warning = !blocker && mergeWarning(pr);
-  const cls = `btn ${warning ? '' : 'pri'}`;
+  const cls = `btn ${warning || goingThrough() || fixFirst(pr) ? '' : 'pri'}`;
   const off = h.busy || blocker ? 'disabled' : '';
   const tip = blocker || (warning ? `${warning}. You'll be asked to confirm.` : '');
   const main = `<button class="${cls} main" data-do="merge" data-method="${method}" ${off} ${tip ? `title="${esc(tip)}"` : ''}>${h.busy === 'merge' ? '<span class="spin"></span>' : I.merge}${VERB[method]}${warning ? ' anyway' : ''}</button>`;
@@ -477,51 +550,20 @@ function conflictAction(pr: PrDetail): string {
 /** Coding agents and bots, whose conflicts your own agent can fix, as opposed to a teammate's branch. */
 const isAgent = (login: string) => /\[bot\]$/i.test(login) || ['claude', 'codex', 'copilot', 'devin', 'cursor', 'sweep'].includes(login.toLowerCase());
 
-/**
- * Dependabot PRs can be closed, or their update ignored, with a comment Dependabot reads. It lives on the
- * Checks page, where a broken update shows up, not beside Merge where it would be one slip away.
- */
-function closeButton(pr: PrDetail): string {
-  return isDependabot(pr) && pr.state === 'open' ? `<button class="btn" data-do="closeDependabot" title="Close this PR, or tell Dependabot to skip this update">Close or ignore…</button>` : '';
-}
-
-function checksState(pr: PrDetail): { cls: 'done' | 'fail' | 'run'; sub: string } {
-  const runs = pr.checkRuns;
-  const failed = runs.filter((r) => isFail(r)).length;
-  const running = runs.filter((r) => r.status !== 'completed').length;
-  if (failed) return { cls: 'fail', sub: `${failed} failed` };
-  if (running) return { cls: 'run', sub: `${running} running` };
-  return { cls: 'done', sub: runs.length ? `${runs.length}/${runs.length} passed` : 'No checks' };
-}
-const isFail = (r: CheckRun) => r.status === 'completed' && ['failure', 'timed_out', 'cancelled', 'action_required', 'stale'].includes(r.conclusion ?? '');
-
-/** The PR's pages, as GitHub's tabs: Overview (its Conversation tab), Checks, Files changed. */
+/** The PR's pages, in a sidebar: Overview (GitHub's Conversation tab) and Files changed, then reviewers and labels. Checks live in the status card. */
 function sidebar(pr: PrDetail): string {
-  const c = checksState(pr);
   const n = conversationCounts(pr.conversation);
   const seen = pr.files.filter((f) => f.viewed === 'viewed').length;
   const filesDone = pr.state === 'merged' || pr.myReview === 'approved' || (pr.files.length > 0 && seen === pr.files.length);
-  const glyph = { done: I.check, fail: I.x, run: '', now: '', info: I.doc } as const;
+  const glyph = { done: I.check, now: '', info: I.doc } as const;
   const step = (k: Step, label: string, cls: keyof typeof glyph, sub: string, key: number) =>
     `<li class="step ${cls}"><button class="stepbtn" data-step="${k}" aria-current="${view.step === k ? 'page' : 'false'}" title="${label} (${key})"><span class="sd" aria-hidden="true">${glyph[cls]}</span><span class="sl"><span>${label}</span><span class="sub ${k === 'overview' && n.fresh ? 'fresh' : ''}">${sub}</span></span></button></li>`;
   const overviewSub = n.fresh ? `${plural(n.fresh, 'new comment')}` : n.comments ? plural(n.comments, 'comment') : 'No comments';
   const filesSub = pr.myReview === 'approved' ? `Approved · ${seen} of ${pr.files.length} viewed` : `${seen} of ${plural(pr.files.length, 'file')} viewed`;
   return `<aside class="side" aria-label="Pull request pages"><ol class="steps">
-    ${step('overview', 'Overview', 'info', overviewSub, 1)}${step('checks', 'Checks', c.cls, c.sub, 2)}${step('files', 'Files changed', filesDone ? 'done' : 'now', filesSub, 3)}</ol>
+    ${step('overview', 'Overview', 'info', overviewSub, 1)}${step('files', 'Files changed', filesDone ? 'done' : 'now', filesSub, 2)}</ol>
     ${details(pr)}${stackNav(pr)}
-    <div class="railfoot">${updated(host!)}<button class="link keyslink" data-do="keys">Keyboard shortcuts <kbd>?</kbd></button></div></aside>`;
-}
-
-function checkRow(r: CheckRun): string {
-  const fail = isFail(r);
-  const g = fail ? `<span class="g bad">${I.x}</span>` : r.status !== 'completed' ? '<span class="g run"><span class="spin sm"></span></span>' : `<span class="g ok">${I.check}</span>`;
-  const why = fail && (r.failedStep || r.excerpt) ? `<div class="cgb">${r.failedStep ? `<span class="fstep">Failed at <b>${esc(r.failedStep)}</b></span>` : ''}${r.excerpt ? `<pre class="log">${r.excerpt.map(esc).join('\n')}</pre>` : ''}</div>` : '';
-  if (!fail && r.status === 'completed') {
-    // A passing check is one compact line; Details shows on hover.
-    return `<div class="crow">${g}<span class="nm">${esc(r.name)}</span><span class="tool">${esc(r.app)}</span>${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ''}${r.url ? `<button class="link det" data-ext="${esc(r.url)}">Details${I.ext}</button>` : ''}</div>`;
-  }
-  return `<div class="cg ${fail ? 'bad' : ''}"><div class="cgh">${g}<span class="nm">${esc(r.name)}</span><span class="tool">${esc(r.app)}</span>
-    <span class="res">${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ''}${fail ? `<button class="btn sm fix" data-fix="${esc(r.name)}" title="Send the failure to your AI agent to diagnose and fix">${I.spark}Fix with agent</button>` : ''}${r.url ? `<button class="btn sm" data-ext="${esc(r.url)}">${fail ? 'Open log' : 'Details'}${I.ext}</button>` : ''}</span></div>${why}</div>`;
+    <div class="railfoot"><span class="repo mono" title="Repository">${esc(pr.repo)}</span><span class="upline">${updated(host!)}${version()}</span><button class="link keyslink" data-do="keys">Keyboard shortcuts <kbd>?</kbd></button></div></aside>`;
 }
 
 /** The whole stack this PR is in, bottom first, so you can move along it. Nothing when it stands alone. */
@@ -536,21 +578,10 @@ function stackNav(pr: PrDetail): string {
   return `<div class="stacknav" title="Stacked PRs merge bottom first"><span class="lbl">${I.stack}Stack</span><span class="sbase mono">${esc(rows[0]!.pr.baseRef)}</span><ol>${items}</ol></div>`;
 }
 
-/** Who's reviewing and what the PR is attached to, like GitHub's sidebar: only what's set, reviewers always. */
-function details(pr: PrDetail): string {
-  const me = host?.user ?? '';
-  const state: Record<string, [string, string, string]> = {
-    approved: ['ok', I.check, 'Approved'], changes_requested: ['bad', I.x, 'Requested changes'], commented: ['muted', I.com, 'Commented'], requested: ['run', I.clock, 'Asked to review'],
-  };
-  // GitHub's own wording and place: under the reviewers.
-  const toDraft = pr.state === 'open' && !pr.isDraft ? `<p class="sub todraft">Still in progress? <button class="link" data-do="toDraft" ${host?.busy ? 'disabled' : ''}>Convert to draft</button></p>` : '';
-  return `<div class="details"><div class="dg"><span class="lbl">Reviewers</span>${reviewersList(pr)}${toDraft}</div>${detailsRest(pr)}</div>`;
-}
-
 function reviewersList(pr: PrDetail): string {
   const me = host?.user ?? '';
   const state: Record<string, [string, string, string]> = {
-    approved: ['ok', I.check, 'Approved'], changes_requested: ['bad', I.x, 'Requested changes'], commented: ['muted', I.com, 'Commented'], requested: ['run', I.clock, 'Asked to review'],
+    approved: ['ok', I.check, 'Approved'], changes_requested: ['bad', I.x, 'Requested changes'], commented: ['muted', I.com, 'Commented'], no_issues: ['ok', I.check, 'No issues found'], requested: ['run', I.clock, 'Asked to review'],
   };
   const reviewers = pr.reviewers.length
     ? pr.reviewers.map((r) => { const [tone, icon, what] = state[r.state]!; return `<li class="${tone}" title="${esc(what)}">${icon}<span>${r.login === me ? 'you' : esc(who(r.login))}</span><span class="sub">${what}</span></li>`; }).join('')
@@ -558,22 +589,18 @@ function reviewersList(pr: PrDetail): string {
   return `<ul class="revs">${reviewers}</ul>`;
 }
 
+/** Who's reviewing and what the PR is attached to, like GitHub's sidebar: only what's set, reviewers always. */
+function details(pr: PrDetail): string {
+  // GitHub's own wording and place: under the reviewers.
+  const toDraft = pr.state === 'open' && !pr.isDraft ? `<p class="sub todraft">Still in progress? <button class="link" data-do="toDraft" ${host?.busy ? 'disabled' : ''}>Convert to draft</button></p>` : '';
+  return `<div class="details"><div class="dg"><span class="lbl">Reviewers</span>${reviewersList(pr)}${toDraft}</div>${detailsRest(pr)}</div>`;
+}
+
 function detailsRest(pr: PrDetail): string {
   const ms = pr.milestone ? `<div class="dg"><span class="lbl">Milestone</span><span>${esc(pr.milestone.title)}${pr.milestone.dueOn ? `<span class="sub"> · due ${new Date(pr.milestone.dueOn).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>` : ''}</span></div>` : '';
   const labels = pr.labels.length ? `<div class="dg"><span class="lbl">Labels</span><span class="labels">${pr.labels.map((l) => `<span class="chip">${esc(l)}</span>`).join('')}</span></div>` : '';
   const linear = pr.linear ? `<div class="dg"><span class="lbl">Linear</span>${pr.linear.url ? `<a class="lin" href="${esc(pr.linear.url)}">${esc(pr.linear.key)}</a>` : `<span class="mono">${esc(pr.linear.key)}</span>`}</div>` : '';
   return `${labels}${ms}${linear}`;
-}
-
-function stepChecks(pr: PrDetail): string {
-  const byName = (a: CheckRun, b: CheckRun) => a.name.localeCompare(b.name);
-  const failing = pr.checkRuns.filter(isFail).sort(byName);
-  const running = pr.checkRuns.filter((r) => r.status !== 'completed').sort(byName);
-  const passed = pr.checkRuns.filter((r) => !isFail(r) && r.status === 'completed').sort(byName);
-  const line = `<div class="chkbar"><span class="mono">${esc(pr.headSha.slice(0, 7))}</span><span class="mono">${esc(pr.headRef)} → ${esc(pr.baseRef)}</span>${closeButton(pr) ? `<span class="end">${closeButton(pr)}</span>` : ''}</div>`;
-  if (!pr.checkRuns.length) return `${line}<div class="pad"><div class="empty">This repo runs no checks on pull requests.</div></div>`;
-  const fold = passed.length ? `<div class="passed"><button class="link" data-do="togglePassed" aria-expanded="${view.showPassed}"><span class="g ok">${I.check}</span>${failing.length || running.length ? plural(passed.length, 'check') + ' passed' : `All ${plural(passed.length, 'check')} passed`}${I.down}</button>${view.showPassed ? `<div class="crows">${passed.map(checkRow).join('')}</div>` : ''}</div>` : '';
-  return `${line}<div class="pad">${failing.map(checkRow).join('')}${running.map(checkRow).join('')}${fold}</div>`;
 }
 
 function stepFiles(pr: PrDetail): string {
@@ -604,14 +631,14 @@ function stepFiles(pr: PrDetail): string {
   let lines = file?.lines ?? null;
   const fileSince = since?.files.find((f) => f.path === file?.path);
   if (view.onlyNew && fileSince) lines = fileSince.lines;
-  const banner = since && pr.state !== 'merged' ? `<div class="newbar">${I.rerun}<b>${plural(since.commits, 'new commit')} since your ${since.kind === 'review' ? 'review' : 'last look'}</b><span class="chip">${esc(since.fromSha.slice(0, 7))}…${esc(since.toSha.slice(0, 7))}</span><span>${since.files.map((f) => esc(base(f.path))).join(', ')}</span>
-    ${fileSince ? `<div class="seg"><button data-onlynew="0" aria-pressed="${!view.onlyNew}">Whole change</button><button data-onlynew="1" aria-pressed="${view.onlyNew}">${since.kind === 'review' ? 'Since your review' : 'Since you looked'}</button></div>` : since.files[0] ? `<button class="btn sm" data-file="${esc(since.files[0].path)}" data-onlynew="1">Show it${I.chev}</button>` : ''}</div>` : '';
+  const banner = since && pr.state !== 'merged' ? `<div class="newbar"><div class="bar-l">${I.rerun}<b>${plural(since.commits, 'new commit')} since your ${since.kind === 'review' ? 'review' : 'last look'}</b><span class="chip">${esc(since.fromSha.slice(0, 7))}…${esc(since.toSha.slice(0, 7))}</span><span class="files-new">${since.files.map((f) => esc(base(f.path))).join(', ')}</span></div>
+    <div class="bar-r">${fileSince ? `<div class="seg"><button data-onlynew="0" aria-pressed="${!view.onlyNew}">Whole change</button><button data-onlynew="1" aria-pressed="${view.onlyNew}">${since.kind === 'review' ? 'Since your review' : 'Since you looked'}</button></div>` : since.files[0] ? `<button class="btn sm" data-file="${esc(since.files[0].path)}" data-onlynew="1">Show it${I.chev}</button>` : ''}</div></div>` : '';
 
-  const whole = file ? `<div class="dh"><span class="mono">${esc(file.path)}</span><label class="vt"><input type="checkbox" data-viewed="${esc(file.path)}" ${file.viewed === 'viewed' ? 'checked' : ''}> Viewed</label></div>
+  const whole = file ? `<div class="dh"><span class="mono">${esc(file.path)}</span></div>
         <div class="code" data-path="${esc(file.path)}">${lines ? renderDiff(file!.path, lines, pr) : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>';
 
-  return `${banner}${queueBar(q, cur, near)}
-    <div class="split"><nav class="files" aria-label="Changed files">${pr.state === 'open' ? `<button class="btn sm fix agentrev" data-do="reviewWithAgent" title="Your agent reviews this PR adversarially; its findings come back as drafts">${I.spark}Review with agent</button>` : ''}<div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}</nav>
+  return `${banner}${queueBar(q, cur)}
+    <div class="split"><nav class="files" aria-label="Changed files"><div class="fh"><span class="lbl">Files</span>${q.length ? `<div class="seg" role="group" aria-label="Show"><button data-do="near" data-near="0" aria-pressed="${!near}" title="Every change in the file you pick, like GitHub's Files changed">All changes</button><button data-do="near" data-near="1" aria-pressed="${near}" title="Each comment to go through with the code around it, every file in one scroll">Comments</button></div>` : `<span class="cnt">${seen}/${files.length} viewed</span>`}</div>${flist}</nav>
       <div class="dwrap"><section class="diffpane" aria-label="Diff" data-shows="${near ? '' : esc(file?.path ?? '')}">${near ? nearDiff(q, pr) : whole}</section><div class="rail" aria-hidden="true"></div></div></div>`;
 }
 
@@ -619,17 +646,32 @@ function stepFiles(pr: PrDetail): string {
 const sevTone = (n: number | null) => (n === 0 ? 's0' : n === 1 ? 's1' : '');
 
 /**
- * Where you are in the comments to go through, with Previous and Next, and whether the diff shows whole files
- * or only the code near those comments. Hidden when nothing is left to go through.
+ * Where you are in the comments to go through, with Previous and Next, and whether the diff shows all changes
+ * (one file at a time) or just the comments, with the code around each. Hidden when nothing is left to go through.
  */
-function queueBar(q: QueueItem[], cur: QueueItem | null, near: boolean): string {
+function queueBar(q: QueueItem[], cur: QueueItem | null): string {
   if (!q.length) return '';
-  // On the only one left, there's nowhere to step to.
-  const only = !!cur && q.length === 1;
-  const where = cur ? `${sevChip(cur.severity)}${cur.kind === 'draft' ? `<span class="chip agent">${I.spark}From your agent</span>` : ''}<button class="link mono" data-q="${esc(cur.id)}" title="Show it">${esc(base(cur.path))}${cur.line ? `:${cur.line}` : ''}</button>` : '';
-  return `<div class="qbar"><b>${cur ? `Comment ${q.indexOf(cur) + 1} of ${q.length}` : `${plural(q.length, 'comment')} to go through`}</b>${where}
-    <span class="qnav"><button class="btn sm" data-do="prevFinding" title="Previous comment ( [ )" aria-label="Previous comment" ${only ? 'disabled' : ''}>${I.prev}</button><button class="btn sm" data-do="nextFinding" title="Next comment ( ] )" ${only ? 'disabled' : ''}>${cur ? 'Next' : 'Start'}${I.chev}</button></span>
-    <div class="seg"><button data-do="near" data-near="0" aria-pressed="${!near}">Whole files</button><button data-do="near" data-near="1" aria-pressed="${near}" title="Every file with comments to go through, cut down to the code around them">Near comments</button></div></div>`;
+  const h = host!;
+  const pr = h.pr!;
+  // With only one, there's nowhere to step to: no Previous or Next, just where it is (click to show it).
+  const only = q.length === 1;
+  const at = cur ?? (only ? q[0]! : null);
+  const mine = resolvesByAgent(pr);
+  const where = at ? `${sevChip(at.severity)}${at.kind === 'draft' ? `<span class="chip agent">${I.spark}From your agent</span>` : ''}<button class="link mono" data-q="${esc(at.id)}" title="Show it">${esc(base(at.path))}${at.line ? `:${at.line}` : ''}</button>` : '';
+  const calls = q.map((x) => h.triage.decisions[x.id]);
+  const n = (k: Decision) => calls.filter((c) => c === k).length;
+  const undecided = calls.filter((c) => !c).length;
+  const tip = `One agent session for all ${q.length}: ${[n('fix') && `${n('fix')} to fix`, n('skip') && `${n('skip')} not an issue`, n('discuss') && `${n('discuss')} to discuss`, undecided && `${undecided} it asks you about`].filter(Boolean).join(', ')}`;
+  // Once findings are with your agent, the bar says so (a status, not a button), with Resolve again beside it.
+  const sentAt = q.map((x) => h.triage.sent[x.id]).filter((t): t is string => !!t).sort().at(-1);
+  const fresh = q.filter((x) => !h.triage.sent[x.id]).length;
+  const pushed = !!sentAt && !!h.triage.sentSha && h.triage.sentSha !== pr.headSha;
+  const status = mine && sentAt ? `<span class="qstatus" role="status">${I.spark}${pushed ? 'Your agent pushed new commits' : 'Resolving with your agent'}<span class="sub"> · sent ${sentWhen(sentAt)}</span></span>` : '';
+  const resolve = !mine ? '' : fresh
+    ? `<button class="btn pri qres" data-do="resolveWithAgent" title="${esc(tip)}">${I.spark}Resolve ${fresh}${sentAt ? ' new' : ''} with agent</button>`
+    : `<button class="btn sm qres" data-do="resolveAgain" title="Send all ${q.length} to your agent again, if the session was interrupted">Resolve again</button>`;
+  return `<div class="qbar ${sevTone(q[0]!.severity)}"><div class="bar-l"><b>${cur ? `${q.indexOf(cur) + 1} of ${q.length}` : `${q.length} open`}</b>${where}
+    ${only ? '' : `<span class="qnav"><button class="btn sm" data-do="prevFinding" title="Previous ( [ )" aria-label="Previous">${I.prev}</button><button class="btn sm ${mine ? '' : 'pri'}" data-do="nextFinding" title="Next ( ] )">${cur ? 'Next' : 'Start'}${I.chev}</button></span>`}</div>${status || resolve ? `<div class="bar-r">${status}${resolve}</div>` : ''}</div>`;
 }
 
 /** Only the code near the comments to go through, every file with some in one scroll, most severe file first. */
@@ -639,7 +681,7 @@ function nearDiff(q: QueueItem[], pr: PrDetail): string {
     const f = pr.files.find((x) => x.path === path);
     const full = f?.lines ?? [];
     const here = q.filter((x) => x.path === path);
-    return `<section class="nsec"><div class="dh"><span class="mono">${esc(path)}</span><span class="cnt">${plural(here.length, 'comment')}</span><span class="end"><button class="link" data-file="${esc(path)}">Whole file${I.chev}</button></span></div>
+    return `<section class="nsec"><div class="dh"><button class="link mono" data-file="${esc(path)}" title="Every change in this file">${esc(path)}</button><span class="cnt">${plural(here.length, 'comment')}</span></div>
       <div class="code" data-path="${esc(path)}">${renderDiff(path, nearLines(full, here), pr, full)}</div></section>`;
   }).join('');
 }
@@ -652,6 +694,8 @@ const threads = (pr: PrDetail) => pr.conversation.filter((it): it is Thread => i
 
 /** The comments to go through on the open PR: what ] and [ step through. */
 const queueNow = () => (host?.pr ? reviewQueue(host.pr, host.drafts, host.user) : []);
+/** In Files changed with comments left: the comment bar's Next is the primary button, not Approve or Merge. */
+const goingThrough = () => view.step === 'files' && queueNow().length > 0;
 
 /**
  * The diff with comments woven in: threads and held-back comments under their lines, and the comment box.
@@ -686,8 +730,9 @@ function threadCard(t: Thread, pr: PrDetail): string {
   const replies = h.drafts.filter((d) => d.replyTo === t.id);
   const c = view.composer;
   const composing = c && c.replyTo === t.id && !c.editId;
+  const links = `<button class="link" data-reply="${esc(t.id)}">Reply</button><button class="link" data-resolvethread="${esc(t.id)}" ${h.busy ? 'disabled' : ''} title="Resolve this conversation now, as on GitHub">Resolve</button>`;
   // Once you've answered it (a reply is held back), just offer another reply.
-  const acts = t.resolved ? '' : replies.length ? `<div class="tacts"><button class="link" data-reply="${esc(t.id)}">Reply</button><button class="link" data-resolvethread="${esc(t.id)}" ${h.busy ? 'disabled' : ''} title="Resolve this conversation now, as on GitHub">Resolve</button></div>` : `<div class="tacts">
+  const acts = t.resolved ? '' : !replies.length && resolvesByAgent(pr) ? `<div class="tacts">${decide(t.id)}${links}</div>` : replies.length ? `<div class="tacts"><button class="link" data-reply="${esc(t.id)}">Reply</button><button class="link" data-resolvethread="${esc(t.id)}" ${h.busy ? 'disabled' : ''} title="Resolve this conversation now, as on GitHub">Resolve</button></div>` : `<div class="tacts">
       <button class="btn sm fix" data-thread="${esc(t.id)}" title="Send this finding to your AI agent to fix">${I.spark}Fix it</button>
       <button class="btn sm" data-reply="${esc(t.id)}" data-prefill="Agreed, please fix this. " title="Held back as a reply, sent with your review">Ask the author</button>
       <button class="btn sm" data-reply="${esc(t.id)}" data-resolve="1" data-prefill="Not an issue: " title="A reply that also resolves the thread when your review is sent">Not an issue</button>
@@ -697,12 +742,32 @@ function threadCard(t: Thread, pr: PrDetail): string {
     ${t.comments.map((cm) => comment(cm, '')).join('')}${replies.map(draftCard).join('')}${composing ? composerBox(c!) : acts}</div>`;
 }
 
+/**
+ * Your PR or your agent's: findings get fixed by your agent, not answered in a review, so each takes your call
+ * (Fix, Not an issue, Discuss) and Resolve with agent sends them all in one session.
+ */
+const resolvesByAgent = (pr: PrDetail) => pr.state === 'open' && !isDependabot(pr) && (pr.mine || isAgent(pr.author));
+
+const CALLS: [Decision, string, string][] = [
+  ['fix', 'Fix', 'Your agent fixes it'],
+  ['skip', 'Not an issue', 'Your agent replies saying why and resolves it, without changing code'],
+  ['discuss', 'Discuss', 'Your agent talks it through with you first'],
+];
+
+/** Your call on a finding, and whether it's with your agent. Undecided ones, the agent asks you about. */
+function decide(id: string): string {
+  const h = host!;
+  const cur = h.triage.decisions[id];
+  const sent = h.triage.sent[id];
+  return `<span class="callh">Your call</span><div class="seg decide" role="group" aria-label="Your call">${CALLS.map(([k, label, tip]) => `<button data-decide="${esc(id)}" data-call="${k}" aria-pressed="${cur === k}" title="${tip}">${label}</button>`).join('')}</div>${sent ? `<span class="chip agent" title="Sent in a Resolve with agent session">${I.spark}With your agent · ${sentWhen(sent)}</span>` : ''}`;
+}
+
 /** A held-back comment, marked Pending; your agent's suggestions also say so and need keeping. */
 function draftCard(d: Draft): string {
   const c = view.composer;
   if (c?.editId === d.id) return composerBox(c);
   return `<div class="drf ${d.from} ${view.finding === d.id ? 'current' : ''}" data-draft-id="${esc(d.id)}"><div class="drh"><span class="chip pend">${d.sent ? 'In your review on GitHub' : 'Pending'}</span>${d.from === 'agent' ? `<span class="chip agent">${I.spark}From your agent</span>` : ''}${sevChip(d.severity)}${d.resolve ? '<span class="chip">Resolves the thread</span>' : ''}
-    <span class="end">${d.sent ? '' : `<button class="link" data-edit="${esc(d.id)}">Edit</button>`}<button class="link" data-del="${esc(d.id)}">Delete</button>${d.from === 'agent' ? `<button class="btn sm" data-keep="${esc(d.id)}">Keep</button>` : ''}</span></div>
+    <span class="end">${d.sent ? '' : `<button class="link" data-edit="${esc(d.id)}">Edit</button>`}<button class="link" data-del="${esc(d.id)}">Delete</button>${d.from === 'agent' ? (host?.pr && resolvesByAgent(host.pr) ? decide(d.id) : `<button class="btn sm" data-keep="${esc(d.id)}">Keep</button>`) : ''}</span></div>
     <div class="drb">${esc(d.body.replace(/^\*\*P[0-3]\*\*\s*/, ''))}</div></div>`;
 }
 
@@ -738,7 +803,7 @@ function stepOverview(pr: PrDetail): string {
   const n = conversationCounts(pr.conversation);
   const jump = n.fresh ? `<div class="ovmeta"><button class="link" data-do="jumpNew">Jump to ${plural(n.fresh, 'new comment')}${I.down}</button></div>` : '';
   return `<div class="ov">
-    ${pr.state === 'open' ? statusCardView(pr, host!) : ''}${jump}
+    ${jump}
     <section class="ovdesc" aria-label="Description">${description(pr)}</section>
     <section class="ovconv" aria-label="Conversation"><div class="convh"><h3 class="lbl">Conversation</h3>${convFilters(pr)}</div>
       ${conversation(filtered(pr))}</section>
@@ -815,7 +880,7 @@ function convItem(it: ConversationItem, firstNew = false): string {
   // On a thread you started, say whether it's been answered.
   const answered = !it.resolved && it.comments[0]?.author === me && last ? (last.author !== me ? `<span class="ck-s run">${I.com}${esc(who(last.author))} replied</span>` : '<span class="ck-s muted">No reply yet</span>') : '';
   const state = (it.resolved ? '<span class="pill">Resolved</span>' : '<span class="pill need">Unresolved</span>') + answered;
-  const fix = it.resolved ? '' : `<span class="end tacts-inline"><button class="btn sm fix" data-thread="${esc(it.id)}" title="Send this comment to your AI agent">${I.spark}Fix it</button><button class="btn sm" data-goto="${esc(it.id)}" title="Answer it in the diff: ask the author, or say it’s not an issue">Answer in diff</button><button class="btn sm" data-resolvethread="${esc(it.id)}" ${host?.busy ? 'disabled' : ''} title="Resolve this conversation now, as on GitHub">Resolve</button></span>`;
+  const fix = it.resolved || (host?.pr && resolvesByAgent(host.pr)) ? (it.resolved ? '' : `<span class="end tacts-inline"><button class="btn sm" data-goto="${esc(it.id)}" title="Make your call on it in the diff">Show it</button></span>`) : `<span class="end tacts-inline"><button class="btn sm fix" data-thread="${esc(it.id)}" title="Send this comment to your AI agent">${I.spark}Fix it</button><button class="btn sm" data-goto="${esc(it.id)}" title="Answer it in the diff: ask the author, or say it’s not an issue">Answer in diff</button><button class="btn sm" data-resolvethread="${esc(it.id)}" ${host?.busy ? 'disabled' : ''} title="Resolve this conversation now, as on GitHub">Resolve</button></span>`;
   return `<article class="ci thread"${anchor} data-thread-id="${esc(it.id)}"><div class="cih">${I.com}${sevChip(it.severity)}<button class="link mono" data-goto="${esc(it.id)}" title="Show it in the diff">${esc(where)}</button>${state}${it.outdated ? '<span class="pill">Outdated</span>' : ''}${fix}</div>
     ${it.comments.map((c) => comment(c, '')).join('')}</article>`;
 }
@@ -839,7 +904,7 @@ function safe(html: string): string {
 function prView(h: HostState): string {
   const pr = h.pr;
   if (!pr) return `<div class="crumb"><button class="home" data-do="back">${I.inbox}Review queue</button></div><div class="empty"><span class="spin"></span>Loading pull request</div>`;
-  return `${crumb(pr, h)}<div class="cols">${sidebar(pr)}<main>${view.step === 'checks' ? stepChecks(pr) : view.step === 'files' ? stepFiles(pr) : stepOverview(pr)}</main></div>`;
+  return `${crumb(pr, h)}<div class="cols">${sidebar(pr)}<main>${pr.state === 'open' && statusShown() ? `<div class="statusdock" id="statusdock">${statusCardView(pr, h)}</div>` : ''}${view.step === 'files' ? stepFiles(pr) : stepOverview(pr)}</main></div>`;
 }
 
 const SCROLLERS = ['main', '#app > .pad', '.code', '.files', '.side', '.sc-d', '.log', '.pop.review textarea'];
@@ -939,7 +1004,7 @@ function keysHelp(): string {
   const r = (ks: string[], t: string) => `<div class="kr">${ks.map((k) => `<kbd>${k}</kbd>`).join('')}<span>${t}</span></div>`;
   return `<div class="keys" data-do="keys"><div class="kp" role="dialog" aria-label="Keyboard shortcuts"><b>Keyboard shortcuts</b>
     <span class="lbl">Queue</span>${r(['j', 'k'], 'Move down or up')}${r(['Enter'], 'Open the pull request')}${r(['r'], 'Refresh')}
-    <span class="lbl">Pull request</span>${r(['j', 'k'], 'Next or previous pull request')}${r(['n', 'p'], 'Next or previous file')}${r(['v'], 'Toggle viewed on this file')}${r(['1', '2', '3'], 'Overview, Checks, Files changed')}${r(['c'], 'Comment on a line')}${r([']', '['], 'Next or previous finding')}${r(['r'], 'Reply to the finding')}${r(['⌘⇧↵'], 'Finish your review')}${r(['a'], 'Approve')}${r(['Esc'], 'Back to the queue')}${r(['?'], 'Show or hide this list')}</div></div>`;
+    <span class="lbl">Pull request</span>${r(['j', 'k'], 'Next or previous pull request')}${r(['n', 'p'], 'Next or previous file')}${r(['v'], 'Toggle viewed on this file')}${r(['1', '2'], 'Overview, Files changed')}${r(['c'], 'Comment on a line')}${r([']', '['], 'Next or previous finding')}${r(['r'], 'Reply to the finding')}${r(['⌘⇧↵'], 'Finish your review')}${r(['a'], 'Approve')}${r(['Esc'], 'Back to the queue')}${r(['?'], 'Show or hide this list')}</div></div>`;
 }
 
 /* ---------- Events ---------- */
@@ -948,16 +1013,22 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
   if (msg.type === 'state') {
     const pr = msg.state.pr;
     if (pr && prKey(pr) !== view.pr) {
-      // First look, or new comments: start on Overview for the context. Otherwise pick up the files.
-      const start: Step = !pr.seenBefore || conversationCounts(pr.conversation).fresh ? 'overview' : 'files';
+      const { step: start, item: first } = openOn(pr, msg.state.drafts, msg.state.user);
+      landOn = first?.id ?? null;
       // A re-review opens the conversation on your own threads: what became of what you asked for.
-      view = { ...view, pr: prKey(pr), file: null, onlyNew: false, step: start, menu: null, reviewEvent: null, composer: null, finding: null, part: null, cardOpen: false, conv: isReReview(pr) ? 'mine' : 'all' };
+      view = { ...view, pr: prKey(pr), file: first?.path ?? null, onlyNew: false, step: start, statusFlipped: false, menu: null, reviewEvent: null, composer: null, finding: landOn, near: first ? !view.wholeFiles : view.near, part: null, cardOpen: false, conv: isReReview(pr) ? 'mine' : 'all' };
       vscode.setState(view);
       // Another PR's comments won't be shown again soon: don't keep their cleaned HTML for the whole session.
       cleaned.clear();
     }
     host = msg.state;
     render();
+    if (landOn) {
+      const card = cardFor(landOn);
+      card?.scrollIntoView({ block: 'center' });
+      if (card) flash([card]);
+      landOn = null;
+    }
   } else if (msg.type === 'toast') {
     const t = document.getElementById('toast')!;
     t.textContent = msg.text;
@@ -1001,6 +1072,7 @@ document.addEventListener('change', (e) => {
 
 document.addEventListener('click', (e) => {
   const target = e.target as HTMLElement;
+  keepStatus = !!target.closest('.statusdock');
   // Menus: a toggle opens or closes its own; any click outside an open menu closes it.
   const toggle = target.closest<HTMLElement>('[data-menu]');
   if (toggle && !(toggle as HTMLButtonElement).disabled) { const m = toggle.dataset.menu as View['menu']; save({ menu: view.menu === m ? null : m }); return; }
@@ -1014,7 +1086,7 @@ document.addEventListener('click', (e) => {
     if (/^https?:/.test(a.href)) send({ type: 'openExternal', url: a.href });
     return;
   }
-  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-resolvethread],[data-open],[data-filter],[data-conv],[data-part],[data-layout],[data-cline],[data-reply],[data-edit],[data-del],[data-keep],[data-goto],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-q],[data-do]');
+  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-decide],[data-resolvethread],[data-open],[data-filter],[data-conv],[data-part],[data-layout],[data-cline],[data-reply],[data-edit],[data-del],[data-keep],[data-goto],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-q],[data-do]');
   if (!t || (t as HTMLButtonElement).disabled) return;
   // An action picked from a menu closes it.
   if (view.menu && t.closest('.pop') && !t.dataset.part && t.dataset.do !== 'cardOpen') view.menu = null;
@@ -1024,6 +1096,7 @@ document.addEventListener('click', (e) => {
   else if (d.filter) save({ filter: d.filter as Filter });
   else if (d.layout) save({ layout: d.layout as View['layout'], sel: 0 });
   else if (d.conv) save({ conv: d.conv as View['conv'], step: 'overview' });
+  else if (d.part === 'findings' && view.part !== 'findings' && goThroughFindings()) { /* went to the first one */ }
   else if (d.part) save({ part: view.part === d.part ? null : (d.part as PartKey) });
   else if (d.step) save({ step: d.step as Step });
   else if (d.fix) send({ type: 'fixWithAgent', check: d.fix });
@@ -1037,6 +1110,8 @@ document.addEventListener('click', (e) => {
   else if (d.edit) { const dr = host?.drafts.find((x) => x.id === d.edit); if (dr) save({ composer: { id: composerId(), path: dr.path, line: dr.line, side: dr.side, replyTo: dr.replyTo, resolve: dr.resolve, editId: dr.id, prefill: dr.body } }); }
   else if (d.del) { send({ type: 'deleteDraft', id: d.del }); advanceFrom(d.del); }
   else if (d.keep) { send({ type: 'keepDraft', id: d.keep }); advanceFrom(d.keep); }
+  // Picking your call again clears it.
+  else if (d.decide) send({ type: 'decide', id: d.decide, decision: host?.triage.decisions[d.decide] === d.call ? null : (d.call as Decision) });
   else if (d.goto) goToItem(d.goto);
   else if (d.q) goToItem(d.q);
   else if (d.ext) send({ type: 'openExternal', url: d.ext });
@@ -1049,7 +1124,6 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'readyForReview') send({ type: 'setDraft', draft: false });
   else if (d.do === 'keys') save({ keys: !view.keys });
   else if (d.do === 'switchRepo') send({ type: 'switchRepository' });
-  else if (d.do === 'togglePassed') save({ showPassed: !view.showPassed });
   else if (d.do === 'jumpNew') document.getElementById('firstnew')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
   else if (d.do === 'fixConflicts') send({ type: 'fixConflicts' });
   else if (d.do === 'mergeDependabot') send({ type: 'mergeDependabot' });
@@ -1059,16 +1133,25 @@ document.addEventListener('click', (e) => {
   else if (d.do === 'composeCancel') save({ composer: null });
   else if (d.do === 'composeAdd' || d.do === 'composeNow' || d.do === 'composeSave') finishComposer(d.do);
   else if (d.do === 'nextFinding') stepFinding(1);
+  else if (d.do === 'resolveWithAgent') send({ type: 'resolveWithAgent' });
+  else if (d.do === 'resolveAgain') send({ type: 'resolveWithAgent', again: true });
+  else if (d.do === 'submitHeld') send({ type: 'submitReview', event: 'COMMENT', body: '' });
   else if (d.do === 'prevFinding') stepFinding(-1);
   else if (d.do === 'near') {
     // Showing only code near comments starts at the first one, unless you're already on one.
     const on = d.near === '1';
     const q = queueNow();
     const start = on && !q.some((x) => x.id === view.finding) ? q[0]?.id ?? null : view.finding;
-    save({ near: on, finding: start });
+    save({ near: on, wholeFiles: !on, finding: start });
     if (start) cardFor(start)?.scrollIntoView({ block: 'center' });
   }
   else if (d.do === 'cardOpen') save({ cardOpen: !view.cardOpen, part: null });
+  else if (d.do === 'toggleStatus') {
+    // Opening shows the part the line is about, at the top of the page.
+    const opening = !statusShown();
+    save({ statusFlipped: !view.statusFlipped, menu: null, ...(opening ? { cardOpen: true, part: (d.topart || view.part) as PartKey | null } : {}) });
+    if (opening) document.querySelector('main')?.scrollTo({ top: 0 });
+  }
   else if (d.do === 'reviewWithAgent') send({ type: 'reviewWithAgent' });
   else if (d.do === 'dependabotRebase') send({ type: 'comment', body: '@dependabot rebase' });
   else if (d.do === 'askResolve' && host?.pr) {
@@ -1123,11 +1206,20 @@ function goToItem(id: string): void {
   if (!pr) return;
   const path = threads(pr).find((x) => x.id === id)?.path ?? host!.drafts.find((d) => d.id === id)?.path;
   if (path == null) return;
-  const near = view.near && queueNow().some((x) => x.id === id);
-  save({ step: 'files', onlyNew: false, finding: id, near, ...(near ? {} : { file: path }) });
+  // Just comments unless you picked All changes, for anything still to go through.
+  const near = !view.wholeFiles && queueNow().some((x) => x.id === id);
+  save({ step: 'files', onlyNew: false, finding: id, near, menu: null, ...(near ? {} : { file: path }) });
   const card = cardFor(id);
   card?.scrollIntoView({ block: 'center' });
   if (card) flash([card]);
+}
+
+/** Shows the most severe open finding in Files changed. False when none is left to go through. */
+function goThroughFindings(): boolean {
+  const q = queueNow();
+  const first = q.find((x) => x.severity != null) ?? q[0];
+  if (first) goToItem(first.id);
+  return !!first;
 }
 
 /** Lights up what you were just taken to for a moment, so it's clear where you landed. */
@@ -1252,8 +1344,7 @@ document.addEventListener('keydown', (e) => {
     if (at && !at.endsWith(':')) { e.preventDefault(); openComposer(at, false); }
   } else if (k === 'r' && view.finding) { e.preventDefault(); save({ step: 'files', composer: replyTo(view.finding, false) }); document.getElementById('lbox')?.focus(); }
   else if (k === '1') save({ step: 'overview' });
-  else if (k === '2') save({ step: 'checks' });
-  else if (k === '3') save({ step: 'files' });
+  else if (k === '2') save({ step: 'files' });
   else if (k === 'a' && pr.state !== 'merged' && !pr.mine && (pr.myReview !== 'approved' || isReReview(pr))) {
     // With comments held back (here or in a review in progress on GitHub), approving opens the review so you see them go too.
     if (host.drafts.some((d) => d.from === 'you') || pr.pendingReview?.comments) save({ menu: 'review', reviewEvent: 'APPROVE' });

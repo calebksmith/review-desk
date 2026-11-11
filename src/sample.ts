@@ -119,11 +119,95 @@ function soloSeed(): SamplePr[] {
       ],
       checkRuns: [pass('Lint', 'GitHub Actions'), pass('Prettier', 'GitHub Actions'), pass('Types', 'GitHub Actions'), pass('Tests', 'GitHub Actions', '12 of 12 passed'), pass('Vercel', 'Vercel', 'Preview ready')],
     },
+    // Walkthrough: Codex left two findings and you haven't opened it yet (the preview adds a suggestion from your agent).
+    {
+      summary: { number: 58, title: 'Lazy-load case study images', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(12), headSha: '3fa91c0', isDraft: false, state: 'open', labels: ['review-desk'], myReview: null, checks: { passed: 5, failed: 0, pending: 0, total: 5 }, mergeable: true, mergeState: 'clean', unresolvedThreads: 2 },
+      body: 'Load case study images as they scroll into view.',
+      bodyHtml: '<p>Load case study images as they scroll into view, so the work page shows text first on slow connections.</p>',
+      conversation: [
+        { kind: 'thread', id: 'T_58_1', path: 'src/components/CaseImage.tsx', line: 14, resolved: false, outdated: false, severity: 1, comments: [
+          say('chatgpt-codex-connector', 14, '<p><strong>P1</strong> Images above the fold now load late. The first image on each page should keep <code>loading="eager"</code>, or the largest paint gets slower.</p>'),
+        ] },
+        { kind: 'thread', id: 'T_58_2', path: 'src/components/CaseImage.tsx', line: 18, resolved: false, outdated: false, severity: 2, comments: [
+          say('chatgpt-codex-connector', 14, '<p><strong>P2</strong> Without <code>width</code> and <code>height</code>, the page jumps as each image loads.</p>'),
+        ] },
+      ],
+      headRef: 'claude/lazy-images',
+      files: [
+        file('src/components/CaseImage.tsx', [
+          '@@ -8,8 +8,13 @@ type Props = { src: string; alt: string; first?: boolean }',
+          ' export function CaseImage({ src, alt, first }: Props) {',
+          '   return (',
+          '     <figure className="case-image">',
+          '-      <img src={src} alt={alt} />',
+          '+      <img',
+          '+        src={src}',
+          '+        alt={alt}',
+          '+        loading="lazy"',
+          '+        decoding="async"',
+          '+      />',
+          '       <figcaption>{alt}</figcaption>',
+          '     </figure>',
+          '   )',
+        ].join('\n')),
+        file('src/app/work/page.tsx', [
+          '@@ -21,3 +21,3 @@ export default function Work() {',
+          '   {studies.map((s, i) => (',
+          '-    <img src={s.cover} alt={s.title} />',
+          '+    <CaseImage src={s.cover} alt={s.title} first={i === 0} />',
+          '   ))}',
+        ].join('\n')),
+      ],
+      checkRuns: [pass('Lint', 'GitHub Actions'), pass('Prettier', 'GitHub Actions'), pass('Types', 'GitHub Actions'), pass('Tests', 'GitHub Actions', '14 of 14 passed'), pass('Vercel', 'Vercel', 'Preview ready')],
+    },
+    // Walkthrough: you've looked before and nothing is new, but one Codex finding is still open.
+    {
+      summary: { number: 59, title: 'Add a contact form', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(60 * 3), headSha: '81c3e7d', isDraft: false, state: 'open', labels: ['review-desk'], myReview: null, checks: { passed: 5, failed: 0, pending: 0, total: 5 }, mergeable: true, mergeState: 'clean', unresolvedThreads: 1 },
+      body: 'A contact form on the About page that emails me.',
+      bodyHtml: '<p>A contact form on the About page that sends me an email.</p>',
+      conversation: [
+        { kind: 'thread', id: 'T_59_1', path: 'src/app/api/contact/route.ts', line: 9, resolved: false, outdated: false, severity: 1, comments: [
+          say('chatgpt-codex-connector', 60 * 3, '<p><strong>P1</strong> The message goes into the email’s subject unescaped, so a line break in it can add headers. Strip line breaks or keep the message to the body.</p>'),
+        ] },
+      ],
+      headRef: 'claude/contact-form',
+      files: [
+        { ...file('src/app/about/ContactForm.tsx', [
+          '@@ -0,0 +1,6 @@',
+          "+export function ContactForm() {",
+          '+  return (',
+          '+    <form action="/api/contact" method="post">',
+          '+      <textarea name="message" required />',
+          '+    </form>',
+          '+  )',
+        ].join('\n'), 'viewed'), status: 'added' },
+        { ...file('src/app/api/contact/route.ts', [
+          '@@ -0,0 +1,11 @@',
+          "+import { send } from '@/lib/mail'",
+          '+',
+          '+export async function POST(req: Request) {',
+          '+  const form = await req.formData()',
+          "+  const message = String(form.get('message') ?? '')",
+          '+  if (!message.trim()) return new Response(null, { status: 400 })',
+          '+',
+          '+  await send({',
+          '+    subject: `Contact: ${message.slice(0, 40)}`,',
+          '+    text: message,',
+          '+  })',
+        ].join('\n')), status: 'added' },
+      ],
+      checkRuns: [pass('Lint', 'GitHub Actions'), pass('Prettier', 'GitHub Actions'), pass('Types', 'GitHub Actions'), pass('Tests', 'GitHub Actions', '9 of 9 passed'), pass('Vercel', 'Vercel', 'Preview ready')],
+    },
     {
       summary: { number: 57, title: 'Fix dates on the Experience page', author: 'claude', url: 'https://github.com', additions: 0, deletions: 0, updatedAt: ago(62), headSha: 'e1f04aa', isDraft: false, state: 'open', labels: ['review-desk'], myReview: null, checks: { passed: 4, failed: 0, pending: 1, total: 5 }, mergeable: true, mergeState: 'behind', unresolvedThreads: 0 },
       body: 'Use one date format across the Experience page.',
       bodyHtml: '<p>Use one date format across the Experience page: short month and year, like <em>Jan 2023</em>.</p>',
-      conversation: [],
+      // Walkthrough: Codex found nothing, so it left a comment and no review.
+      conversation: [
+        { kind: 'comment', comment: say('calebksmith', 50, '<p>@codex review</p>') },
+        { kind: 'comment', comment: say('chatgpt-codex-connector', 40, '<p>Codex Review: Didn’t find any major issues. Nice work!</p>') },
+      ],
+      reviewers: [{ login: 'chatgpt-codex-connector', state: 'no_issues' }],
       headRef: 'claude/experience-dates',
       files: [file('src/content/experience.mdx', [
         '@@ -10,3 +10,3 @@',

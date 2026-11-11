@@ -58,6 +58,7 @@ export function activate(context: vscode.ExtensionContext): void {
       useSource(new SampleSource());
       open(context);
     }),
+    vscode.commands.registerCommand('reviewDesk.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:calebksmith.review-desk')),
     vscode.commands.registerCommand('reviewDesk.openTeamSample', () => {
       useSource(new SampleSource('team'));
       open(context);
@@ -302,6 +303,7 @@ function open(context: vscode.ExtensionContext, key?: string): void {
     askAgent,
     choose: async (title, options) => vscode.window.showQuickPick(options, { title, placeHolder: 'Pick one' }),
     switchRepository: () => { void vscode.commands.executeCommand('reviewDesk.switchRepository'); },
+    checkout: async (repo) => (await rootOf(repo))?.fsPath ?? null,
     findingsFile: async (repo, number) => {
       const root = await rootOf(repo);
       if (!root) return null;

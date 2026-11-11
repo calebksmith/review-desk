@@ -74,12 +74,13 @@ function approved(p: PrSummary): PrStatus {
 /**
  * Where a PR sorts: first what the reviewer can act on (a review asked of them by name, then their own PRs
  * that need them, then PRs nobody was assigned), then what's waiting on someone else, then merged.
- * Within a rank, what blocks a merge comes first.
+ * Within a rank, open P0/P1 findings come first, then what blocks a merge.
  */
 export function priority(p: PrSummary, ctx?: PriorityContext): { section: 'you' | 'others' | 'merged'; rank: number; signals?: Signals } {
   const s = prStatus(p);
   if (p.state === 'merged') return { section: 'merged', rank: 99 };
-  const blocking = s.tone === 'bad' ? 0 : 0.5;
+  // Within a rank: open P0/P1 findings first, then what blocks a merge (failing checks, conflicts), then the rest.
+  const blocking = p.findingCounts.p0 || p.findingCounts.p1 ? 0 : s.tone === 'bad' ? 0.25 : 0.5;
   if (s.who !== 'you') return { section: 'others', rank: 50 + blocking };
   const role = (p.reviewRequested && !p.myReview) || isReReview(p) ? 0 : p.mine ? 1 : 2;
   if (!ctx) return { section: 'you', rank: role + blocking };
@@ -157,7 +158,10 @@ export function mergeReadiness(pr: PrDetail, queue: readonly PrSummary[] = [], m
     items.push({ key: 'findings', tone: f.p0 ? 'bad' : 'warn', text: `${p0p1(f)} ${f.p0 + f.p1 === 1 ? 'finding' : 'findings'} open`, action: 'nextFinding' });
   }
 
-  if (c.failed) items.push({ key: 'checks', tone: 'bad', text: plural(c.failed, 'check') + ' failing', action: 'showChecks' });
+  // Red is for what blocks a merge: when every failing check is optional, it's a warning, and says so.
+  const failingRuns = pr.checkRuns.filter((r) => r.status === 'completed' && ['failure', 'timed_out', 'cancelled', 'action_required', 'stale'].includes(r.conclusion ?? ''));
+  const optional = failingRuns.length > 0 && !failingRuns.some((r) => r.required);
+  if (c.failed) items.push({ key: 'checks', tone: optional ? 'warn' : 'bad', text: optional ? `${plural(c.failed, 'optional check')} failing` : plural(c.failed, 'check') + ' failing', action: 'showChecks' });
   else if (c.pending) items.push({ key: 'checks', tone: 'run', text: plural(c.pending, 'check') + ' running', action: 'showChecks' });
   else if (!c.total) items.push({ key: 'checks', tone: 'muted', text: 'No checks' });
   else items.push({ key: 'checks', tone: 'ok', text: `All ${plural(c.total, 'check')} passed`, action: 'showChecks' });
@@ -181,13 +185,13 @@ const LEAD: Record<ReadinessItem['key'], number> = { draft: -1, conflicts: 0, st
  * The one line beside the header's button: the most urgent item, and how many others need attention.
  * When nothing does, it says the PR is ready. "Not approved yet" never leads, since Approve is the button.
  */
-export function mergeSummary(pr: PrDetail, queue: readonly PrSummary[] = [], me = ''): { tone: Tone; text: string; more: number } {
+export function mergeSummary(pr: PrDetail, queue: readonly PrSummary[] = [], me = ''): { tone: Tone; text: string; more: number; key: ReadinessItem['key'] | null } {
   const attention = mergeReadiness(pr, queue, me)
     .filter((it) => it.tone !== 'ok' && !(it.key === 'approval' && it.tone === 'muted') && !(it.key === 'checks' && it.text === 'No checks'))
     .sort((a, b) => URGENCY[a.tone] - URGENCY[b.tone] || LEAD[a.key] - LEAD[b.key]);
   const first = attention[0];
-  if (!first) return { tone: 'ok', text: pr.myReview === 'approved' || pr.mine || pr.reviewDecision === 'approved' ? 'Ready to merge' : 'Ready once you approve', more: 0 };
-  return { tone: first.tone, text: first.text, more: attention.length - 1 };
+  if (!first) return { tone: 'ok', text: pr.myReview === 'approved' || pr.mine || pr.reviewDecision === 'approved' ? 'Ready to merge' : 'Ready once you approve', more: 0, key: null };
+  return { tone: first.tone, text: first.text, more: attention.length - 1, key: first.key };
 }
 
 /** Unresolved findings marked P0 or P1 (by Codex, an agent or a person). */

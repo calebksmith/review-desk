@@ -1,9 +1,10 @@
-import { parseKey, prKey, type CommentAction, type Draft, type FromWebview, type HostState, type MergeMethod, type PrDetail, type PrSummary, type ReviewEvent, type ToWebview } from './protocol';
-import { conflictPrompt, fixPrompt, threadPrompt, type AgentRoute } from './agent';
+import { parseKey, prKey, type CommentAction, type Decision, type Draft, type FromWebview, type HostState, type MergeMethod, type PrDetail, type Triage, type PrSummary, type ReviewEvent, type ToWebview } from './protocol';
+import { conflictPrompt, fixPrompt, resolvePrompt, threadPrompt, type AgentRoute, type Finding } from './agent';
 import { parseFindings, reviewPrompt } from './agentReview';
 import { closeOptions, type CloseOption } from './dependabot';
 import { markNew } from './conversation';
 import { inDiff } from './patch';
+import { reviewQueue } from './queue';
 import { newlyYourTurn, waiting, whatArrived } from './refresh';
 import { DEFAULT_BLOCKER_LABELS } from './signals';
 import type { DataSource, Store } from './source';
@@ -26,12 +27,16 @@ export interface Host {
    * or null when the repo isn't open here. Review Desk watches that file and calls importFindings.
    */
   findingsFile(repo: string, number: number): Promise<string | null>;
+  /** Where this repo is checked out here, when it's open in VS Code: prompts tell the agent where to work. */
+  checkout?(repo: string): Promise<string | null>;
 }
 
 /**
  * Owns the review state and answers the webview. It has no VS Code imports,
  * so the same code runs in the extension, in tests, and in the browser preview.
  */
+const NO_TRIAGE: Triage = { decisions: {}, sent: {} };
+
 export class Controller {
   private state: HostState;
 
@@ -51,7 +56,7 @@ export class Controller {
   private readonly closed = new Set<string>();
 
   constructor(private readonly source: DataSource, private readonly store: Store, private readonly host: Host, private readonly label = '', actions: CommentAction[] = [], blockerLabels: string[] = DEFAULT_BLOCKER_LABELS) {
-    this.state = { scope: source.scope, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, bulk: null, notice: null, actions, blockerLabels, drafts: [], updatedAt: null, error: null };
+    this.state = { scope: source.scope, user: '', sample: source.sample, view: 'queue', queue: [], pr: null, loading: true, busy: null, bulk: null, notice: null, actions, blockerLabels, drafts: [], triage: NO_TRIAGE, updatedAt: null, error: null };
   }
 
   get snapshot(): HostState { return this.state; }
@@ -73,6 +78,8 @@ export class Controller {
         case 'mergeDependabot': await this.mergeDependabot(); break;
         case 'fixWithAgent': await this.fixWithAgent(msg.check); break;
         case 'fixThread': await this.fixThread(msg.id); break;
+        case 'decide': await this.decide(msg.id, msg.decision); break;
+        case 'resolveWithAgent': await this.resolveWithAgent(msg.again ?? false); break;
         case 'fixConflicts': await this.fixConflicts(); break;
         case 'comment': await this.comment(msg.body); break;
         case 'closeDependabot': await this.closeDependabot(); break;
@@ -166,7 +173,7 @@ export class Controller {
     }
     const seenAt = since.seenAt;
     this.prAt = Date.now();
-    this.set({ pr: { ...pr, conversation: markNew(pr.conversation, seenAt, me), seenBefore: seenAt !== null }, drafts: this.store.get<Draft[]>(`drafts:${prKey(at)}`) ?? [], loading: false, updatedAt: new Date(this.prAt).toISOString() });
+    this.set({ pr: { ...pr, conversation: markNew(pr.conversation, seenAt, me), seenBefore: seenAt !== null }, drafts: this.store.get<Draft[]>(`drafts:${prKey(at)}`) ?? [], triage: this.store.get<Triage>(`triage:${prKey(at)}`) ?? NO_TRIAGE, loading: false, updatedAt: new Date(this.prAt).toISOString() });
   }
 
   private async setViewed(path: string, viewed: boolean): Promise<void> {
@@ -398,7 +405,7 @@ export class Controller {
     const pr = this.state.pr;
     const run = pr?.checkRuns.find((r) => r.name === check);
     if (!pr || !run) return;
-    const via = await this.host.askAgent(fixPrompt(pr, run));
+    const via = await this.host.askAgent(fixPrompt(pr, run, await this.checkout(pr)));
     const text = {
       claudeCode: `Opened Claude Code with why ${run.name} failed. Read the prompt, then send it.`,
       chat: `Opened chat with why ${run.name} failed. Read the prompt, then send it.`,
@@ -411,15 +418,58 @@ export class Controller {
     const pr = this.state.pr;
     const thread = pr?.conversation.find((it) => it.kind === 'thread' && it.id === id);
     if (!pr || thread?.kind !== 'thread') return;
-    const via = await this.host.askAgent(threadPrompt(pr, thread));
+    const via = await this.host.askAgent(threadPrompt(pr, thread, await this.checkout(pr)));
     const where = thread.path.split('/').pop();
     this.host.post({ type: 'toast', text: via === 'clipboard' ? `Copied the comment on ${where} as a prompt. Paste it into your agent.` : `Opened ${via === 'claudeCode' ? 'Claude Code' : 'chat'} with the comment on ${where}. Read the prompt, then send it.` });
+  }
+
+  private async checkout(pr: PrDetail): Promise<string | null> {
+    return (await this.host.checkout?.(pr.repo)) ?? null;
+  }
+
+  private async saveTriage(triage: Triage): Promise<void> {
+    const pr = this.state.pr;
+    if (!pr) return;
+    await this.store.set(`triage:${prKey(pr)}`, triage);
+    this.set({ triage });
+  }
+
+  private async decide(id: string, decision: Decision | null): Promise<void> {
+    const decisions = { ...this.state.triage.decisions };
+    if (decision) decisions[id] = decision;
+    else delete decisions[id];
+    await this.saveTriage({ ...this.state.triage, decisions });
+  }
+
+  /**
+   * The findings still to go through, with your calls, to your agent in one session; each is marked as sent.
+   * Ones already with your agent stay out unless every one is, or you ask to send them again.
+   */
+  private async resolveWithAgent(again: boolean): Promise<void> {
+    const pr = this.state.pr;
+    if (!pr) return;
+    const findings: Finding[] = reviewQueue(pr, this.state.drafts, this.state.user).flatMap((q): Finding[] => {
+      const t = q.kind === 'thread' ? pr.conversation.find((it) => it.kind === 'thread' && it.id === q.id) : undefined;
+      const d = q.kind === 'draft' ? this.state.drafts.find((x) => x.id === q.id) : undefined;
+      return t?.kind === 'thread' ? [{ kind: 'thread', thread: t }] : d ? [{ kind: 'draft', draft: d }] : [];
+    });
+    const idOf = (f: Finding) => (f.kind === 'thread' ? f.thread.id : f.draft.id);
+    const fresh = findings.filter((f) => !this.state.triage.sent[idOf(f)]);
+    const sending = again || !fresh.length ? findings : fresh;
+    if (!sending.length) return;
+    const via = await this.host.askAgent(resolvePrompt(pr, sending, this.state.triage.decisions, await this.checkout(pr)));
+    const at = new Date().toISOString();
+    const sent = { ...this.state.triage.sent };
+    for (const f of sending) sent[idOf(f)] = at;
+    await this.saveTriage({ ...this.state.triage, sent, sentSha: pr.headSha });
+    const n = plural(sending.length, 'finding');
+    this.host.post({ type: 'toast', text: via === 'clipboard' ? `Copied ${n} as a prompt. Paste it into your agent.` : `Opened ${via === 'claudeCode' ? 'Claude Code' : 'chat'} with ${n}. Read the prompt, then send it.` });
   }
 
   private async fixConflicts(): Promise<void> {
     const pr = this.state.pr;
     if (!pr) return;
-    const via = await this.host.askAgent(conflictPrompt(pr));
+    const via = await this.host.askAgent(conflictPrompt(pr, await this.checkout(pr)));
     this.host.post({ type: 'toast', text: via === 'clipboard' ? 'Copied the conflicts as a prompt. Paste it into your agent.' : `Opened ${via === 'claudeCode' ? 'Claude Code' : 'chat'} to resolve the conflicts. Read the prompt, then send it.` });
   }
 

@@ -53,7 +53,8 @@ export interface PrSummary {
   unresolvedThreads: number;
 }
 
-export interface Reviewer { login: string; state: 'approved' | 'changes_requested' | 'commented' | 'requested' }
+/** `no_issues`: a review agent (Codex) that found nothing and so left a comment, not a GitHub review. */
+export interface Reviewer { login: string; state: 'approved' | 'changes_requested' | 'commented' | 'requested' | 'no_issues' }
 
 export type MergeState = 'clean' | 'behind' | 'blocked' | 'dirty' | 'unstable' | 'draft' | 'unknown';
 export type MergeMethod = 'squash' | 'merge' | 'rebase';
@@ -190,6 +191,9 @@ export function parseKey(key: string): { repo: string; number: number } | null {
   return m ? { repo: m[1]!, number: Number(m[2]) } : null;
 }
 
+/** What you decided for a finding on your PR (or your agent's), for the agent session that resolves them. */
+export type Decision = 'fix' | 'skip' | 'discuss';
+
 export interface HostState {
   /** What the queue covers, for the header: a repo, or "Everything involving you". */
   scope: string;
@@ -209,10 +213,18 @@ export interface HostState {
   blockerLabels: string[];
   /** The open PR's held-back comments, sent with the review. */
   drafts: Draft[];
+  /**
+   * On your PR or your agent's: your call on each finding (Fix, Not an issue, Discuss), and when each went to
+   * your agent in a Resolve with agent session. Kept per PR, like drafts.
+   */
+  triage: Triage;
   /** When what's on screen (the queue, or the open PR) last loaded from GitHub. */
   updatedAt: string | null;
   error: string | null;
 }
+
+/** `sentSha`: the PR's head when findings last went to your agent, so new commits after it can be pointed out. */
+export interface Triage { decisions: Record<string, Decision>; sent: Record<string, string>; sentSha?: string }
 
 export type ToWebview =
   | { type: 'state'; state: HostState }
@@ -234,6 +246,9 @@ export type FromWebview =
   | { type: 'mergeDependabot' }
   | { type: 'fixWithAgent'; check: string }
   | { type: 'fixThread'; id: string }
+  | { type: 'decide'; id: string; decision: Decision | null }
+  /** Sends the findings not yet with your agent (all of them when every one is); `again` sends every one. */
+  | { type: 'resolveWithAgent'; again?: boolean }
   | { type: 'fixConflicts' }
   | { type: 'comment'; body: string }
   | { type: 'closeDependabot' }

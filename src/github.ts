@@ -20,6 +20,7 @@ const PR_FIELDS = `
   author { login }
   labels(first: 10) { nodes { name } }
   latestReviews(first: 20) { nodes { author { login } state commit { oid } } }
+  recentComments: comments(last: 10) { nodes { author { login } body } }
   commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
     __typename
     ... on CheckRun { status conclusion }
@@ -42,6 +43,8 @@ export interface RawPr {
   author: { login: string } | null;
   labels: { nodes: { name: string }[] };
   latestReviews: { nodes: { author: { login: string } | null; state: string; commit: { oid: string } | null }[] };
+  /** For a Codex review that found nothing: Codex says so in a comment and submits no review. */
+  recentComments: { nodes: { author: { login: string } | null; body: string }[] };
   commits: { nodes: { commit: { statusCheckRollup: { contexts: { nodes: RawContext[] } } | null } }[] };
 }
 type RawContext =
@@ -419,9 +422,14 @@ export function toSummary(p: RawPr, me: string, requested = false): PrSummary {
   const myLatest = p.latestReviews.nodes.find((r) => r.author?.login === me);
   const mine = myLatest?.state;
   const author = p.author?.login ?? 'ghost';
+  // With no review rules you're likely working alone, and your own review (or one an agent left as you) counts.
   const reviewed: Reviewer[] = p.latestReviews.nodes
-    .filter((r) => r.author && r.author.login !== author && REVIEW_STATE[r.state])
+    .filter((r) => r.author && (r.author.login !== author || p.reviewDecision === null) && REVIEW_STATE[r.state])
     .map((r) => ({ login: r.author!.login, state: REVIEW_STATE[r.state]! }));
+  for (const c of p.recentComments.nodes) {
+    const login = c.author?.login;
+    if (login && /codex/i.test(login) && CODEX_CLEAN.test(c.body) && !reviewed.some((r) => r.login === login)) reviewed.push({ login, state: 'no_issues' });
+  }
   // A team's name needs the read:org permission, which Review Desk doesn't ask for; a team request reads "a team".
   const asked = p.reviewRequests.nodes.map((n) => n.requestedReviewer?.login ?? (n.requestedReviewer?.__typename === 'Team' ? 'a team' : undefined)).filter((l): l is string => !!l);
   return {
@@ -458,6 +466,9 @@ export function toSummary(p: RawPr, me: string, requested = false): PrSummary {
     unresolvedThreads: p.reviewThreads.nodes.filter((t) => !t.isResolved).length,
   };
 }
+
+/** Codex's comment when a review found nothing: "Codex Review: Didn't find any major issues." */
+const CODEX_CLEAN = /codex-review-receipt|^Codex Review:/m;
 
 const REVIEW_STATE: Record<string, Reviewer['state'] | undefined> = { APPROVED: 'approved', CHANGES_REQUESTED: 'changes_requested', COMMENTED: 'commented' };
 

@@ -32,6 +32,51 @@ describe('Controller', () => {
     expect(last().queue.some((p) => p.number === 48)).toBe(false);
   });
 
+  it('sends every open finding to your agent in one session, with your calls, and marks each as sent', async () => {
+    const { c, last, prompts, store } = setup();
+    await c.handle({ type: 'ready' });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#58' });
+    await c.handle({ type: 'decide', id: 'T_58_1', decision: 'fix' });
+    await c.handle({ type: 'decide', id: 'T_58_2', decision: 'skip' });
+    await c.handle({ type: 'decide', id: 'T_58_2', decision: null });
+    expect(last().triage.decisions).toEqual({ T_58_1: 'fix' });
+    await c.handle({ type: 'resolveWithAgent' });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('There are 2.');
+    expect(Object.keys(last().triage.sent).sort()).toEqual(['T_58_1', 'T_58_2']);
+    // Kept per PR, like drafts.
+    expect(store.get('triage:calebksmith/portfolio#58')).toEqual(last().triage);
+  });
+
+  it('sends only findings not yet with your agent, unless you send them again', async () => {
+    const { c, last, prompts, store } = setup();
+    store.set('triage:calebksmith/portfolio#58', { decisions: {}, sent: { T_58_1: '2026-11-11T10:00:00Z' }, sentSha: 'old' });
+    await c.handle({ type: 'ready' });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#58' });
+    await c.handle({ type: 'resolveWithAgent' });
+    expect(prompts[0]).toContain('There is 1.');
+    expect(prompts[0]).toContain('review thread T_58_2');
+    expect(prompts[0]).not.toContain('review thread T_58_1');
+    expect(last().triage.sentSha).toBe('3fa91c0');
+    // Every one is with your agent now: sending again sends them all.
+    await c.handle({ type: 'resolveWithAgent' });
+    expect(prompts[1]).toContain('There are 2.');
+    await c.handle({ type: 'resolveWithAgent', again: true });
+    expect(prompts[2]).toContain('There are 2.');
+  });
+
+  it('tells the agent where the repo is checked out here, when the host knows', async () => {
+    const prompts: string[] = [];
+    const store = new Map<string, unknown>();
+    const host = { post: () => {}, openFile: () => {}, openExternal: () => {}, confirm: async () => true, askAgent: async (p: string) => { prompts.push(p); return 'clipboard' as const; }, choose: async () => undefined, switchRepository: () => {}, findingsFile: async () => null, checkout: async () => '/Users/me/repos/portfolio' };
+    const c = new Controller(new SampleSource(), { get: <T>(k: string) => store.get(k) as T, set: (k, v) => { store.set(k, v); } }, host);
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#58' });
+    await c.handle({ type: 'resolveWithAgent' });
+    await c.handle({ type: 'fixThread', id: 'T_58_1' });
+    expect(prompts).toHaveLength(2);
+    for (const p of prompts) expect(p).toContain('Use a worktree beside it, e.g. /Users/me/repos/portfolio-pr-58.');
+  });
+
   it('remembers the head the reviewer saw', async () => {
     const { c, store } = setup();
     await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });
