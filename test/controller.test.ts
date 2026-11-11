@@ -136,6 +136,45 @@ describe('Controller', () => {
     expect(store.has('lastSeenAt:calebksmith/portfolio#52')).toBe(false);
   });
 
+  it('shows the PR you opened last, even when an earlier one answers later', async () => {
+    const { c, store } = setup();
+    await c.handle({ type: 'ready' });
+    const src = c['source'];
+    const real = src.getPr.bind(src);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    src.getPr = async (repo, n, since) => { if (n === 52) await held; return real(repo, n, since); };
+    const slow = c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#55' });
+    release();
+    await slow;
+    expect(c.snapshot.pr?.number).toBe(55);
+    expect(c.snapshot.loading).toBe(false);
+    expect(store.get('lastSeen:calebksmith/portfolio#52')).toBeUndefined();
+  });
+
+  it('keeps your approval on screen when a background refresh that started before it answers after', async () => {
+    const { c } = setup();
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#57' });
+    const src = c['source'];
+    const real = src.getPr.bind(src);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let hold = true;
+    src.getPr = async (repo, n, since) => {
+      if (!hold) return real(repo, n, since);
+      hold = false;
+      const old = structuredClone(await real(repo, n, since));
+      await held;
+      return old;
+    };
+    const background = c.autoRefresh('pr');
+    await c.handle({ type: 'approve' });
+    release();
+    await background;
+    expect(c.snapshot.pr?.myReview).toBe('approved');
+  });
+
   it('marks nothing new the first time a PR is opened', async () => {
     const { c, last } = setup();
     await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#55' });
@@ -206,6 +245,14 @@ describe('Controller', () => {
     expect(last().pr!.conversation).toHaveLength(before);
   });
 
+  it('resolves a thread right away, as GitHub’s Resolve conversation does', async () => {
+    const { c, sent } = setup();
+    await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });
+    await c.handle({ type: 'resolveThread', id: 'T_52_1' });
+    expect(c.snapshot.pr?.conversation.find((it) => it.kind === 'thread' && it.id === 'T_52_1')).toMatchObject({ resolved: true });
+    expect(sent.some((m) => m.type === 'toast' && m.text === 'Resolved the comment on WorkCard.tsx:44.')).toBe(true);
+  });
+
   it('sends an unresolved line comment to the agent', async () => {
     const { c, prompts } = setup();
     await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#52' });
@@ -232,6 +279,16 @@ describe('Controller', () => {
     expect(last().pr!.seenBefore).toBe(false);
     await c.handle({ type: 'openPr', key: 'calebksmith/portfolio#57' });
     expect(last().pr!.seenBefore).toBe(true);
+  });
+
+  it('opens web links only, so a check’s link can’t reach another extension', async () => {
+    const { c } = setup();
+    const opened: string[] = [];
+    c['host'].openExternal = (url) => { opened.push(url); };
+    await c.handle({ type: 'openExternal', url: 'https://github.com/acme/web/actions/runs/1' });
+    await c.handle({ type: 'openExternal', url: 'vscode://some.extension/run?x=1' });
+    await c.handle({ type: 'openExternal', url: 'command:workbench.action.terminal.new' });
+    expect(opened).toEqual(['https://github.com/acme/web/actions/runs/1']);
   });
 
   it('passes the repo switcher on to VS Code', async () => {
@@ -295,6 +352,45 @@ describe('Controller', () => {
       expect(c.snapshot.pr?.myReview).toBe('changes_requested');
       expect(c.snapshot.pr?.conversation.some((it) => it.kind === 'thread' && it.comments[0]?.text === 'Pin to 22.11')).toBe(true);
       expect(c.snapshot.drafts.map((d) => d.id)).toEqual(['agent1']);
+    });
+
+    it('puts a comment on a line the diff doesn’t have in the summary, since GitHub refuses it as a line comment', async () => {
+      const { c } = team();
+      await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
+      const got: { body: string; drafts: number }[] = [];
+      c['source'].submitReview = async (_pr, _event, body, drafts) => { got.push({ body, drafts: drafts.length }); return { unresolved: 0 }; };
+      await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 1, side: 'RIGHT', body: 'Pin to 22.11' } });
+      await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 400, side: 'RIGHT', body: 'Far away' } });
+      await c.handle({ type: 'submitReview', event: 'COMMENT', body: 'Two things.' });
+      expect(got).toEqual([{ body: 'Two things.\n\n- `.nvmrc:400`: Far away', drafts: 1 }]);
+    });
+
+    it('when sending fails, hands the summary back and drops only the comments already in your review on GitHub', async () => {
+      const { c, sent } = team();
+      await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
+      await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 1, side: 'RIGHT', body: 'One' } });
+      await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 1, side: 'RIGHT', body: 'Two' } });
+      await c.handle({ type: 'addDraft', draft: { path: '.nvmrc', line: 1, side: 'RIGHT', body: 'Not an issue', replyTo: 'T_1', resolve: true } });
+      const [one, , reply] = c.snapshot.drafts;
+      c['source'].submitReview = async () => { throw Object.assign(new Error('GitHub said no'), { added: [one!.id, reply!.id] }); };
+      const msg = { type: 'submitReview', event: 'COMMENT', body: 'My summary' } as const;
+      await c.handle(msg);
+      expect(c.snapshot.error).toBe('GitHub said no');
+      // The reply is on GitHub too, but its thread is still to resolve: it stays, marked so it isn't posted again.
+      expect(c.snapshot.drafts.map((d) => [d.body, d.sent ?? false])).toEqual([['Two', false], ['Not an issue', true]]);
+      expect(sent.at(-1)).toEqual({ type: 'unsent', msg });
+    });
+
+    it('doesn’t hand a comment back when it was posted and only the reload after it failed', async () => {
+      const { c, sent } = team();
+      await c.handle({ type: 'openPr', key: 'acme/storefront#121' });
+      c['source'].getPr = async () => { throw new Error('GitHub is down'); };
+      await c.handle({ type: 'comment', body: 'Posted fine' });
+      expect(c.snapshot.error).toBe('GitHub is down');
+      expect(sent.some((m) => m.type === 'unsent')).toBe(false);
+      c['source'].comment = async () => { throw new Error('Not posted'); };
+      await c.handle({ type: 'comment', body: 'Try me' });
+      expect(sent.at(-1)).toEqual({ type: 'unsent', msg: { type: 'comment', body: 'Try me' } });
     });
 
     it('compares a re-review with the commit you reviewed', async () => {

@@ -102,6 +102,7 @@ describe('bulk merge', () => {
     expect(bulkSkipReason(dep({ mergeable: null }))).toBe('GitHub still checking for conflicts');
     expect(bulkSkipReason(dep({ checks: { passed: 1, failed: 1, pending: 0, total: 2 } }))).toBe('1 check failing');
     expect(bulkSkipReason(dep({ checks: { passed: 1, failed: 0, pending: 1, total: 2 } }))).toBe('checks still running');
+    expect(bulkSkipReason(dep({ checks: { passed: 0, failed: 0, pending: 0, total: 0 } }))).toBe('no checks have run');
     expect(bulkSkipReason(dep({ isDraft: true }))).toBe('draft');
     expect(bulkSkipReason(dep({ state: 'merged' }))).toBe('already merged');
     expect(bulkSkipReason(dep({ mergeState: 'behind' }))).toBeNull();

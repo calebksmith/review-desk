@@ -46,6 +46,17 @@ describe('sending reviews to GitHub', () => {
     expect(yours.calls).not.toContain('deletePullRequestReview');
   });
 
+  it('says which comments already went into your review when it fails partway, so a retry doesn’t post them twice', async () => {
+    const { src } = fake('me', 'addPullRequestReviewThreadReply');
+    await expect(src.submitReview(pr, 'COMMENT', '', [line, reply])).rejects.toMatchObject({ added: ['a'] });
+  });
+
+  it('doesn’t post a reply that’s already in your review again, but still resolves its thread', async () => {
+    const { src, calls } = fake('me');
+    await src.submitReview(pr, 'COMMENT', '', [{ ...reply, sent: true }]);
+    expect(calls).toEqual(['reviews(states: PENDING', 'submitPullRequestReview', 'resolveReviewThread']);
+  });
+
   it('posts a single comment as its own review, and refuses while a review is in progress', async () => {
     const free = fake(null);
     await free.src.commentNow(pr, reply);
@@ -78,6 +89,19 @@ const raw = (over: Partial<RawPr> = {}): RawPr => ({
 });
 
 describe('reading PRs from GitHub', () => {
+  it('downloads a failed job’s log once, however often the PR refreshes', async () => {
+    const src = new GitHubSource('token', { kind: 'repo', repo: 'acme/web' });
+    let downloads = 0;
+    (src as unknown as { octokit: unknown }).octokit = { actions: {
+      getJobForWorkflowRun: async () => ({ data: { steps: [{ name: 'Run tests', conclusion: 'failure' }] } }),
+      downloadJobLogsForWorkflowRun: async () => { downloads++; return { data: '##[group]Run npm test\n##[endgroup]\nError: boom\n##[error]Process completed with exit code 1.' }; },
+    } };
+    const first = await src['jobFailure']('acme/web', 7);
+    expect(first).toEqual({ failedStep: 'Run tests', excerpt: ['Error: boom'] });
+    expect(await src['jobFailure']('acme/web', 7)).toBe(first);
+    expect(downloads).toBe(1);
+  });
+
   it('counts a team request as yours when GitHub’s review-requested:@me search found the PR', () => {
     expect(toSummary(raw(), 'me').reviewRequested).toBe(false);
     expect(toSummary(raw(), 'me', true)).toMatchObject({ reviewRequested: true, reviewers: [{ login: 'a team', state: 'requested' }] });

@@ -166,6 +166,11 @@ export interface Draft {
   body: string;
   /** Written by the reviewer, or suggested by their agent and not kept yet. */
   from: 'you' | 'agent';
+  /**
+   * Already in your pending review on GitHub: a send failed after this reply was added. It isn't posted again;
+   * it's kept only because its thread is still to be resolved when the review goes through.
+   */
+  sent?: boolean;
   severity?: number | null;
 }
 
@@ -194,7 +199,7 @@ export interface HostState {
   queue: PrSummary[];
   pr: PrDetail | null;
   loading: boolean;
-  busy: 'approve' | 'merge' | 'update' | 'bulk' | 'comment' | 'review' | null;
+  busy: 'approve' | 'merge' | 'update' | 'bulk' | 'comment' | 'review' | 'resolve' | null;
   /** Progress while merging Dependabot updates in one go. */
   bulk: { done: number; total: number } | null;
   /** What the last bulk merge did, until the reviewer dismisses it. */
@@ -211,7 +216,9 @@ export interface HostState {
 
 export type ToWebview =
   | { type: 'state'; state: HostState }
-  | { type: 'toast'; text: string };
+  | { type: 'toast'; text: string }
+  /** A comment or review that failed to send, handed back so the panel can put the text back in its box. */
+  | { type: 'unsent'; msg: Extract<FromWebview, { type: 'comment' | 'submitReview' | 'commentNow' }> };
 
 export type FromWebview =
   | { type: 'ready' }
@@ -237,5 +244,6 @@ export type FromWebview =
   | { type: 'keepDraft'; id: string }
   | { type: 'deleteDraft'; id: string }
   | { type: 'commentNow'; draft: Omit<Draft, 'id' | 'from'> }
+  | { type: 'resolveThread'; id: string }
   | { type: 'reviewWithAgent' }
   | { type: 'dismissNotice' };

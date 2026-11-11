@@ -219,6 +219,11 @@ export class SampleSource implements DataSource {
     };
   }
 
+  async resolveThread(pr: PrDetail, threadId: string): Promise<void> {
+    const t = this.find(pr.repo, pr.number).conversation.find((it) => it.kind === 'thread' && it.id === threadId);
+    if (t?.kind === 'thread') t.resolved = true;
+  }
+
   async setViewed(pr: PrDetail, path: string, viewed: boolean): Promise<void> {
     const f = this.find(pr.repo, pr.number).files.find((x) => x.path === path);
     if (f) f.viewed = viewed ? 'viewed' : 'unviewed';

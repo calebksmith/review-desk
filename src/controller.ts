@@ -3,10 +3,11 @@ import { conflictPrompt, fixPrompt, threadPrompt, type AgentRoute } from './agen
 import { parseFindings, reviewPrompt } from './agentReview';
 import { closeOptions, type CloseOption } from './dependabot';
 import { markNew } from './conversation';
+import { inDiff } from './patch';
 import { newlyYourTurn, waiting, whatArrived } from './refresh';
 import { DEFAULT_BLOCKER_LABELS } from './signals';
 import type { DataSource, Store } from './source';
-import { bulkMergeable, bulkSkipReason, isReReview, mergeBlocker, mergeWarning, openFindings, plural, priority } from './status';
+import { bulkMergeable, bulkSkipReason, isReReview, mergeBlocker, mergeWarning, openFindings, plural, priority, stillOpen } from './status';
 
 export interface Host {
   post(msg: ToWebview): void;
@@ -40,6 +41,12 @@ export class Controller {
    */
   private opened: { key: string; sinceSha: string | null; kind: 'review' | 'look'; seenAt: string | null } | null = null;
 
+  /**
+   * Counts PR loads, and the moves that outdate one still in flight: another load, leaving the PR, an approval's
+   * fresher data. A load that finds the count has moved on is dropped.
+   */
+  private loads = 0;
+
   /** PRs closed from here this session (by key); GitHub can list them as open for a few seconds after. */
   private readonly closed = new Set<string>();
 
@@ -61,7 +68,8 @@ export class Controller {
         case 'merge': await this.merge(msg.method); break;
         case 'updateBranch': await this.updateBranch(); break;
         case 'openFile': if (this.state.pr) this.host.openFile(this.state.pr.repo, msg.path, msg.line); break;
-        case 'openExternal': this.host.openExternal(msg.url); break;
+        // Web links only: a check's link is set by whatever reported it, and other schemes reach other extensions.
+        case 'openExternal': if (/^https?:\/\//i.test(msg.url)) this.host.openExternal(msg.url); break;
         case 'mergeDependabot': await this.mergeDependabot(); break;
         case 'fixWithAgent': await this.fixWithAgent(msg.check); break;
         case 'fixThread': await this.fixThread(msg.id); break;
@@ -75,11 +83,15 @@ export class Controller {
         case 'keepDraft': await this.saveDrafts(this.state.drafts.map((d) => (d.id === msg.id ? { ...d, from: 'you' } : d))); break;
         case 'deleteDraft': await this.saveDrafts(this.state.drafts.filter((d) => d.id !== msg.id)); break;
         case 'commentNow': await this.commentNow(msg.draft); break;
+        case 'resolveThread': await this.resolveThread(msg.id); break;
         case 'reviewWithAgent': await this.reviewWithAgent(); break;
         case 'dismissNotice': this.set({ notice: null }); break;
       }
     } catch (err) {
       this.set({ loading: false, busy: null, error: message(err) });
+      // The panel cleared the box when it sent; what was typed goes back so it isn't lost. Only when the send
+      // itself failed: after a post that worked (the reload failing, say), handing it back would invite posting twice.
+      if ((msg.type === 'comment' || msg.type === 'submitReview' || msg.type === 'commentNow') && err instanceof Object && notPosted.has(err)) this.host.post({ type: 'unsent', msg });
     }
   }
 
@@ -127,6 +139,7 @@ export class Controller {
 
   private async loadPr(at: { repo: string; number: number }, quiet = false): Promise<void> {
     if (!quiet) this.set({ view: 'pr', loading: true, error: null, notice: null, pr: this.state.pr && prKey(this.state.pr) === prKey(at) ? this.state.pr : null });
+    const load = ++this.loads;
     // Keyed by repo and number, so "new since you looked" survives switching between repos and the combined view.
     const key = `lastSeen:${prKey(at)}`;
     const atKey = `lastSeenAt:${prKey(at)}`;
@@ -141,8 +154,9 @@ export class Controller {
     }
     const [pr, me] = await Promise.all([this.source.getPr(at.repo, at.number, since.sinceSha), this.source.viewer()]);
     if (pr.sinceLastLook) pr.sinceLastLook.kind = since.kind;
-    // A quiet refresh landing after you've moved on doesn't pull you back, or mark anything seen.
-    if (quiet && (this.state.view !== 'pr' || !this.state.pr || prKey(this.state.pr) !== prKey(at))) return;
+    // Overtaken while GitHub answered (you opened another PR, left this one, or approved it): this answer is the
+    // older one, so it doesn't replace what's on screen, pull you back, or mark anything seen.
+    if (load !== this.loads) return;
     // Seen means opened: the next push or comment after this is "new since you looked". Refreshing isn't looking.
     if (!kept) {
       await this.store.set(key, pr.headSha);
@@ -173,7 +187,7 @@ export class Controller {
     if (!pr || this.state.busy) return;
     // Codex (or anyone) marked something P0/P1 and nobody has settled it: say so before approving.
     const f = openFindings(pr);
-    if ((f.p0 || f.p1) && !(await this.host.confirm(`${[f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ')} ${f.p0 + f.p1 === 1 ? 'finding is' : 'findings are'} still open on ${this.ref(pr)}. Approve anyway?`, 'Approve anyway'))) return;
+    if ((f.p0 || f.p1) && !(await this.host.confirm(`${stillOpen(f)} on ${this.ref(pr)}. Approve anyway?`, 'Approve anyway'))) return;
     this.set({ busy: 'approve' });
     try {
       await this.source.approve(pr);
@@ -183,7 +197,11 @@ export class Controller {
     }
     // Re-read it: on a team, GitHub's review decision may now be approved, or still need someone else.
     const fresh = await this.source.getPr(pr.repo, pr.number, null);
-    this.set({ pr: { ...pr, ...fresh, myReview: 'approved', conversation: pr.conversation, seenBefore: pr.seenBefore, sinceLastLook: pr.sinceLastLook } });
+    // Only if you're still on it. This is newer than any load of it still in flight, so that one is dropped.
+    if (this.state.pr && prKey(this.state.pr) === prKey(pr)) {
+      this.loads++;
+      this.set({ loading: false, pr: { ...pr, ...fresh, myReview: 'approved', conversation: pr.conversation, seenBefore: pr.seenBefore, sinceLastLook: pr.sinceLastLook } });
+    }
     this.host.post({ type: 'toast', text: fresh.reviewDecision === 'review_required' ? `Approved ${this.ref(pr)}. It needs another approval to merge.` : `Approved ${this.ref(pr)}` });
   }
 
@@ -256,21 +274,32 @@ export class Controller {
     if (event === 'REQUEST_CHANGES' && !body.trim()) { this.host.post({ type: 'toast', text: 'Say what needs to change in the summary first.' }); return; }
     if (event === 'COMMENT' && !body.trim() && !send.length) { this.host.post({ type: 'toast', text: 'Write a summary or add a comment first.' }); return; }
     const f = openFindings(pr);
-    if (event === 'APPROVE' && (f.p0 || f.p1) && !(await this.host.confirm(`${[f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ')} ${f.p0 + f.p1 === 1 ? 'finding is' : 'findings are'} still open. Approve anyway?`, 'Approve anyway'))) return;
+    if (event === 'APPROVE' && (f.p0 || f.p1) && !(await this.host.confirm(`${stillOpen(f)}. Approve anyway?`, 'Approve anyway'))) return;
     this.set({ busy: 'review' });
     let sent = { unresolved: 0 };
     try {
-      // Findings without a line can't sit in the diff on GitHub either: they go in the summary instead.
-      const loose = send.filter((d) => !d.replyTo && d.line == null);
-      const summary = [body.trim(), ...loose.map((d) => `- \`${d.path}\`: ${d.body}`)].filter(Boolean).join('\n\n');
+      // GitHub refuses a comment on a line the diff doesn't have (an agent's finding can be anywhere in the file),
+      // and one without a line: those go in the summary instead.
+      const loose = send.filter((d) => !d.replyTo && !inDiff(pr.files.find((f) => f.path === d.path)?.lines ?? [], d.side, d.line));
+      const summary = [body.trim(), ...loose.map((d) => `- \`${d.path}${d.line != null ? `:${d.line}` : ''}\`: ${d.body}`)].filter(Boolean).join('\n\n');
       sent = await this.source.submitReview(pr, event, summary, send.filter((d) => !loose.includes(d)));
       this.source.invalidate?.();
+    } catch (err) {
+      // Comments that reached your review on GitHub before it failed stay there: sending them again would post them
+      // twice. A reply that resolves its thread is kept, marked sent, so the resolve still happens with the review.
+      const added = (err as { added?: string[] } | null)?.added ?? [];
+      if (added.length) {
+        await this.saveDrafts(this.state.drafts.filter((d) => !added.includes(d.id) || d.resolve).map((d) => (added.includes(d.id) ? { ...d, sent: true } : d)));
+        this.host.post({ type: 'toast', text: `${plural(added.length, 'comment')} ${added.length === 1 ? 'is' : 'are'} already in your review on GitHub and won’t be sent twice.` });
+      }
+      throw failedSend(err);
     } finally {
       this.set({ busy: null });
     }
     await this.saveDrafts(this.state.drafts.filter((d) => d.from !== 'you'));
+    const posted = send.filter((d) => !d.sent).length;
     const said = { APPROVE: 'Approved', REQUEST_CHANGES: 'Requested changes on', COMMENT: 'Sent your review of' }[event];
-    this.host.post({ type: 'toast', text: `${said} ${this.ref(pr)}${send.length ? ` with ${plural(send.length, 'comment')}` : ''}.${notResolved(sent)}` });
+    this.host.post({ type: 'toast', text: `${said} ${this.ref(pr)}${posted ? ` with ${plural(posted, 'comment')}` : ''}.${notResolved(sent)}` });
     await this.loadPr(pr);
   }
 
@@ -282,10 +311,28 @@ export class Controller {
     try {
       sent = await this.source.commentNow(pr, { ...draft, id: newId(), from: 'you' });
       this.source.invalidate?.();
+    } catch (err) {
+      throw failedSend(err);
     } finally {
       this.set({ busy: null });
     }
     this.host.post({ type: 'toast', text: `Comment posted${sent.unresolved ? `.${notResolved(sent)}` : ''}` });
+    await this.loadPr(pr);
+  }
+
+  /** Resolves a thread right away, as GitHub's Resolve conversation does: not held back for the review. */
+  private async resolveThread(id: string): Promise<void> {
+    const pr = this.state.pr;
+    const thread = pr?.conversation.find((it) => it.kind === 'thread' && it.id === id);
+    if (!pr || thread?.kind !== 'thread' || thread.resolved || this.state.busy) return;
+    this.set({ busy: 'resolve' });
+    try {
+      await this.source.resolveThread(pr, id);
+      this.source.invalidate?.();
+    } finally {
+      this.set({ busy: null });
+    }
+    this.host.post({ type: 'toast', text: `Resolved the comment on ${thread.path.split('/').pop()}${thread.line ? `:${thread.line}` : ''}.` });
     await this.loadPr(pr);
   }
 
@@ -364,6 +411,8 @@ export class Controller {
     try {
       await this.source.comment(pr, text);
       this.source.invalidate?.();
+    } catch (err) {
+      throw failedSend(err);
     } finally {
       this.set({ busy: null });
     }
@@ -413,6 +462,8 @@ export class Controller {
   }
 
   private set(patch: Partial<HostState>): void {
+    // Leaving the PR for the queue outdates a load of it still in flight.
+    if (patch.view === 'queue') this.loads++;
     this.state = { ...this.state, ...patch };
     this.push();
   }
@@ -422,6 +473,10 @@ export class Controller {
 
 /** After a send: the threads GitHub wouldn't resolve, so the reviewer resolves them there instead of sending again. */
 const notResolved = (s: { unresolved: number }) => (s.unresolved ? ` ${s.unresolved === 1 ? 'Its thread' : `${s.unresolved} threads`} couldn’t be resolved; resolve ${s.unresolved === 1 ? 'it' : 'them'} on GitHub.` : '');
+
+/** Errors from a send that posted nothing, as far as GitHub said. */
+const notPosted = new WeakSet<object>();
+const failedSend = (err: unknown) => { if (err instanceof Object) notPosted.add(err); return err; };
 
 function message(err: unknown): string {
   if (err && typeof err === 'object' && 'status' in err && (err as { status: number }).status === 401) return 'GitHub sign-in expired. Run “Review Desk: Use a different GitHub account”.';

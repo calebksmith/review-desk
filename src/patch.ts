@@ -35,3 +35,11 @@ export function parsePatch(patch: string): DiffLine[] {
   if (last && last.kind === 'ctx' && last.text === '' ) out.pop();
   return out;
 }
+
+/**
+ * Whether a diff has this line on this side: a removed line on the left, an added or unchanged one on the right.
+ * GitHub only takes a line comment on a line the diff has.
+ */
+export function inDiff(lines: readonly DiffLine[], side: 'RIGHT' | 'LEFT', line: number | null): boolean {
+  return line != null && lines.some((l) => l.kind !== 'gap' && (side === 'LEFT' ? l.kind === 'del' && l.oldNo === line : l.kind !== 'del' && l.newNo === line));
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parsePatch } from '../src/patch';
+import { inDiff, parsePatch } from '../src/patch';
 import { parseRemote } from '../src/remote';
 
 describe('parsePatch', () => {
@@ -27,6 +27,18 @@ describe('parsePatch', () => {
 
   it('starts a new file without a gap', () => {
     expect(parsePatch('@@ -0,0 +1,2 @@\n+a\n+b')[0]).toEqual({ kind: 'add', oldNo: null, newNo: 1, text: 'a' });
+  });
+});
+
+describe('inDiff', () => {
+  it('finds removed lines on the left, added and unchanged ones on the right, and nothing outside the hunks', () => {
+    const lines = parsePatch(['@@ -10,3 +10,3 @@', ' a', '-b', '+B', ' c'].join('\n'));
+    expect(inDiff(lines, 'RIGHT', 11)).toBe(true);
+    expect(inDiff(lines, 'RIGHT', 10)).toBe(true);
+    expect(inDiff(lines, 'LEFT', 11)).toBe(true);
+    expect(inDiff(lines, 'LEFT', 10)).toBe(false);
+    expect(inDiff(lines, 'RIGHT', 3)).toBe(false);
+    expect(inDiff(lines, 'RIGHT', null)).toBe(false);
   });
 });
 

@@ -2,11 +2,13 @@ import DOMPurify from 'dompurify';
 import { duration, isFailing, isSkipped, statusCard, type PartKey } from '../src/card';
 import { conversationCounts, startedAt } from '../src/conversation';
 import { mergeTree, parentOf, stackOf, stacks, type StackRow, type TreeRow } from '../src/stacks';
+import { inDiff } from '../src/patch';
 import { parseKey, prKey } from '../src/protocol';
 import type { CheckRun, Comment, CommentAction, ConversationItem, Draft, ReviewEvent, DiffLine, FromWebview, HostState, MergeMethod, PrDetail, PrSummary, ReviewVerdict, ToWebview } from '../src/protocol';
+import { askAndReply, who } from '../src/refresh';
 import { reasons } from '../src/signals';
 import { fileMarks, nearLines, reviewQueue, stepQueue, type QueueItem } from '../src/queue';
-import { bulkMergeable, isDependabot, isReReview, openFindings, priority, priorityOrder, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural as count, prStatus, type Bucket, type Tone } from '../src/status';
+import { bulkMergeable, isDependabot, isReReview, openFindings, priority, priorityOrder, mergeBlocker, mergeReadiness, mergeSummary, mergeWarning, plural, prStatus, stillOpen, type Bucket, type Tone } from '../src/status';
 
 // The webview only renders. Everything it knows comes from the host's state messages;
 // what it remembers on its own is view state (filter, step, open file).
@@ -61,7 +63,6 @@ const I = {
   spark: svg('M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z'),
 };
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-const plural = (n: number, one: string, many = one + 's') => `${n} ${n === 1 ? one : many}`;
 
 function ago(iso: string): string {
   const min = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60_000));
@@ -252,8 +253,8 @@ function bulkButton(h: HostState): string {
   const ready = bulkMergeable(h.queue);
   if (!ready.length) return '';
   const held = h.queue.filter((p) => isDependabot(p) && p.state === 'open' && !ready.includes(p)).length;
-  const tip = `Approves and merges ${ready.map((p) => (multi(h) ? `${short(p.repo)}#${p.number}` : `#${p.number}`)).join(', ')}, one at a time.${held ? ` ${count(held, 'other Dependabot update')} ${held === 1 ? 'has' : 'have'} conflicts or failing checks; open ${held === 1 ? 'it' : 'them'} to review.` : ''}`;
-  return `<button class="btn pri" data-do="mergeDependabot" title="${esc(tip)}" ${h.busy ? 'disabled' : ''}>${I.merge}<span class="long">Merge ${count(ready.length, 'Dependabot update')}</span><span class="short">Merge ${count(ready.length, 'update')}</span></button>`;
+  const tip = `Approves and merges ${ready.map((p) => (multi(h) ? `${short(p.repo)}#${p.number}` : `#${p.number}`)).join(', ')}, one at a time.${held ? ` ${plural(held, 'other Dependabot update')} ${held === 1 ? 'has' : 'have'} conflicts or failing checks; open ${held === 1 ? 'it' : 'them'} to review.` : ''}`;
+  return `<button class="btn pri" data-do="mergeDependabot" title="${esc(tip)}" ${h.busy ? 'disabled' : ''}>${I.merge}<span class="long">Merge ${plural(ready.length, 'Dependabot update')}</span><span class="short">Merge ${plural(ready.length, 'update')}</span></button>`;
 }
 
 /* ---------- PR ---------- */
@@ -398,10 +399,10 @@ function verdict(pr: PrDetail): ReviewEvent {
 function reviewPanel(pr: PrDetail, h: HostState): string {
   const own = pr.mine;
   const event = verdict(pr);
-  const held = h.drafts.filter((d) => d.from === 'you').length;
+  const held = h.drafts.filter((d) => d.from === 'you' && !d.sent).length;
   const agent = h.drafts.filter((d) => d.from === 'agent').length;
   const f = openFindings(pr);
-  const warn = event === 'APPROVE' && (f.p0 || f.p1) ? `<p class="rwarn">${I.alert}${[f.p0 ? `${f.p0} P0` : '', f.p1 ? `${f.p1} P1` : ''].filter(Boolean).join(' and ')} ${f.p0 + f.p1 === 1 ? 'finding is' : 'findings are'} still open.</p>` : '';
+  const warn = event === 'APPROVE' && (f.p0 || f.p1) ? `<p class="rwarn">${I.alert}${stillOpen(f)}.</p>` : '';
   const radios = EVENTS.map((e) => {
     const off = own && e.event !== 'COMMENT';
     return `<label class="rv-opt ${off ? 'off' : ''}"><input type="radio" name="revent" value="${e.event}" ${e.event === event ? 'checked' : ''} ${off ? 'disabled' : ''}><span><b>${e.label}</b><span class="sub">${off ? 'Not on your own pull request.' : e.note}</span></span></label>`;
@@ -500,7 +501,6 @@ function checkRow(r: CheckRun): string {
     <span class="res">${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ''}${fail ? `<button class="btn sm fix" data-fix="${esc(r.name)}" title="Send the failure to your AI agent to diagnose and fix">${I.spark}Fix with agent</button>` : ''}${r.url ? `<button class="btn sm" data-ext="${esc(r.url)}">${fail ? 'Open log' : 'Details'}${I.ext}</button>` : ''}</span></div>${why}</div>`;
 }
 
-/** Failures and running checks in full; passing ones folded into one line, like GitHub's merge box. */
 /** The whole stack this PR is in, bottom first, so you can move along it. Nothing when it stands alone. */
 function stackNav(pr: PrDetail): string {
   const rows = stackOf(pr, host?.queue ?? []);
@@ -583,7 +583,7 @@ function stepFiles(pr: PrDetail): string {
     ${fileSince ? `<div class="seg"><button data-onlynew="0" aria-pressed="${!view.onlyNew}">Whole change</button><button data-onlynew="1" aria-pressed="${view.onlyNew}">${since.kind === 'review' ? 'Since your review' : 'Since you looked'}</button></div>` : since.files[0] ? `<button class="btn sm" data-file="${esc(since.files[0].path)}" data-onlynew="1">Show it${I.chev}</button>` : ''}</div>` : '';
 
   const whole = file ? `<div class="dh"><span class="mono">${esc(file.path)}</span><label class="vt"><input type="checkbox" data-viewed="${esc(file.path)}" ${file.viewed === 'viewed' ? 'checked' : ''}> Viewed</label></div>
-        <div class="code">${lines ? renderDiff(file!.path, lines, pr) : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>';
+        <div class="code" data-path="${esc(file.path)}">${lines ? renderDiff(file!.path, lines, pr) : '<div class="empty">GitHub sends no diff for this file. It’s binary or too large to show.</div>'}</div>` : '<div class="empty">No files changed.</div>';
 
   return `${banner}${queueBar(q, cur, near)}
     <div class="split"><nav class="files" aria-label="Changed files">${pr.state === 'open' ? `<button class="btn sm fix agentrev" data-do="reviewWithAgent" title="Your agent reviews this PR adversarially; its findings come back as drafts">${I.spark}Review with agent</button>` : ''}<div class="fh"><span class="lbl">Files</span><span class="cnt">${seen}/${files.length} viewed</span></div>${flist}</nav>
@@ -615,7 +615,7 @@ function nearDiff(q: QueueItem[], pr: PrDetail): string {
     const full = f?.lines ?? [];
     const here = q.filter((x) => x.path === path);
     return `<section class="nsec"><div class="dh"><span class="mono">${esc(path)}</span><span class="cnt">${plural(here.length, 'comment')}</span><span class="end"><button class="link" data-file="${esc(path)}">Whole file${I.chev}</button></span></div>
-      <div class="code">${renderDiff(path, nearLines(full, here), pr, full)}</div></section>`;
+      <div class="code" data-path="${esc(path)}">${renderDiff(path, nearLines(full, here), pr, full)}</div></section>`;
   }).join('');
 }
 
@@ -650,9 +650,8 @@ function renderDiff(path: string, lines: DiffLine[], pr: PrDetail, full: DiffLin
   }).join('');
   // Threads on lines this diff doesn't show (outdated, or outside the changed hunks), and findings without a
   // line, still need a home.
-  const inFull = (side: 'RIGHT' | 'LEFT', line: number | null) => line != null && full.some((l) => l.kind !== 'gap' && (side === 'LEFT' ? l.oldNo : l.newNo) === line && (side === 'LEFT') === (l.kind === 'del'));
-  const elsewhere = here.filter((t) => !inFull('RIGHT', t.line));
-  const loose = drafts.filter((d) => !inFull(d.side, d.line));
+  const elsewhere = here.filter((t) => !inDiff(full, 'RIGHT', t.line));
+  const loose = drafts.filter((d) => !inDiff(full, d.side, d.line));
   return (elsewhere.length || loose.length ? `<div class="outside"><span class="lbl">Comments on lines not shown here</span>${elsewhere.map((t) => threadCard(t, pr)).join('')}${loose.map(draftCard).join('')}</div>` : '') + out;
 }
 
@@ -663,11 +662,11 @@ function threadCard(t: Thread, pr: PrDetail): string {
   const c = view.composer;
   const composing = c && c.replyTo === t.id && !c.editId;
   // Once you've answered it (a reply is held back), just offer another reply.
-  const acts = t.resolved ? '' : replies.length ? `<div class="tacts"><button class="link" data-reply="${esc(t.id)}">Reply</button></div>` : `<div class="tacts">
+  const acts = t.resolved ? '' : replies.length ? `<div class="tacts"><button class="link" data-reply="${esc(t.id)}">Reply</button><button class="link" data-resolvethread="${esc(t.id)}" ${h.busy ? 'disabled' : ''} title="Resolve this conversation now, as on GitHub">Resolve</button></div>` : `<div class="tacts">
       <button class="btn sm fix" data-thread="${esc(t.id)}" title="Send this finding to your AI agent to fix">${I.spark}Fix it</button>
       <button class="btn sm" data-reply="${esc(t.id)}" data-prefill="Agreed, please fix this. " title="Held back as a reply, sent with your review">Ask the author</button>
       <button class="btn sm" data-reply="${esc(t.id)}" data-resolve="1" data-prefill="Not an issue: " title="A reply that also resolves the thread when your review is sent">Not an issue</button>
-      <button class="link" data-reply="${esc(t.id)}">Reply</button></div>`;
+      <button class="link" data-reply="${esc(t.id)}">Reply</button><button class="link" data-resolvethread="${esc(t.id)}" ${h.busy ? 'disabled' : ''} title="Resolve this conversation now, as on GitHub">Resolve</button></div>`;
   return `<div class="tcard ${t.resolved ? 'resolved' : ''} ${view.finding === t.id ? 'current' : ''}" data-thread-id="${esc(t.id)}">
     <div class="tch">${I.com}${sevChip(t.severity)}<span class="pill ${t.resolved ? '' : 'need'}">${t.resolved ? 'Resolved' : 'Unresolved'}</span>${t.outdated ? '<span class="pill">Outdated</span>' : ''}${t.line ? `<span class="mono tl">line ${t.line}</span>` : ''}</div>
     ${t.comments.map((cm) => comment(cm, '')).join('')}${replies.map(draftCard).join('')}${composing ? composerBox(c!) : acts}</div>`;
@@ -677,8 +676,8 @@ function threadCard(t: Thread, pr: PrDetail): string {
 function draftCard(d: Draft): string {
   const c = view.composer;
   if (c?.editId === d.id) return composerBox(c);
-  return `<div class="drf ${d.from} ${view.finding === d.id ? 'current' : ''}" data-draft-id="${esc(d.id)}"><div class="drh"><span class="chip pend">Pending</span>${d.from === 'agent' ? `<span class="chip agent">${I.spark}From your agent</span>` : ''}${sevChip(d.severity)}${d.resolve ? '<span class="chip">Resolves the thread</span>' : ''}
-    <span class="end"><button class="link" data-edit="${esc(d.id)}">Edit</button><button class="link" data-del="${esc(d.id)}">Delete</button>${d.from === 'agent' ? `<button class="btn sm" data-keep="${esc(d.id)}">Keep</button>` : ''}</span></div>
+  return `<div class="drf ${d.from} ${view.finding === d.id ? 'current' : ''}" data-draft-id="${esc(d.id)}"><div class="drh"><span class="chip pend">${d.sent ? 'In your review on GitHub' : 'Pending'}</span>${d.from === 'agent' ? `<span class="chip agent">${I.spark}From your agent</span>` : ''}${sevChip(d.severity)}${d.resolve ? '<span class="chip">Resolves the thread</span>' : ''}
+    <span class="end">${d.sent ? '' : `<button class="link" data-edit="${esc(d.id)}">Edit</button>`}<button class="link" data-del="${esc(d.id)}">Delete</button>${d.from === 'agent' ? `<button class="btn sm" data-keep="${esc(d.id)}">Keep</button>` : ''}</span></div>
     <div class="drb">${esc(d.body.replace(/^\*\*P[0-3]\*\*\s*/, ''))}</div></div>`;
 }
 
@@ -736,25 +735,12 @@ function compose(pr: PrDetail): string {
  * or answered (with Ask again).
  */
 function actionState(pr: PrDetail, a: CommentAction, i: number, h: HostState): string {
-  const asked = lastComment(pr.conversation, (c) => c.author === h.user && c.text.trim() === a.comment.trim());
-  const reply = a.reviewer ? lastReplyFrom(pr.conversation, a.reviewer) : null;
+  const { asked, reply } = askAndReply(pr.conversation, a, h.user);
   const replied = reply && (!asked || Date.parse(reply.createdAt) >= Date.parse(asked.createdAt));
   const btn = (label: string, cls: string) => `<button class="btn sm ${cls}" data-action="${i}" ${h.busy ? 'disabled' : ''} title="Posts “${esc(a.comment)}”">${esc(label)}</button>`;
   if (replied) return `<span class="act"><span class="sub">${I.check}${esc(who(reply!.author))} replied ${ago(reply!.createdAt)} ago</span>${btn('Ask again', 'link-ish')}</span>`;
   if (asked && a.reviewer) return `<span class="act"><span class="sub"><span class="spin sm"></span>Asked ${ago(asked.createdAt)} ago · waiting for a reply</span></span>`;
   return `<span class="act">${btn(a.label, 'fix')}</span>`;
-}
-
-function lastComment(items: ConversationItem[], match: (c: Comment) => boolean): Comment | null {
-  const all = items.flatMap((it) => (it.kind === 'thread' ? it.comments : [it.comment])).filter(match);
-  return all.sort((x, y) => Date.parse(y.createdAt) - Date.parse(x.createdAt))[0] ?? null;
-}
-
-/** The latest comment from an account; "chatgpt-codex-connector" matches its bot login too. */
-function lastReplyFrom(items: ConversationItem[], reviewer: string): Comment | null {
-  const who = (s: string) => s.toLowerCase().replace(/\[bot\]$/, '');
-  const mine = items.flatMap((it) => (it.kind === 'thread' ? it.comments : [it.comment])).filter((c) => who(c.author) === who(reviewer));
-  return mine.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0] ?? null;
 }
 
 function description(pr: PrDetail): string {
@@ -804,13 +790,10 @@ function convItem(it: ConversationItem, firstNew = false): string {
   // On a thread you started, say whether it's been answered.
   const answered = !it.resolved && it.comments[0]?.author === me && last ? (last.author !== me ? `<span class="ck-s run">${I.com}${esc(who(last.author))} replied</span>` : '<span class="ck-s muted">No reply yet</span>') : '';
   const state = (it.resolved ? '<span class="pill">Resolved</span>' : '<span class="pill need">Unresolved</span>') + answered;
-  const fix = it.resolved ? '' : `<span class="end tacts-inline"><button class="btn sm fix" data-thread="${esc(it.id)}" title="Send this comment to your AI agent">${I.spark}Fix it</button><button class="btn sm" data-goto="${esc(it.id)}" title="Answer it in the diff: ask the author, or say it’s not an issue">Answer in diff</button></span>`;
+  const fix = it.resolved ? '' : `<span class="end tacts-inline"><button class="btn sm fix" data-thread="${esc(it.id)}" title="Send this comment to your AI agent">${I.spark}Fix it</button><button class="btn sm" data-goto="${esc(it.id)}" title="Answer it in the diff: ask the author, or say it’s not an issue">Answer in diff</button><button class="btn sm" data-resolvethread="${esc(it.id)}" ${host?.busy ? 'disabled' : ''} title="Resolve this conversation now, as on GitHub">Resolve</button></span>`;
   return `<article class="ci thread"${anchor} data-thread-id="${esc(it.id)}"><div class="cih">${I.com}${sevChip(it.severity)}<button class="link mono" data-goto="${esc(it.id)}" title="Show it in the diff">${esc(where)}</button>${state}${it.outdated ? '<span class="pill">Outdated</span>' : ''}${fix}</div>
     ${it.comments.map((c) => comment(c, '')).join('')}</article>`;
 }
-
-/** Bots by their product name: "Codex", not "chatgpt-codex-connector". */
-const who = (login: string) => (/codex/i.test(login) ? 'Codex' : login.replace(/\[bot\]$/, ''));
 
 function comment(c: Comment, badge: string): string {
   return `<div class="cm ${c.isNew ? 'new' : ''}"><div class="cmh"><b title="${esc(c.author)}">${esc(who(c.author))}</b>${badge}<span class="when">${ago(c.createdAt)} ago</span>${c.isNew ? '<span class="newtag">New</span>' : ''}
@@ -848,22 +831,19 @@ function render(): void {
   });
   // Redrawing replaces every scrolling area; keep where each one was (refreshes happen on their own now).
   const scrolls = SCROLLERS.map((sel) => Array.from(app.querySelectorAll<HTMLElement>(sel)).map((el) => el.scrollTop));
-  // The comment you're on stays where it is on screen, even when the comments above it are gone (dealt with)
-  // or have grown (a reply box opened).
   // The diff keeps its place while it shows the same thing; another file starts at the top.
   const paneWas = app.querySelector<HTMLElement>('.diffpane');
-  const pane = paneWas && { shows: paneWas.dataset.shows, top: paneWas.scrollTop };
-  const curEl = view.finding ? cardFor(view.finding) : null;
-  const cur = curEl && { id: view.finding!, top: curEl.getBoundingClientRect().top };
+  const pane = paneWas && { shows: paneWas.dataset.shows, top: paneWas.scrollTop, anchor: diffAnchor(paneWas) };
   app.innerHTML = err + (host.view === 'pr' ? prView(host) : queue(host)) + (view.keys ? keysHelp() : '');
   applyVars();
   SCROLLERS.forEach((sel, i) => app.querySelectorAll<HTMLElement>(sel).forEach((el, j) => { const top = scrolls[i]![j]; if (top) el.scrollTop = top; }));
   const paneNow = app.querySelector<HTMLElement>('.diffpane');
-  if (pane && paneNow && paneNow.dataset.shows === pane.shows) paneNow.scrollTop = pane.top;
-  if (cur) {
-    const el = cardFor(cur.id);
-    const pane = el?.closest<HTMLElement>('.diffpane');
-    if (el && pane) pane.scrollTop += el.getBoundingClientRect().top - cur.top;
+  if (pane && paneNow && paneNow.dataset.shows === pane.shows) {
+    paneNow.scrollTop = pane.top;
+    // What you were reading stays put, even when things above it changed: a comment dealt with, a reply box
+    // opened, or a thread gone outdated and moved to the box at the top of the file.
+    const el = pane.anchor && findAnchor(paneNow, pane.anchor.key);
+    if (el) paneNow.scrollTop += el.getBoundingClientRect().top - paneNow.getBoundingClientRect().top - pane.anchor!.top;
   }
   placeMarks();
   for (const t of typing) {
@@ -878,6 +858,22 @@ function render(): void {
     if (box) { box.value = prefill; box.focus(); box.dispatchEvent(new Event('input', { bubbles: true })); prefill = null; }
   }
 }
+
+/**
+ * What's at the top of the diff on screen, and how far down the pane: the first code line you can see, or, when a
+ * comment fills the screen, that comment. A code line comes first because comments can move (an outdated thread
+ * goes to the box at the top of the file) and the code you were reading shouldn't move with them.
+ */
+function diffAnchor(pane: HTMLElement): { key: string; top: number } | null {
+  const top = pane.getBoundingClientRect().top;
+  const bottom = top + pane.clientHeight;
+  const seen = (el: HTMLElement) => { const r = el.getBoundingClientRect(); return r.bottom > top && r.top < bottom; };
+  const el = Array.from(pane.querySelectorAll<HTMLElement>('.ln')).find(seen) ?? Array.from(pane.querySelectorAll<HTMLElement>('[data-thread-id], [data-draft-id]')).find(seen);
+  return el ? { key: anchorKey(el), top: el.getBoundingClientRect().top - top } : null;
+}
+
+const anchorKey = (el: HTMLElement) => (el.dataset.threadId ? `t:${el.dataset.threadId}` : el.dataset.draftId ? `d:${el.dataset.draftId}` : `${el.closest<HTMLElement>('[data-path]')?.dataset.path}|${el.dataset.at}`);
+const findAnchor = (pane: HTMLElement, key: string) => Array.from(pane.querySelectorAll<HTMLElement>('.ln, [data-thread-id], [data-draft-id]')).find((el) => anchorKey(el) === key);
 
 /** A mark beside the diff's scrollbar for each comment to go through, at its place in the diff; click one to go there. */
 function placeMarks(): void {
@@ -932,6 +928,8 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
       // A re-review opens the conversation on your own threads: what became of what you asked for.
       view = { ...view, pr: prKey(pr), file: null, onlyNew: false, step: start, menu: null, reviewEvent: null, composer: null, finding: null, part: null, cardOpen: false, conv: isReReview(pr) ? 'mine' : 'all' };
       vscode.setState(view);
+      // Another PR's comments won't be shown again soon: don't keep their cleaned HTML for the whole session.
+      cleaned.clear();
     }
     host = msg.state;
     render();
@@ -942,6 +940,19 @@ window.addEventListener('message', (e: MessageEvent<ToWebview>) => {
     clearTimeout((t as unknown as { timer?: number }).timer);
     // Long enough to read: about a second per 20 characters, between 2.5 and 8 seconds.
     (t as unknown as { timer?: number }).timer = window.setTimeout(() => t.classList.remove('show'), Math.min(8000, Math.max(2500, msg.text.length * 50)));
+  } else if (msg.type === 'unsent') {
+    // Sending failed after the box was cleared: put the text back where it was typed.
+    const m = msg.msg;
+    if (m.type === 'comment') { prefill = m.body; render(); }
+    else if (m.type === 'submitReview') {
+      save({ menu: 'review', reviewEvent: m.event });
+      const box = document.getElementById('rbody') as HTMLTextAreaElement | null;
+      if (box) box.value = m.body;
+    } else {
+      const { body, ...at } = m.draft;
+      save({ step: 'files', file: at.path, near: false, composer: { ...at, id: composerId(), prefill: body } });
+      document.getElementById('lbox')?.focus();
+    }
   }
 });
 
@@ -976,12 +987,13 @@ document.addEventListener('click', (e) => {
     if (/^https?:/.test(a.href)) send({ type: 'openExternal', url: a.href });
     return;
   }
-  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-open],[data-filter],[data-conv],[data-part],[data-layout],[data-cline],[data-reply],[data-edit],[data-del],[data-keep],[data-goto],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-q],[data-do]');
+  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-resolvethread],[data-open],[data-filter],[data-conv],[data-part],[data-layout],[data-cline],[data-reply],[data-edit],[data-del],[data-keep],[data-goto],[data-step],[data-fix],[data-thread],[data-action],[data-file],[data-onlynew],[data-line],[data-ext],[data-q],[data-do]');
   if (!t || (t as HTMLButtonElement).disabled) return;
   // An action picked from a menu closes it.
   if (view.menu && t.closest('.pop') && !t.dataset.part && t.dataset.do !== 'cardOpen') view.menu = null;
   const d = t.dataset;
-  if (d.open) send({ type: 'openPr', key: d.open });
+  if (d.resolvethread) { send({ type: 'resolveThread', id: d.resolvethread }); advanceFrom(d.resolvethread); }
+  else if (d.open) send({ type: 'openPr', key: d.open });
   else if (d.filter) save({ filter: d.filter as Filter });
   else if (d.layout) save({ layout: d.layout as View['layout'], sel: 0 });
   else if (d.conv) save({ conv: d.conv as View['conv'], step: 'overview' });

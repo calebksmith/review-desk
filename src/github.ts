@@ -65,6 +65,8 @@ export class GitHubSource implements DataSource {
   private readonly octokit: Octokit;
   private login: string | null = null;
   private allowance: Budget | null = null;
+  /** Failed jobs already looked up, by job id: a finished job's steps and log don't change. */
+  private readonly failures = new Map<number, Pick<CheckRun, 'failedStep' | 'excerpt'>>();
 
   /** GitHub's hourly allowance as of the last queue load. */
   budget(): Budget | null { return this.allowance; }
@@ -247,12 +249,16 @@ export class GitHubSource implements DataSource {
 
   /** The failed step of an Actions job and the error lines from its log. Logs can expire; then it's just the step. */
   private async jobFailure(repo: string, jobId: number): Promise<Pick<CheckRun, 'failedStep' | 'excerpt'>> {
+    const known = this.failures.get(jobId);
+    if (known) return known;
     let failedStep: string | null = null;
     try {
       const job = await this.octokit.actions.getJobForWorkflowRun({ ...at(repo), job_id: jobId });
       failedStep = job.data.steps?.find((st) => st.conclusion === 'failure')?.name ?? null;
       const log = await this.octokit.actions.downloadJobLogsForWorkflowRun({ ...at(repo), job_id: jobId });
-      return { failedStep, excerpt: typeof log.data === 'string' ? logExcerpt(log.data) : null };
+      const found = { failedStep, excerpt: typeof log.data === 'string' ? logExcerpt(log.data) : null };
+      this.failures.set(jobId, found);
+      return found;
     } catch {
       return { failedStep, excerpt: null };
     }
@@ -285,12 +291,15 @@ export class GitHubSource implements DataSource {
   async submitReview(pr: PrDetail, event: ReviewEvent, body: string, drafts: Draft[]): Promise<Sent> {
     const existing = await this.pendingReviewId(pr);
     const id = existing ?? (await this.startReview(pr));
+    const added: string[] = [];
     try {
-      await this.addToReview(id, pr, drafts);
+      await this.addToReview(id, pr, drafts, added);
       await this.octokit.graphql('mutation($id: ID!, $event: PullRequestReviewEvent!, $body: String) { submitPullRequestReview(input: { pullRequestReviewId: $id, event: $event, body: $body }) { clientMutationId } }', { id, event, body: body || null });
     } catch (err) {
       // A review this call started and couldn't finish would block the next one; one you started stays yours.
       if (!existing) await this.discardReview(id);
+      // In a review of yours, the comments added so far stay in it: name them, so a retry doesn't post them twice.
+      else if (err instanceof Error) Object.assign(err, { added });
       throw err;
     }
     return this.resolveAll(drafts);
@@ -339,8 +348,9 @@ export class GitHubSource implements DataSource {
   }
 
   /** New comments on lines become threads in the review; replies join their threads, as part of the same review. */
-  private async addToReview(id: string, pr: PrDetail, drafts: Draft[]): Promise<void> {
+  private async addToReview(id: string, pr: PrDetail, drafts: Draft[], added: string[] = []): Promise<void> {
     for (const d of drafts) {
+      if (d.sent) { added.push(d.id); continue; }
       if (d.replyTo) {
         await this.octokit.graphql('mutation($id: ID!, $thread: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewId: $id, pullRequestReviewThreadId: $thread, body: $body }) { clientMutationId } }', { id, thread: d.replyTo, body: d.body });
       } else if (d.line != null) {
@@ -348,11 +358,16 @@ export class GitHubSource implements DataSource {
         await this.octokit.graphql('mutation($id: ID!, $path: String!, $line: Int!, $side: DiffSide!, $startLine: Int, $startSide: DiffSide, $body: String!) { addPullRequestReviewThread(input: { pullRequestReviewId: $id, path: $path, line: $line, side: $side, startLine: $startLine, startSide: $startSide, body: $body }) { clientMutationId } }',
           { id, path: d.path, line: d.line, side: d.side, body: d.body, startLine: null, startSide: null, ...range });
       }
+      added.push(d.id);
     }
   }
 
   private async discardReview(id: string): Promise<void> {
     await this.octokit.graphql('mutation($id: ID!) { deletePullRequestReview(input: { pullRequestReviewId: $id }) { clientMutationId } }', { id }).catch(() => {});
+  }
+
+  async resolveThread(_pr: PrDetail, threadId: string): Promise<void> {
+    await this.resolve(threadId);
   }
 
   private async resolve(threadId: string): Promise<void> {

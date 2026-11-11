@@ -50,17 +50,27 @@ const all = (items: ConversationItem[]): Comment[] => items.flatMap((it) => (it.
 export function waiting(pr: PrDetail, actions: CommentAction[], me: string): boolean {
   if (pr.state !== 'open') return false;
   if (pr.checks.pending) return true;
-  const comments = all(pr.conversation);
-  const who = (s: string) => s.toLowerCase().replace(/\[bot\]$/, '');
   return actions.some((a) => {
-    if (!a.reviewer) return false;
-    const asked = comments.filter((c) => c.author === me && c.text.trim() === a.comment.trim()).at(-1);
-    if (!asked) return false;
-    return !comments.some((c) => who(c.author) === who(a.reviewer!) && Date.parse(c.createdAt) >= Date.parse(asked.createdAt));
+    const { asked, reply } = askAndReply(pr.conversation, a, me);
+    return !!a.reviewer && !!asked && !(reply && Date.parse(reply.createdAt) >= Date.parse(asked.createdAt));
   });
 }
 
-const name = (login: string) => (/codex/i.test(login) ? 'Codex' : login.replace(/\[bot\]$/, ''));
+/**
+ * For a one-click comment: the last time you posted it, and its reviewer's latest comment. The reviewer's name
+ * matches its bot login too ("chatgpt-codex-connector" and "chatgpt-codex-connector[bot]").
+ */
+export function askAndReply(items: ConversationItem[], a: CommentAction, me: string): { asked: Comment | null; reply: Comment | null } {
+  const bare = (s: string) => s.toLowerCase().replace(/\[bot\]$/, '');
+  const latest = (match: (c: Comment) => boolean) => all(items).filter(match).sort((x, y) => Date.parse(y.createdAt) - Date.parse(x.createdAt))[0] ?? null;
+  return {
+    asked: latest((c) => c.author === me && c.text.trim() === a.comment.trim()),
+    reply: a.reviewer ? latest((c) => bare(c.author) === bare(a.reviewer!)) : null,
+  };
+}
+
+/** Bots by their product name: "Codex", not "chatgpt-codex-connector". */
+export const who = (login: string) => (/codex/i.test(login) ? 'Codex' : login.replace(/\[bot\]$/, ''));
 
 /**
  * What arrived on a PR between two loads, in one line: findings and comments by who left them, new commits,
@@ -72,11 +82,11 @@ export function whatArrived(before: PrDetail, after: PrDetail, me: string): stri
   const threadIds = new Set(before.conversation.filter((it) => it.kind === 'thread').map((it) => (it.kind === 'thread' ? it.id : '')));
   const findings = after.conversation.filter((it) => it.kind === 'thread' && !threadIds.has(it.id) && it.severity != null);
   const byWho = new Map<string, number>();
-  for (const it of findings) if (it.kind === 'thread') byWho.set(name(it.comments[0]?.author ?? ''), (byWho.get(name(it.comments[0]?.author ?? '')) ?? 0) + 1);
+  for (const it of findings) if (it.kind === 'thread') byWho.set(who(it.comments[0]?.author ?? ''), (byWho.get(who(it.comments[0]?.author ?? '')) ?? 0) + 1);
   for (const [w, n] of byWho) parts.push(`${w} left ${plural(n, 'finding')}`);
   const findingComments = new Set(findings.flatMap((it) => (it.kind === 'thread' ? it.comments : [])));
   const fresh = all(after.conversation).filter((c) => !seen.has(c.url + c.createdAt) && c.author !== me && !findingComments.has(c));
-  const commenters = [...new Set(fresh.map((c) => name(c.author)))];
+  const commenters = [...new Set(fresh.map((c) => who(c.author)))];
   if (commenters.length) parts.push(`${commenters.join(', ')} commented`);
   if (after.headSha !== before.headSha) parts.push(`${after.author} pushed new commits`);
   if (before.checks.pending && !after.checks.pending) parts.push(after.checks.failed ? `checks finished: ${plural(after.checks.failed, 'failing')}` : 'checks passed');
